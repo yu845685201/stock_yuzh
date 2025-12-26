@@ -1,0 +1,38 @@
+# 基本面数据采集性能优化配置
+# 保守优化方案 - 预期2-3倍性能提升
+
+# API限流优化配置
+rate_limit_optimized:
+  # 优化后的限流参数
+  calls_per_period: 100        # 从50提升到100
+  sleep_duration: 1.0          # 保持1秒休眠
+  enabled: true
+
+# 并发处理配置
+concurrent_processing:
+  # 并发线程数控制（保守设置，避免触及baostock限制）
+  max_workers: 6               # 6个并发线程
+  # 每个线程处理的批次大小
+  batch_size_per_worker: 200   # 每个线程处理200只股票
+
+# 批量处理优化
+batch_processing:
+  # 数据库写入批量大小
+  db_batch_size: 800           # 从100提升到800
+  # CSV写入批量大小
+  csv_batch_size: 1000         # 从100提升到1000
+
+# 连接池优化
+connection_pool:
+  # 增加连接池大小以支持并发
+  min_connections: 4           # 从2提升到4
+  max_connections: 15          # 从10提升到15
+
+# 性能监控配置
+performance_monitoring:
+  # 启用详细的性能统计
+  enabled: true
+  # 采集间隔（秒）
+  collection_interval: 10
+  # 保存性能报告
+  save_reports: true

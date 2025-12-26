@@ -41,6 +41,9 @@ A股盘后静态分析系统
 # 项目结构规范
 
 ## 目录结构
+
+工作空间根目录绝对路径为：/Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh
+
 ```
 项目根目录/
 ├── backend/           # 后端代码

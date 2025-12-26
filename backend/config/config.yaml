@@ -1,0 +1,130 @@
+# A股盘后静态分析系统配置文件
+
+# 环境配置 (uat/prod)
+env: uat
+
+# 数据库配置
+database:
+  uat:
+    host: 127.0.0.1
+    port: 5432
+    user: postgres
+    password: yuzh1234
+    database: stock_analysis_uat
+  prod:
+    host: 127.0.0.1
+    port: 5432
+    user: postgres
+    password: yuzh1234
+    database: stock_analysis
+  # 连接池配置
+  pool:
+    enabled: true
+    min_connections: 8
+    max_connections: 25
+
+# 数据路径配置
+data_paths:
+  uat:
+    csv: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/uat/data
+    vipdoc: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/uat/vipdoc
+  prod:
+    csv: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/prod/data
+    vipdoc: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/prod/vipdoc
+
+# 数据源配置
+data_sources:
+  pytdx:
+    enabled: true
+    vipdoc_path: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/uat/vipdoc
+  baostock:
+    enabled: true
+
+# API限流配置
+rate_limit:
+  # 是否启用限流
+  enabled: true
+  # 每个周期的API调用次数限制
+  # 设置为0或负数时表示不限流
+  calls_per_period: 50
+  # 达到限制后的休眠时间（秒）
+  sleep_duration: 1.0
+  # 重试策略
+  retry:
+    # 限流异常时的最大重试次数
+    max_attempts: 3
+    # 重试间隔时间（秒）
+    retry_delay: 0.1
+
+
+# 性能优化配置
+performance:
+
+# 稳定性增强配置
+stability:
+  # 智能重试机制
+  retry:
+    max_attempts: 5                     # 最大重试次数
+    backoff_factor: 2                   # 指数退避因子
+    jitter: true                        # 启用抖动避免集中重试
+    max_delay: 60                       # 最大延迟时间(秒)
+
+  # 熔断器配置
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 10               # 失败阈值
+    recovery_timeout: 60                # 恢复超时时间(秒)
+    half_open_max_calls: 5              # 半开状态最大调用数
+
+  # 资源监控配置
+  resource_monitor:
+    enabled: true
+    memory_threshold: 90                # 内存使用阈值(%) (修复: 避免误判，适应macOS内存管理特性)
+    cpu_threshold: 85                   # CPU使用阈值(%)
+    disk_threshold: 90                  # 磁盘使用阈值(%)
+    check_interval: 5                   # 检查间隔(秒) (新增: 减少性能影响)
+
+  # 数据一致性保障
+  data_consistency:
+    enabled: true
+    validation_rules:                   # 数据验证规则
+      - check_completeness: true
+      - check_consistency: true
+      - check_duplicates: true
+    transaction_timeout: 30             # 事务超时时间(秒)
+
+# 同步配置
+sync:
+  batch_size: 1000
+  max_retries: 3
+  timeout: 30
+  # 5分钟数据默认配置
+  5min_data:
+    # 默认开始日期（YYYY-MM-DD格式）
+    default_start_date: '2025-12-01'
+    # 最大处理天数限制
+    max_days: 30
+    # 测试模式下的股票数量限制
+    test_max_stocks: 10
+
+# CSV文件管理配置
+csv:
+  file_management:
+    # 默认文件管理模式: overwrite(覆盖)，符合产品设计文档要求
+    mode: overwrite
+    # 备份配置 - 根据产品设计文档要求，不需要备份机制
+    backup:
+      enabled: false
+      directory: .backup
+      max_files: 10
+    # 按数据类型的特定设置 - 统一配置为覆盖模式
+    per_type_settings:
+      # 所有数据类型统一使用覆盖模式，符合"先删除已存在文件"要求
+      base_stock_info:
+        mode: overwrite
+      his_kline_day:
+        mode: overwrite
+      his_kline_1min:
+        mode: overwrite
+      his_kline_5min:
+        mode: overwrite
