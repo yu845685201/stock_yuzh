@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, Set
 from datetime import date, datetime
 from ..config import ConfigManager
 from ..utils.csv_file_manager import CsvFileManager
+from ..utils.log_aggregator import LogAggregator
 
 
 class CsvWriter:
@@ -34,6 +35,10 @@ class CsvWriter:
         # 写入会话管理
         self._write_sessions: Dict[str, Set[str]] = {}  # session_id -> set of files written
         self._session_files: Dict[str, str] = {}  # session_id -> session description
+
+        # 静默模式和日志汇总
+        self._silent_mode = False
+        self._log_aggregator = LogAggregator()
 
     def start_write_session(self, description: str = None) -> str:
         """
@@ -81,6 +86,20 @@ class CsvWriter:
 
         self.logger.info(f"写入会话结束: {session_id}, 写入文件数: {len(files_written)}")
         return stats
+
+    def start_silent_mode(self):
+        """启动静默模式，隐藏单个文件的日志输出"""
+        self._silent_mode = True
+        self._log_aggregator.start_operation('csv')
+
+    def end_silent_mode(self):
+        """结束静默模式并显示汇总信息"""
+        if self._silent_mode:
+            self._log_aggregator.finish_operation('csv')
+            self._log_aggregator.print_summary('csv')
+            self._silent_mode = False
+
+        return self._log_aggregator.get_summary('csv')
 
     def _should_delete_file(self, filepath: str, data_type: str) -> bool:
         """
@@ -137,7 +156,7 @@ class CsvWriter:
     def _write_csv_file(self, filepath: str, data: List[Dict[str, Any]],
                        unique_keys: List[str] = None, data_type: str = None) -> None:
         """
-        写入CSV文件的通用方法 - 支持智能删除+Append模式
+        写入CSV文件的通用方法 - 按需求要求：存在同名文件则先删除再重建
 
         Args:
             filepath: 文件路径
@@ -151,9 +170,8 @@ class CsvWriter:
         # 创建目录
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
-        # 智能删除策略：检查是否需要删除现有文件
-        should_delete = self._should_delete_file(filepath, data_type)
-        if should_delete:
+        # 按需求要求：如果存在同名文件，先删除已存在文件
+        if os.path.exists(filepath):
             try:
                 os.remove(filepath)
                 self.logger.info(f"已删除旧文件: {filepath}")
@@ -163,30 +181,14 @@ class CsvWriter:
         # 准备数据
         df = pd.DataFrame(data)
 
-        # 追加模式写入
+        # 写入模式：总是创建新文件（删除重建模式）
         try:
-            # 如果文件不存在，写入header；如果存在，追加数据
-            file_exists = os.path.exists(filepath)
-            mode = 'a' if file_exists else 'w'
-            header = not file_exists
-
-            df.to_csv(filepath, mode=mode, index=False, encoding='utf-8-sig', header=header)
+            df.to_csv(filepath, mode='w', index=False, encoding='utf-8-sig', header=True)
 
             # 标记文件已写入
             self._mark_file_written(filepath)
 
-            # 避免重新读取大文件，使用累计计数
-            existing_count = 0
-            if file_exists:
-                try:
-                    # 只获取行数，不读取数据
-                    existing_count = sum(1 for _ in open(filepath, 'r', encoding='utf-8-sig')) - 1  # 减去header行
-                except Exception:
-                    # 如果获取行数失败，估算一个值
-                    existing_count = 0
-
-            total_records = existing_count + len(df)
-            self.logger.info(f"CSV文件已保存: {filepath}，本批记录数: {len(df)}，总记录数: {total_records}")
+            # 移除CSV保存明细日志，避免无意义的输出
 
         except Exception as e:
             self.logger.error(f"保存CSV文件失败: {e}")
@@ -323,17 +325,21 @@ class CsvWriter:
                     # 写入该交易日的数据（通过文件管理器统一处理，确保代码一致性）
                     self._write_csv_file(filepath, group_data, unique_keys=['ts_code', 'trade_date'], data_type='his_kline_day')
 
-                    print(f"✅ 已生成CSV文件: {filename} ({len(group_data)} 条记录)")
+                    # 静默模式下不输出单个文件日志，而是收集到汇总器中
+                    if self._silent_mode:
+                        self._log_aggregator.add_file_summary(filename, len(group_data), 'csv')
+                    else:
+                        self.logger.info(f"已生成CSV文件: {filename} ({len(group_data)} 条记录)")
 
             else:
-                print("❌ 数据中缺少trade_date字段，无法按日期分组")
+                self.logger.error("数据中缺少trade_date字段，无法按日期分组")
                 # 回退到原始方式
                 filename = self._generate_filename('his_kline_day')
                 filepath = os.path.join(dirpath, filename)
                 self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code', 'trade_date'], data_type='his_kline_day')
 
         except Exception as e:
-            print(f"❌ 按交易日期分组写入CSV失败: {e}")
+            self.logger.error(f"按交易日期分组写入CSV失败: {e}")
             # 回退到原始方式
             try:
                 filename = self._generate_filename('his_kline_day')

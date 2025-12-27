@@ -311,24 +311,7 @@ class SmartValidator:
                         'message': f'收盘价逻辑错误: {low_price} <= close({close_price}) <= {high_price} 不成立'
                     })
 
-            # 验证成交额与成交量的关系 (成交额 ≈ 成交量 * 平均价格)
-            volume = data.get('volume', 0)
-            amount = data.get('amount', 0)
-
-            if volume > 0 and amount > 0:
-                avg_price = amount / volume
-                expected_price_range = (low_price + high_price) / 2
-
-                if expected_price_range > 0:
-                    ratio = avg_price / expected_price_range
-                    if ratio < 0.1 or ratio > 10:  # 允许10倍偏差
-                        issues.append({
-                            'type': 'business_logic_issues',
-                            'field': 'amount_volume_ratio',
-                            'severity': 'warning',
-                            'message': f'成交额与成交量比例异常: {ratio:.2f}'
-                        })
-
+            
         return issues
 
     def _validate_data_consistency(self, data_type: str, data: Dict[str, Any]) -> List[Dict[str, Any]]:

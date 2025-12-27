@@ -107,12 +107,21 @@ def sync_stocks(ctx, csv, db):
 @cli.command()
 @click.option('--csv', is_flag=True, default=True, help='保存到CSV文件')
 @click.option('--db', is_flag=True, default=True, help='保存到数据库')
+@click.option('--collect-only', is_flag=True, default=False, help='只采集不保存')
+@click.option('--silent', is_flag=True, default=False, help='静默模式，隐藏实时进度日志')
+@click.option('--no-anomaly-report', is_flag=True, default=False, help='不生成异常报告')
 @click.option('--start-date', help='开始日期 (YYYY-MM-DD)')
 @click.option('--end-date', help='结束日期 (YYYY-MM-DD)')
 @click.option('--codes', help='股票代码列表，逗号分隔')
 @click.pass_context
-def sync_daily(ctx, csv, db, start_date, end_date, codes):
+def sync_daily(ctx, csv, db, collect_only, silent, no_anomaly_report, start_date, end_date, codes):
     """同步日K线数据"""
+    # 如果是只采集模式，自动设置不保存
+    if collect_only:
+        csv = False
+        db = False
+        click.echo("🔍 只采集模式：不会保存到CSV文件或数据库")
+
     # 解析日期
     start_dt = None
     end_dt = None
@@ -126,24 +135,39 @@ def sync_daily(ctx, csv, db, start_date, end_date, codes):
     if codes:
         codes_list = [code.strip() for code in codes.split(',')]
 
-    click.echo("同步日K线数据...")
-    if start_dt:
-        click.echo(f"  - 开始日期: {start_dt}")
-    if end_dt:
-        click.echo(f"  - 结束日期: {end_dt}")
-    if codes_list:
-        click.echo(f"  - 股票数量: {len(codes_list)}")
+    if not silent:
+        click.echo("同步日K线数据...")
+        if start_dt:
+            click.echo(f"  - 开始日期: {start_dt}")
+        if end_dt:
+            click.echo(f"  - 结束日期: {end_dt}")
+        if codes_list:
+            click.echo(f"  - 股票数量: {len(codes_list)}")
+        if collect_only:
+            click.echo(f"  - 模式: 只采集（不保存）")
+        if silent:
+            click.echo(f"  - 模式: 静默运行")
+        if no_anomaly_report:
+            click.echo(f"  - 异常报告: 已禁用")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
+
+    # 使用参数值
+    save_to_csv = csv
+    save_to_db = db
+
     count = sync_manager.sync_daily_data(
-        save_to_csv=csv,
-        save_to_db=db,
+        save_to_csv=save_to_csv,
+        save_to_db=save_to_db,
         start_date=start_dt,
         end_date=end_dt,
-        codes=codes_list
+        codes=codes_list,
+        silent_mode=silent,
+        generate_anomaly_report=not no_anomaly_report
     )
 
-    click.echo(f"\n✓ 日K线数据同步完成，共 {count} 条数据")
+    if not silent:
+        click.echo(f"\n✓ 日K线数据同步完成，共 {count} 条数据")
 
 
 
@@ -335,3 +359,7 @@ def main():
     # 设置日志配置，确保进度条能够正常显示
     setup_logging()
     cli()
+
+
+if __name__ == '__main__':
+    main()

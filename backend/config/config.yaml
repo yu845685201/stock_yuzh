@@ -98,6 +98,12 @@ sync:
   batch_size: 1000
   max_retries: 3
   timeout: 30
+  # 动态批次大小配置
+  batch_sizes:
+    daily_kline: 3000    # 日K线数据字段多
+    min5_kline: 5000     # 5分钟数据字段适中
+    min1_kline: 8000     # 1分钟数据字段较少
+    stock_info: 2000      # 股票信息字段多
   # 5分钟数据默认配置
   5min_data:
     # 默认开始日期（YYYY-MM-DD格式）
@@ -128,3 +134,36 @@ csv:
         mode: overwrite
       his_kline_5min:
         mode: overwrite
+
+# 异常检测配置
+anomaly_detection:
+  # 是否启用异常检测
+  enabled: true
+  # 价格范围限制（元）- 根据A股实际情况调整
+  price_range:
+    min: 0.01    # 最低价格1分钱
+    max: 1000    # 最高价格1000元（考虑茅台等高价股）
+  # 成交量限制（股）- 更合理的A股限制
+  volume_limit: 10000000000  # 100亿股
+  # 成交额限制（元）
+  amount_limit: 100000000000  # 100亿成交额
+  # 最大涨跌幅限制（%）- 考虑不同股票类型
+  max_change_rate: 20  # 普通股票限制
+  # ST股特殊配置
+  st_stock_config:
+    max_change_rate: 6  # ST股涨跌幅限制
+
+# 异常报告配置
+anomaly_reports:
+  # 是否启用异常报告生成
+  enabled: true
+  # 报告输出目录（相对于数据根目录）
+  output_dir: "anomaly_reports"
+  # 报告格式
+  formats:
+    - markdown
+  # 报告内容配置
+  content:
+    include_raw_data: true    # 是否包含原始数据
+    group_by_type: true       # 按异常类型分组
+    include_statistics: true  # 包含统计信息

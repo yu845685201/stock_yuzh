@@ -3,6 +3,7 @@
 """
 
 import time
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import date, datetime, timedelta
 from ..config import ConfigManager
@@ -10,6 +11,10 @@ from ..data_sources import PytdxSource, BaostockSource
 from ..database import DatabaseConnection, Stock, DailyData
 from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
+from ..utils.progress_tracker import MultiStageProgressTracker
+from ..utils.performance_tracker import DailyKLinePerformanceTracker
+from ..utils.log_aggregator import LogAggregator
+from ..utils.daily_kline_anomaly_detector import DailyKlineAnomalyDetector
 
 
 class SyncManager:
@@ -25,6 +30,14 @@ class SyncManager:
         self.config_manager = config_manager or ConfigManager()
         self.db_conn = DatabaseConnection(self.config_manager)
         self.csv_writer = CsvWriter(self.config_manager)
+        self.db = self.db_conn  # 简化数据库访问
+        self.logger = logging.getLogger(__name__)
+
+        # 数据库日志汇总器
+        self._db_log_aggregator = LogAggregator()
+
+        # 初始化异常检测器
+        self.anomaly_detector = DailyKlineAnomalyDetector(self.config_manager)
 
         # 初始化数据源
         self.pytdx_source = None
@@ -51,6 +64,32 @@ class SyncManager:
 
         # 初始化基本面数据管理器
         self.fundamentals_manager = FundamentalsManager(self.config_manager)
+
+    def _get_optimal_batch_size(self, data_type: str, record_count: int) -> int:
+        """
+        根据数据类型和记录数量计算最优批次大小
+
+        Args:
+            data_type: 数据类型 ('daily_kline', 'min5_kline', 'min1_kline', 'stock_info')
+            record_count: 总记录数量
+
+        Returns:
+            最优批次大小
+        """
+        # 从配置文件读取批次大小
+        batch_sizes = self.config_manager.get('sync.batch_sizes', {})
+        base_size = batch_sizes.get(data_type, 5000)
+
+        # 根据总记录数量动态调整
+        if record_count < 1000:
+            # 小数据量使用较小的批次
+            return min(1000, record_count)
+        elif record_count > 50000:
+            # 大数据量使用较大的批次
+            return min(10000, base_size * 2)
+        else:
+            # 中等数据量使用基础批次大小
+            return base_size
 
     def sync_all(self, save_to_csv: bool = True, save_to_db: bool = True) -> Dict[str, Any]:
         """
@@ -136,7 +175,9 @@ class SyncManager:
         save_to_db: bool = True,
         start_date: date = None,
         end_date: date = None,
-        codes: List[str] = None
+        codes: List[str] = None,
+        silent_mode: bool = False,
+        generate_anomaly_report: bool = True
     ) -> int:
         """
         同步日K线数据 - 严格按照功能要求直接加载通达信日K线数据
@@ -147,6 +188,7 @@ class SyncManager:
         3. 数据组装成表格结构，换手率设为NULL
         4. 基于组装后的数据生成csv文件，每个交易日生成一个csv文件
         5. 将组装后的数据写入数据表his_kline_day，使用ts_code+trade_date判断insert/update
+        6. 进行异常检测并生成报告（可选）
 
         Args:
             save_to_csv: 是否保存到CSV文件
@@ -154,17 +196,23 @@ class SyncManager:
             start_date: 开始日期，默认为2020-01-01
             end_date: 结束日期，默认为今天
             codes: 股票代码列表，为None则处理所有.day文件
+            silent_mode: 静默模式，隐藏实时进度日志
+            generate_anomaly_report: 是否生成异常报告
 
         Returns:
             同步的数据条数
         """
+        # 初始化性能跟踪器
+        perf_tracker = DailyKLinePerformanceTracker()
+
         # 严格按照要求：日期范围从2020-01-01开始
         if not start_date:
             start_date = date(2020, 1, 1)
         if not end_date:
             end_date = date.today()
 
-        print(f"开始同步日K线数据: {start_date} 至 {end_date}")
+        if not silent_mode:
+            print(f"🔄 开始采集日K线数据: {start_date} 至 {end_date}")
 
         # 1. 批量扫描所有.day文件，获取股票列表和日K线数据
         all_daily_data = []
@@ -172,10 +220,18 @@ class SyncManager:
 
         try:
             if self.pytdx_source and self.pytdx_source.connect():
-                # 批量扫描所有市场的.day文件
-                all_daily_data = self._scan_all_day_files(start_date, end_date, codes)
+                # 开始文件扫描性能跟踪
+                perf_tracker.start_file_scanning()
+
+                # 批量扫描所有市场的.day文件（带进度显示）
+                all_daily_data = self._scan_all_day_files_with_progress(
+                    start_date, end_date, codes, perf_tracker, silent_mode
+                )
+
+                # 结束文件扫描性能跟踪
                 processed_files = len(set(data['ts_code'] for data in all_daily_data))
-                print(f"成功扫描 {processed_files} 只股票的日K线数据，共 {len(all_daily_data)} 条记录")
+                perf_tracker.end_file_scanning(processed_files, len(all_daily_data))
+
             else:
                 print("❌ 无法连接到Pytdx数据源")
                 return 0
@@ -186,33 +242,127 @@ class SyncManager:
 
         if not all_daily_data:
             print("⚠️  未找到符合条件的日K线数据")
+            perf_tracker.finish()
+            perf_tracker.print_daily_summary()
             return 0
 
+        if not silent_mode:
+            print(f"✅ 日K线数据采集完成，共收集 {len(all_daily_data)} 条记录")
+
         # 3. 数据组装 - 基本面数据已删除，换手率设为NULL
+        perf_tracker.start_data_assembly()
         enriched_data = self._assemble_daily_data_with_fundamentals(all_daily_data)
-        print(f"数据组装完成，共 {len(enriched_data)} 条记录")
+        perf_tracker.end_data_assembly(len(enriched_data))
+
+        # 4. 异常检测
+        if not silent_mode:
+            print(f"🔄 开始异常检测...")
+
+        anomaly_records = self.anomaly_detector.detect_anomalies_batch(enriched_data)
+
+        # 生成异常报告
+        if generate_anomaly_report and anomaly_records:
+            try:
+                from ..reports import AnomalyReportGenerator
+                report_generator = AnomalyReportGenerator(self.config_manager)
+
+                # 构建原始数据映射
+                raw_data_map = {}
+                for record in enriched_data:
+                    key = f"{record['ts_code']}_{record['trade_date']}"
+                    raw_data_map[key] = record
+
+                # 生成报告
+                report_path = report_generator.generate_report(
+                    anomaly_records, raw_data_map, start_date
+                )
+                if report_path and not silent_mode:
+                    print(f"📄 异常报告已生成: {report_path}")
+            except Exception as e:
+                self.logger.error(f"生成异常报告失败: {e}")
+
+        if anomaly_records:
+            # 设置异常汇总信息到日志汇总器
+            anomaly_summary = self.anomaly_detector.get_anomaly_summary()
+            self._db_log_aggregator.set_anomaly_summary(anomaly_summary)
+            if not silent_mode:
+                print(f"⚠️  检测到 {len(anomaly_records)} 个异常")
+        else:
+            if not silent_mode:
+                print(f"✅ 未检测到异常")
 
         # 5. 数据持久化
         total_count = 0
+        csv_files_count = 0
+        db_batches_count = 0
+
         if enriched_data:
-            batch_size = self.config_manager.get('sync.batch_size', 5000)
+            # 使用动态批次大小优化数据库写入性能
+            batch_size = self._get_optimal_batch_size('daily_kline', len(enriched_data))
+            total_batches = (len(enriched_data) + batch_size - 1) // batch_size
+            if not silent_mode:
+                print(f"📊 使用动态批次大小: {batch_size} 条/批次，共 {total_batches} 个批次")
 
-            for i in range(0, len(enriched_data), batch_size):
-                batch = enriched_data[i:i+batch_size]
+            # CSV生成
+            if save_to_csv:
+                if not silent_mode:
+                    print(f"🔄 开始生成CSV文件...")
+                perf_tracker.start_csv_generation()
+                # 启动静默模式
+                self.csv_writer.start_silent_mode()
+                self.csv_writer.write_his_kline_day(enriched_data)
+                # 结束静默模式并获取汇总信息
+                csv_summary = self.csv_writer.end_silent_mode()
+                if not silent_mode:
+                    print(f"✅ CSV文件生成完成")
 
-                try:
-                    if save_to_csv:
-                        self.csv_writer.write_his_kline_day(batch)
-                    if save_to_db:
+                # 计算生成的CSV文件数（按交易日分组）
+                trade_dates = set(data.get('trade_date') for data in enriched_data)
+                csv_files_count = len(trade_dates)
+                perf_tracker.end_csv_generation(csv_files_count, len(enriched_data))
+
+            # 数据库写入
+            if save_to_db:
+                if not silent_mode:
+                    print(f"🔄 开始写入数据库...")
+                perf_tracker.start_database_write()
+                # 启动数据库静默模式统计
+                self._db_log_aggregator.start_operation('database')
+
+                for i in range(0, len(enriched_data), batch_size):
+                    batch = enriched_data[i:i+batch_size]
+
+                    try:
                         self._save_daily_data_to_db(batch)
+                        total_count += len(batch)
+                        db_batches_count += 1
+                        # 添加批次统计
+                        self._db_log_aggregator.add_batch_summary(1, len(batch), 'database')
 
-                    total_count += len(batch)
-                    print(f"已处理批次 {i//batch_size + 1}: {len(batch)} 条记录")
+                    except Exception as e:
+                        print(f"❌ 处理批次数据失败: {e}")
+                        self._db_log_aggregator.add_error('database', str(e))
 
-                except Exception as e:
-                    print(f"❌ 处理批次数据失败: {e}")
+                # 结束数据库静默模式并显示汇总
+                self._db_log_aggregator.finish_operation('database')
+                self._db_log_aggregator.print_summary('database')
+                print(f"✅ 数据库写入完成")
 
-        print(f"✅ 日K线数据同步完成，共处理 {total_count} 条数据，涉及 {processed_files} 只股票")
+                perf_tracker.end_database_write(total_count, db_batches_count)
+            else:
+                total_count = len(enriched_data)
+
+        # 完成性能跟踪并显示统计
+        perf_tracker.finish()
+        if not silent_mode:
+            perf_tracker.print_daily_summary()
+
+        # 显示异常汇总
+        if not silent_mode:
+            self._db_log_aggregator.print_anomaly_summary()
+
+        if not silent_mode:
+            print(f"✅ 日K线数据同步完成，共处理 {total_count} 条数据，涉及 {processed_files} 只股票")
         return total_count
 
     def _process_daily_data_according_to_requirements(self, daily_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -292,10 +442,174 @@ class SyncManager:
         """
         return self._scan_all_files(start_date, end_date, codes, 'day')
 
+    def _scan_all_day_files_with_progress(self, start_date: date, end_date: date,
+                                          codes: List[str] = None,
+                                          perf_tracker: 'DailyKLinePerformanceTracker' = None,
+                                          silent_mode: bool = False) -> List[Dict[str, Any]]:
+        """
+        批量扫描所有.day文件，获取日K线数据 - 带进度显示版本
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+            codes: 指定的股票代码列表，为None则处理所有
+            perf_tracker: 性能跟踪器
+
+        Returns:
+            日K线数据列表
+        """
+        import os
+        from ..utils.data_transformer import DataTransformer
+
+        # 文件类型参数
+        subdir = 'lday'
+        ext = '.day'
+        parse_func = DataTransformer.parse_day_file_data
+        record_size = 32
+
+        all_data = []
+        vipdoc_path = self.pytdx_source.vipdoc_path
+        markets = ['bj', 'sh', 'sz']
+
+        # 收集所有需要处理的文件
+        all_files = []
+        for market in markets:
+            market_path = os.path.join(vipdoc_path, market, subdir)
+            if not os.path.exists(market_path):
+                print(f"⚠️  市场目录不存在: {market_path}")
+                continue
+
+            try:
+                files = [f for f in os.listdir(market_path) if f.endswith(ext)]
+                if not silent_mode:
+                    print(f"📁 扫描 {market} 市场: 找到 {len(files)} 个{ext}文件")
+
+                for filename in files:
+                    if not filename.startswith(market):
+                        continue
+
+                    stock_code = filename[2:-len(ext)]  # 去掉market前缀和扩展名
+
+                    # 如果指定了codes，只处理指定的股票
+                    if codes and stock_code not in codes:
+                        continue
+
+                    all_files.append((market, filename, stock_code))
+
+            except Exception as e:
+                print(f"❌ 扫描市场目录 {market_path} 失败: {e}")
+                continue
+
+        # 如果没有文件需要处理
+        if not all_files:
+            return all_data
+
+        # 初始化进度跟踪器
+        progress_tracker = MultiStageProgressTracker()
+        progress_tracker.start_stage("文件扫描", len(all_files), "扫描.day文件")
+
+        # 预先获取股票名称映射
+        stock_names = {}
+        try:
+            ts_codes = [f"{market}.{stock_code}" for market, _, stock_code in all_files]
+            if ts_codes:
+                # 批量查询股票名称
+                fundamentals_data = self._batch_query_fundamentals_data(ts_codes)
+                missing_stock_names = self._query_missing_stock_names(ts_codes, fundamentals_data)
+
+                # 合并股票名称
+                stock_names.update({ts_code: data.get('stock_name')
+                                  for ts_code, data in fundamentals_data.items()
+                                  if data.get('stock_name')})
+                stock_names.update(missing_stock_names)
+
+                progress_tracker.set_stock_names(stock_names)
+        except Exception as e:
+            self.logger.warning(f"获取股票名称失败: {e}")
+
+        # 处理每个文件
+        for i, (market, filename, stock_code) in enumerate(all_files):
+            filepath = os.path.join(vipdoc_path, market, subdir, filename)
+            ts_code = f"{market}.{stock_code}"
+
+            # 更新进度
+            progress_tracker.update_stage("文件扫描", ts_code)
+
+            try:
+                # 读取文件数据
+                with open(filepath, 'rb') as f:
+                    file_data = []
+                    # 每条记录的字节数
+                    while True:
+                        data = f.read(record_size)
+                        if not data:
+                            break
+
+                        # 解析文件数据
+                        parsed_data = parse_func(data, stock_code, market)
+                        if parsed_data is None:
+                            continue
+
+                        trade_date = parsed_data['trade_date']
+
+                        # 过滤日期范围
+                        if start_date and trade_date < start_date:
+                            continue
+                        if end_date and trade_date > end_date:
+                            continue
+
+                        # 构建K线记录
+                        record = {
+                            'ts_code': ts_code,
+                            'stock_code': stock_code,
+                            'stock_name': stock_names.get(ts_code),  # 从预查询获取
+                            'trade_date': trade_date,
+                            'open': parsed_data['open'],
+                            'high': parsed_data['high'],
+                            'low': parsed_data['low'],
+                            'close': parsed_data['close'],
+                            'preclose': parsed_data.get('preclose'),  # 从文件解析
+                            'volume': parsed_data['volume'],
+                            'amount': parsed_data['amount'],
+                            'trade_status': None,
+                            'is_st': None,
+                            'adjust_flag': 3,  # 默认不复权
+                            'change_rate': None,  # 后续计算
+                            'turnover_rate': None,  # 后续计算
+                            'pe_ttm': None,
+                            'pb_rate': None,
+                            'ps_ttm': None,
+                            'pcf_ttm': None
+                        }
+
+                        file_data.append(record)
+
+                    # 后处理：计算涨跌幅
+                    file_data = self._post_process_daily_data(file_data)
+
+                    all_data.extend(file_data)
+
+            except Exception as e:
+                # 统一的文件读取错误处理
+                if not silent_mode:
+                    print(f"❌ 读取文件 {filepath} 失败: {e}")
+                continue
+
+        # 完成进度跟踪
+        if not silent_mode:
+            progress_tracker.finish_stage("文件扫描")
+            progress_tracker.finish_all()
+
+        file_type_name = "日K线"
+        if not silent_mode:
+            print(f"✅ 成功扫描 {len(set(data['ts_code'] for data in all_data))} 只股票的{file_type_name}数据，共 {len(all_data)} 条记录")
+
+        return all_data
+
     
     def _assemble_daily_data_with_fundamentals(self, daily_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        数据组装 - 基本面数据已删除，换手率设为NULL
+        数据组装 - 查询基本面数据并计算换手率
 
         Args:
             daily_data: 日K线数据列表
@@ -303,15 +617,49 @@ class SyncManager:
         Returns:
             组装后的日K线数据列表
         """
-        enriched_data = []
+        if not daily_data:
+            return []
 
+        # 1. 提取所有唯一的ts_code
+        ts_codes = list(set(record['ts_code'] for record in daily_data))
+
+        # 2. 批量查询基本面数据
+        fundamentals_data = self._batch_query_fundamentals_data(ts_codes)
+
+        # 3. 查询缺失的股票名称
+        missing_stock_names = self._query_missing_stock_names(ts_codes, fundamentals_data)
+
+        # 4. 组装数据并计算换手率
+        enriched_data = []
         for record in daily_data:
             enriched_record = record.copy()
-            # 基本面数据已删除，换手率设为NULL
-            enriched_record['turnover_rate'] = None
+            ts_code = record['ts_code']
+
+            # 设置股票名称
+            if ts_code in fundamentals_data and fundamentals_data[ts_code].get('stock_name'):
+                enriched_record['stock_name'] = fundamentals_data[ts_code]['stock_name']
+            elif ts_code in missing_stock_names:
+                enriched_record['stock_name'] = missing_stock_names[ts_code]
+            else:
+                enriched_record['stock_name'] = None  # 保持原有行为
+
+            # 计算换手率
+            float_share = fundamentals_data.get(ts_code, {}).get('float_share')
+            if float_share and record.get('volume'):
+                try:
+                    from ..utils.data_transformer import DataTransformer
+                    enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
+                        record['volume'], float_share
+                    )
+                except Exception as e:
+                    self.logger.warning(f"计算换手率失败 {ts_code}: {e}")
+                    enriched_record['turnover_rate'] = None
+            else:
+                enriched_record['turnover_rate'] = None
+
             enriched_data.append(enriched_record)
 
-        # 修复：基于ts_code和trade_date去重，保留最后一条记录
+        # 5. 基于ts_code和trade_date去重，保留最后一条记录
         import pandas as pd
         df = pd.DataFrame(enriched_data)
         if not df.empty:
@@ -319,6 +667,90 @@ class SyncManager:
             enriched_data = df_deduped.to_dict('records')
 
         return enriched_data
+
+    def _batch_query_fundamentals_data(self, ts_codes: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        批量查询基本面数据 - 优化性能
+
+        Args:
+            ts_codes: ts代码列表
+
+        Returns:
+            基本面数据字典 {ts_code: {stock_code, stock_name, float_share}}
+        """
+        if not ts_codes:
+            return {}
+
+        try:
+            # 构建批量查询SQL
+            query = '''
+                SELECT ts_code, stock_code, stock_name, float_share
+                FROM base_fundamentals_info
+                WHERE ts_code = ANY(%s)
+                ORDER BY disclosure_date DESC
+            '''
+
+            results = self.db.execute_query(query, (ts_codes,))
+
+            # 处理结果：保留每个ts_code的最新记录
+            fundamentals_data = {}
+            for row in results:
+                ts_code = row['ts_code']
+                # 如果还没有记录，或者当前记录更新，则保存
+                if ts_code not in fundamentals_data:
+                    fundamentals_data[ts_code] = {
+                        'stock_code': row['stock_code'],
+                        'stock_name': row['stock_name'],
+                        'float_share': row['float_share']
+                    }
+
+            self.logger.info(f"批量查询基本面数据完成: {len(fundamentals_data)}/{len(ts_codes)} 只股票")
+            return fundamentals_data
+
+        except Exception as e:
+            self.logger.error(f"批量查询基本面数据失败: {e}")
+            return {}
+
+    def _query_missing_stock_names(self, ts_codes: List[str], fundamentals_data: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """
+        查询缺失的股票名称 - 从base_stock_info表降级获取
+
+        Args:
+            ts_codes: ts代码列表
+            fundamentals_data: 已查询的基本面数据
+
+        Returns:
+            股票名称字典 {ts_code: stock_name}
+        """
+        # 找出没有股票名称的ts_code
+        missing_ts_codes = [
+            ts_code for ts_code in ts_codes
+            if ts_code not in fundamentals_data or not fundamentals_data[ts_code].get('stock_name')
+        ]
+
+        if not missing_ts_codes:
+            return {}
+
+        try:
+            # 从base_stock_info表查询股票名称
+            query = '''
+                SELECT ts_code, stock_name
+                FROM base_stock_info
+                WHERE ts_code = ANY(%s)
+            '''
+
+            results = self.db.execute_query(query, (missing_ts_codes,))
+
+            stock_names = {}
+            for row in results:
+                stock_names[row['ts_code']] = row['stock_name']
+
+            self.logger.info(f"从base_stock_info查询股票名称完成: {len(stock_names)}/{len(missing_ts_codes)} 只股票")
+            return stock_names
+
+        except Exception as e:
+            self.logger.error(f"查询股票名称失败: {e}")
+            return {}
 
     def _post_process_daily_data(self, daily_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -401,7 +833,8 @@ class SyncManager:
 
             try:
                 files = [f for f in os.listdir(market_path) if f.endswith(ext)]
-                print(f"📁 扫描 {market} 市场: 找到 {len(files)} 个{ext}文件")
+                if not silent_mode:
+                    print(f"📁 扫描 {market} 市场: 找到 {len(files)} 个{ext}文件")
 
                 for filename in files:
                     if not filename.startswith(market):

@@ -341,18 +341,48 @@ class DataTransformer:
         Returns:
             涨跌幅百分比
         """
+        result = DataTransformer.calculate_change_rate_with_details(close, preclose)
+        return result['change_rate'] if result else None
+
+    @staticmethod
+    def calculate_change_rate_with_details(close: float, preclose: float) -> Optional[Dict[str, Any]]:
+        """
+        计算涨跌幅并返回详细信息
+
+        Args:
+            close: 收盘价
+            preclose: 昨收盘价
+
+        Returns:
+            包含涨跌幅和计算详情的字典，或None
+        """
         if not close or not preclose or preclose == 0:
             return None
 
-        change_rate = round((close - preclose) / preclose * 100, 4)
+        # 计算原始涨跌幅
+        raw_change_rate = (close - preclose) / preclose * 100
+        change_rate = round(raw_change_rate, 4)
 
-        # 修复：超出数据库精度限制时截断而非设置为None
+        # 检查是否超出精度限制
+        is_truncated = False
+        truncated_value = None
+
         if abs(change_rate) >= 10000:
             # 截断到最大可存储值 9999.9999%
             change_rate = 9999.9999 if change_rate > 0 else -9999.9999
+            is_truncated = True
+            truncated_value = change_rate
             print(f"⚠️  涨跌幅超出精度限制，截断为: {change_rate}%")
 
-        return change_rate
+        return {
+            'change_rate': change_rate,
+            'raw_change_rate': round(raw_change_rate, 4),
+            'is_truncated': is_truncated,
+            'truncated_value': truncated_value,
+            'close_price': close,
+            'preclose_price': preclose,
+            'calculation': f"({close} - {preclose}) / {preclose} * 100 = {raw_change_rate:.4f}%"
+        }
 
     @staticmethod
     def calculate_turnover_rate(volume: int, float_share: float) -> Optional[float]:
