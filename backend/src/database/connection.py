@@ -395,8 +395,8 @@ class DatabaseConnection:
                 SELECT 1 FROM pg_constraint
                 WHERE conname = 'uk_base_fundamentals_info_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
             ) THEN
-                -- 根据实际表结构，使用ts_code作为唯一约束
-                ALTER TABLE base_fundamentals_info ADD CONSTRAINT uk_base_fundamentals_info_code_date UNIQUE (ts_code);
+                -- 按照产品设计文档要求，使用ts_code+disclosure_date组合作为唯一约束
+                ALTER TABLE base_fundamentals_info ADD CONSTRAINT uk_base_fundamentals_info_code_date UNIQUE (ts_code, disclosure_date);
             END IF;
         END $$;
 
@@ -432,11 +432,10 @@ class DatabaseConnection:
         (ts_code, stock_code, stock_name, disclosure_date, total_share, float_share, create_time, update_time)
         VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s, %(disclosure_date)s, %(total_share)s, %(float_share)s,
                 %(create_time)s, NOW())
-        ON CONFLICT (ts_code)
+        ON CONFLICT (ts_code, disclosure_date)
         DO UPDATE SET
             stock_code = EXCLUDED.stock_code,
             stock_name = EXCLUDED.stock_name,
-            disclosure_date = EXCLUDED.disclosure_date,
             total_share = EXCLUDED.total_share,
             float_share = EXCLUDED.float_share,
             update_time = NOW()

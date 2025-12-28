@@ -270,16 +270,17 @@ class BaostockSource(DataSourceBase):
                 row = rs.get_row_data()
                 field_names = rs.fields  # 获取字段名列表
 
-                # 使用字段名动态定位totalShare和floatShare
+                # 使用字段名动态定位totalShare和liqaShare（产品设计文档要求）
                 total_share_idx = field_names.index('totalShare') if 'totalShare' in field_names else 9
-                float_share_idx = field_names.index('floatShare') if 'floatShare' in field_names else 10
+                # 按照产品设计文档：流通股本字段为liqaShare
+                liqa_share_idx = field_names.index('liqaShare') if 'liqaShare' in field_names else 10
 
                 # 严格按照文档要求构建数据字典
                 financial_data = {
                     'stock_code': code,
                     'disclosure_date': self._get_disclosure_date(year, quarter),
                     'total_share': float(row[total_share_idx]) if row[total_share_idx] else None,  # 总股本，单位：股
-                    'float_share': float(row[float_share_idx]) if row[float_share_idx] else None  # 流通股本，单位：股
+                    'float_share': float(row[liqa_share_idx]) if row[liqa_share_idx] else None  # 流通股本（liqaShare字段），单位：股
                 }
 
                 return financial_data
@@ -366,26 +367,26 @@ class BaostockSource(DataSourceBase):
             print(f"获取基本面数据异常: {e}")
             return None
 
-    def _get_disclosure_date(self, year: int, quarter: int) -> datetime:
+    def _get_disclosure_date(self, year: int, quarter: int) -> str:
         """
-        获取信息披露日期 - 严格按照实际表结构要求
+        获取信息披露日期 - 严格按照数据模型文档要求返回yyyyMMdd格式字符串
 
         Args:
             year: 年份
             quarter: 季度
 
         Returns:
-            信息披露日期（季度末日期，timestamp类型）
+            信息披露日期（季度末日期，yyyyMMdd格式字符串）
         """
-        # 季度末日期映射 - 返回datetime以匹配timestamp字段
+        # 季度末日期映射 - 返回yyyyMMdd格式字符串，符合varchar(8)类型
         quarter_end_dates = {
-            1: datetime(year, 3, 31, 16, 0, 0),  # 下午4点作为披露时间
-            2: datetime(year, 6, 30, 16, 0, 0),
-            3: datetime(year, 9, 30, 16, 0, 0),
-            4: datetime(year, 12, 31, 16, 0, 0)
+            1: f'{year}0331',
+            2: f'{year}0630',
+            3: f'{year}0930',
+            4: f'{year}1231'
         }
 
-        return quarter_end_dates.get(quarter, datetime(year, 12, 31, 16, 0, 0))
+        return quarter_end_dates.get(quarter, f'{year}1231')
 
     def get_minute_data(
         self,

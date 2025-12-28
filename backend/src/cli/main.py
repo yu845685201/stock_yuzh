@@ -266,13 +266,31 @@ def sync_5min(ctx, csv, db, start_date, end_date, codes):
 @click.option('--qps-limit', type=int, help='QPS限制，设置为0或负数表示不限流（覆盖配置文件设置）')
 @click.option('--max-workers', type=int, default=6, help='最大并发线程数，默认6（第三阶段优化）')
 @click.option('--concurrent', is_flag=True, default=True, help='启用并发处理（第三阶段优化）')
+@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段(1992Q3至今)')
+@click.option('--year', type=int, help='指定年份（与--quarter配合使用）')
+@click.option('--quarter', type=click.Choice(['1', '2', '3', '4']), help='指定季度1-4（与--year配合使用）')
+@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
 @click.pass_context
-def sync_fundamentals(ctx, batch_size, dry_run, list_status, qps_limit, max_workers, concurrent):
-    """同步股票基本面数据"""
+def sync_fundamentals(ctx, batch_size, dry_run, list_status, qps_limit, max_workers, concurrent, init_mode, year, quarter, codes):
+    """同步股票基本面数据 - 支持三种采集方式：数据初始化/增量更新/指定股票和时间"""
     click.echo("开始同步股票基本面数据...")
     click.echo(f"  - 批次大小: {batch_size}")
     click.echo(f"  - 试运行模式: {'是' if dry_run else '否'}")
     click.echo(f"  - 上市状态: {list_status}")
+    
+    # 采集模式提示
+    if init_mode:
+        click.echo(f"  - 采集模式: 数据初始化（1992Q3至今全时段）")
+    elif year and quarter:
+        click.echo(f"  - 采集模式: 指定时间（{year}年Q{quarter}）")
+    else:
+        click.echo(f"  - 采集模式: 增量更新（最近两个季度）")
+    
+    # 解析股票代码列表
+    ts_codes = None
+    if codes:
+        ts_codes = [code.strip() for code in codes.split(',')]
+        click.echo(f"  - 指定股票: {len(ts_codes)}只")
 
     # 处理QPS限制
     if qps_limit is not None:
@@ -292,12 +310,16 @@ def sync_fundamentals(ctx, batch_size, dry_run, list_status, qps_limit, max_work
         'dry_run': dry_run,
         'list_status': list_status,
         'max_workers': max_workers,
-        'concurrent': concurrent
+        'concurrent': concurrent,
+        'init_mode': init_mode,
+        'year': year,
+        'quarter': int(quarter) if quarter else None,
+        'ts_codes': ts_codes
     }
 
     # 根据并发参数选择处理方式
     if concurrent:
-        from ..sync.concurrent_fundamentals_manager import sync_fundamentals_data_concurrent
+        from src.sync.concurrent_fundamentals_manager import sync_fundamentals_data_concurrent
         result = sync_fundamentals_data_concurrent(ctx.obj['config_manager'], **options)
     else:
         result = sync_manager.sync_fundamentals_data(**options)

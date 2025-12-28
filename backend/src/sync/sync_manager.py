@@ -1458,6 +1458,21 @@ class SyncManager:
             batch = stocks[i:i+batch_size]
             values = []
             for stock in batch:
+                # 处理日期格式转换
+                list_date = stock.get('list_date')
+                delist_date = stock.get('delist_date')
+
+                # 将日期对象转换为yyyyMMdd格式的字符串
+                if list_date and hasattr(list_date, 'strftime'):
+                    list_date = list_date.strftime('%Y%m%d')
+                elif list_date is None:
+                    list_date = None
+
+                if delist_date and hasattr(delist_date, 'strftime'):
+                    delist_date = delist_date.strftime('%Y%m%d')
+                elif delist_date is None:
+                    delist_date = None
+
                 # 直接从字典获取数据，避免模型转换问题
                 values.append((
                     stock.get('ts_code'),
@@ -1472,8 +1487,8 @@ class SyncManager:
                     stock.get('industry_code'),
                     stock.get('industry_name') or stock.get('industry'),
                     stock.get('list_status') or stock.get('status'),
-                    stock.get('list_date'),
-                    stock.get('delist_date')
+                    list_date,
+                    delist_date
                 ))
 
             query = """

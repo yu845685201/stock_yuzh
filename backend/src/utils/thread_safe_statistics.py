@@ -56,7 +56,7 @@ class ThreadSafeStatistics:
             result: CollectionResult对象
         """
         with self.lock:
-            self.total_stocks += 1
+            # self.total_stocks += 1  # 不要累加总数，总数已在开始时设置
 
             if result.execution_time:
                 if result.is_success:

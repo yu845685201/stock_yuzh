@@ -16,7 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadSafeBaostockSource:
-    """线程安全的Baostock数据源，使用线程本地存储实现连接隔离"""
+    """线程安全的Baostock数据源，使用全局连接状态确保只login一次"""
+
+    # 类级别的全局连接状态和锁
+    _connection_lock = threading.Lock()
+    _is_connected = False
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -27,9 +31,6 @@ class ThreadSafeBaostockSource:
         """
         self.config = config
         self.data_path = config.get('data_path', 'uat/data')
-
-        # 线程本地存储
-        self._local = threading.local()
 
         # 初始化API限流器（线程安全）
         financial_rate_limit_config = config.get('financial_data_rate_limit', {})
@@ -42,47 +43,58 @@ class ThreadSafeBaostockSource:
         else:
             self.rate_limiter = ApiRateLimiter(enabled=False)
 
+    def connect(self) -> bool:
+        """
+        连接baostock - 使用全局锁确保只执行一次login
+        
+        Returns:
+            bool: 连接是否成功
+        """
+        with ThreadSafeBaostockSource._connection_lock:
+            if not ThreadSafeBaostockSource._is_connected:
+                try:
+                    lg = bs.login()
+                    ThreadSafeBaostockSource._is_connected = lg.error_code == '0'
+                    if not ThreadSafeBaostockSource._is_connected:
+                        logger.error(f"Baostock登录失败: {lg.error_msg}")
+                        return False
+                    logger.debug("Baostock全局连接成功")
+                    return True
+                except Exception as e:
+                    logger.error(f"Baostock连接异常: {e}")
+                    return False
+            return True
+
+    def disconnect(self) -> None:
+        """
+        断开baostock连接 - 使用全局锁确保只执行一次logout
+        """
+        with ThreadSafeBaostockSource._connection_lock:
+            if ThreadSafeBaostockSource._is_connected:
+                try:
+                    bs.logout()
+                    ThreadSafeBaostockSource._is_connected = False
+                    logger.debug("Baostock全局连接已断开")
+                except Exception as e:
+                    logger.error(f"Baostock断开异常: {e}")
+
     def _ensure_connection(self) -> bool:
         """
-        确保当前线程有有效的baostock连接
+        确保有有效的baostock连接（直接调用connect方法）
 
         Returns:
             bool: 连接是否成功
         """
-        if not hasattr(self._local, 'connected') or not self._local.connected:
-            try:
-                lg = bs.login()
-                self._local.connected = lg.error_code == '0'
-                if not self._local.connected:
-                    logger.error(f"Baostock登录失败: {lg.error_msg}")
-                    return False
-                logger.debug(f"线程 {threading.current_thread().name} Baostock连接成功")
-                return True
-            except Exception as e:
-                logger.error(f"线程 {threading.current_thread().name} Baostock连接异常: {e}")
-                return False
-        return True
+        return self.connect()
 
     def _get_connection_status(self) -> bool:
         """
-        获取当前线程的连接状态
+        获取全局连接状态
 
         Returns:
             bool: 是否已连接
         """
-        return getattr(self._local, 'connected', False)
-
-    def disconnect(self) -> None:
-        """
-        断开当前线程的baostock连接
-        """
-        if hasattr(self._local, 'connected') and self._local.connected:
-            try:
-                bs.logout()
-                self._local.connected = False
-                logger.debug(f"线程 {threading.current_thread().name} Baostock连接已断开")
-            except Exception as e:
-                logger.error(f"线程 {threading.current_thread().name} Baostock断开异常: {e}")
+        return ThreadSafeBaostockSource._is_connected
 
     def get_stock_list(self) -> List[Dict[str, Any]]:
         """获取股票列表 - 线程安全版本"""
@@ -153,7 +165,9 @@ class ThreadSafeBaostockSource:
 
     def get_financial_data(self, code: str, year: int, quarter: int) -> Optional[Dict[str, Any]]:
         """获取财务数据 - 线程安全版本"""
-        if not self._ensure_connection():
+        # 检查全局连接状态（连接由execute_sync统一管理）
+        if not ThreadSafeBaostockSource._is_connected:
+            logger.debug("Baostock未连接，跳过获取财务数据")
             return None
 
         try:
@@ -172,16 +186,17 @@ class ThreadSafeBaostockSource:
                 row = rs.get_row_data()
                 field_names = rs.fields
 
-                # 使用字段名动态定位totalShare和floatShare
+                # 使用字段名动态定位totalShare和liqaShare（产品设计文档要求）
                 total_share_idx = field_names.index('totalShare') if 'totalShare' in field_names else 9
-                float_share_idx = field_names.index('floatShare') if 'floatShare' in field_names else 10
+                # 按照产品设计文档：流通股本字段为liqaShare
+                liqa_share_idx = field_names.index('liqaShare') if 'liqaShare' in field_names else 10
 
                 # 构建数据字典
                 financial_data = {
                     'stock_code': code,
                     'disclosure_date': self._get_disclosure_date(year, quarter),
                     'total_share': float(row[total_share_idx]) if row[total_share_idx] else None,
-                    'float_share': float(row[float_share_idx]) if row[float_share_idx] else None
+                    'float_share': float(row[liqa_share_idx]) if row[liqa_share_idx] else None  # liqaShare字段
                 }
 
                 return financial_data
@@ -203,7 +218,9 @@ class ThreadSafeBaostockSource:
         Returns:
             基本面数据字典，包含总股本和流通股本
         """
-        if not self._ensure_connection():
+        # 检查全局连接状态（连接由execute_sync统一管理）
+        if not ThreadSafeBaostockSource._is_connected:
+            logger.debug("Baostock未连接，跳过获取基本面数据")
             return None
 
         try:
@@ -266,25 +283,26 @@ class ThreadSafeBaostockSource:
             logger.error(f"获取基本面数据异常: {e}")
             return None
 
-    def _get_disclosure_date(self, year: int, quarter: int) -> datetime:
+    def _get_disclosure_date(self, year: int, quarter: int) -> str:
         """
-        获取信息披露日期
+        获取信息披露日期 - 严格按照数据模型文档要求返回yyyyMMdd格式字符串
 
         Args:
             year: 年份
             quarter: 季度
 
         Returns:
-            信息披露日期（季度末日期，datetime类型）
+            信息披露日期（季度末日期，yyyyMMdd格式字符串）
         """
+        # 季度末日期映射 - 返回yyyyMMdd格式字符串，符合varchar(8)类型
         quarter_end_dates = {
-            1: datetime(year, 3, 31, 16, 0, 0),
-            2: datetime(year, 6, 30, 16, 0, 0),
-            3: datetime(year, 9, 30, 16, 0, 0),
-            4: datetime(year, 12, 31, 16, 0, 0)
+            1: f'{year}0331',
+            2: f'{year}0630',
+            3: f'{year}0930',
+            4: f'{year}1231'
         }
 
-        return quarter_end_dates.get(quarter, datetime(year, 12, 31, 16, 0, 0))
+        return quarter_end_dates.get(quarter, f'{year}1231')
 
     def __enter__(self):
         """上下文管理器入口"""

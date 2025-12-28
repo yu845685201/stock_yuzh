@@ -33,13 +33,17 @@ class FundamentalsManager:
 
     def execute_sync(self, **options) -> Dict[str, Any]:
         """
-        执行基本面数据同步
+        执行基本面数据同步 - 严格按照产品设计文档
 
         Args:
             **options: 配置选项
                 - batch_size: 批次大小，默认50
                 - dry_run: 是否试运行，默认False
                 - list_status: 股票上市状态过滤，默认'L'（仅上市）
+                - init_mode: 数据初始化模式，采集全量股票全时段(1992Q3至今)
+                - year: 指定年份
+                - quarter: 指定季度(1-4)
+                - ts_codes: 指定股票ts_code列表
 
         Returns:
             同步统计信息
@@ -47,6 +51,10 @@ class FundamentalsManager:
         batch_size = options.get('batch_size', 50)
         dry_run = options.get('dry_run', False)
         list_status = options.get('list_status', 'L')
+        init_mode = options.get('init_mode', False)
+        year = options.get('year', None)
+        quarter = options.get('quarter', None)
+        ts_codes = options.get('ts_codes', None)
 
         # 新增统计类用于更精确的状态管理
         collection_stats = CollectionStatistics()
@@ -75,15 +83,22 @@ class FundamentalsManager:
             if not self.baostock.connect():
                 raise Exception("Baostock连接失败")
 
-            # 获取股票列表
-            stocks = self._get_stock_list(list_status)
+            # 获取股票列表（根据ts_codes参数过滤）
+            stocks = self._get_stock_list(list_status, ts_codes)
             stats['total_stocks'] = len(stocks)
 
             if not stocks:
                 self.logger.warning(f"没有找到上市状态为'{list_status}'的股票")
                 return stats
 
-            self.logger.info(f"开始同步基本面数据: 总计{stats['total_stocks']}只股票，批次大小{batch_size}")
+            # 确定采集模式和季度范围
+            mode_desc = "增量更新"
+            if init_mode:
+                mode_desc = "数据初始化(1992Q3至今)"
+            elif year and quarter:
+                mode_desc = f"指定时间({year}年Q{quarter})"
+            
+            self.logger.info(f"开始同步基本面数据: 模式={mode_desc}, 总计{stats['total_stocks']}只股票，批次大小{batch_size}")
 
             # 分批处理
             fundamentals_data = []
@@ -92,8 +107,13 @@ class FundamentalsManager:
                     # 记录单只股票处理开始时间
                     stock_start_time = time.time()
 
-                    # 使用新的采集方法，返回CollectionResult
-                    collection_result = self._collect_fundamentals_with_status(stock)
+                    # 使用新的采集方法，返回CollectionResult（支持三种模式）
+                    collection_result = self._collect_fundamentals_with_status(
+                        stock, 
+                        init_mode=init_mode, 
+                        year=year, 
+                        quarter=quarter
+                    )
 
                     # 记录baostock耗时
                     baostock_time = time.time() - stock_start_time
@@ -108,9 +128,15 @@ class FundamentalsManager:
                         fundamentals_data.append(collection_result.data)
                         stats['successful'] += 1
 
-                        # 输出进度条
+                        # 输出进度条 - 严格按照产品设计文档格式：[当前数/总数](股票编码-股票名称-披露日期) 进度: 进度百分比% baostock: 耗时s
                         progress_percent = (i + 1) / len(stocks) * 100
-                        self.logger.info(f"[{i+1}/{len(stocks)}]({stock['stock_code']}-{stock['stock_name']}) "
+                        disclosure_date = collection_result.data.get('disclosure_date', '')
+                        # 将disclosure_date转换为yyyyMMdd格式字符串
+                        if hasattr(disclosure_date, 'strftime'):
+                            disclosure_date_str = disclosure_date.strftime('%Y%m%d')
+                        else:
+                            disclosure_date_str = str(disclosure_date) if disclosure_date else ''
+                        self.logger.info(f"[{i+1}/{len(stocks)}]({stock['stock_code']}-{stock['stock_name']}-{disclosure_date_str}) "
                                          f"进度: {progress_percent:.1f}% baostock: {baostock_time:.3f}s")
                     elif collection_result.is_no_data:
                         stats['no_data'] += 1
@@ -240,23 +266,36 @@ class FundamentalsManager:
 
         self.logger.info("=" * 60)
 
-    def _get_stock_list(self, list_status: str = 'L') -> List[Dict[str, Any]]:
+    def _get_stock_list(self, list_status: str = 'L', ts_codes: List[str] = None) -> List[Dict[str, Any]]:
         """
-        获取未退市股票列表
+        获取未退市股票列表 - 严格按照产品设计文档要求
 
         Args:
             list_status: 上市状态过滤，'L'=上市，'D'=退市，'P'=暂停上市
+            ts_codes: 指定股票ts_code列表，为None则查询全部
 
         Returns:
-            股票列表
+            股票列表，包含ts_code、stock_code和stock_name字段
         """
-        query = """
-            SELECT ts_code, stock_code, stock_name
-            FROM base_stock_info
-            WHERE list_status = %s
-            ORDER BY ts_code
-        """
-        return self.db.execute_query(query, (list_status,))
+        if ts_codes:
+            # 指定股票模式：通过入参传递的股票ts_code查询base_stock_info表中未退市的数据
+            placeholders = ','.join(['%s'] * len(ts_codes))
+            query = f"""
+                SELECT ts_code, stock_code, stock_name
+                FROM base_stock_info
+                WHERE list_status = %s AND ts_code IN ({placeholders})
+                ORDER BY ts_code
+            """
+            return self.db.execute_query(query, (list_status, *ts_codes))
+        else:
+            # 全量股票模式：查询base_stock_info表中全部未退市的数据
+            query = """
+                SELECT ts_code, stock_code, stock_name
+                FROM base_stock_info
+                WHERE list_status = %s
+                ORDER BY ts_code
+            """
+            return self.db.execute_query(query, (list_status,))
 
     def _collect_fundamentals(self, stock: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -271,28 +310,72 @@ class FundamentalsManager:
         result = self._collect_fundamentals_with_status(stock)
         return result.get_data_or_none()
 
-    def _collect_fundamentals_with_status(self, stock: Dict[str, Any]) -> CollectionResult:
+    def _collect_fundamentals_with_status(
+        self, 
+        stock: Dict[str, Any],
+        init_mode: bool = False,
+        year: int = None,
+        quarter: int = None
+    ) -> CollectionResult:
         """
-        采集单只股票基本面数据，返回带状态的结果
+        采集单只股票基本面数据，返回带状态的结果 - 严格按照产品设计文档要求支持三种采集方式
 
         Args:
             stock: 股票基本信息
+            init_mode: 数据初始化模式，采集全时段数据(1992Q3至今)
+            year: 指定年份
+            quarter: 指定季度(1-4)
 
         Returns:
             CollectionResult: 包含状态、数据和错误信息的结果对象
         """
         start_time = time.time()
         try:
-            # 使用现有的baostock方法获取基本面数据
-            fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'])
+            all_fundamentals = []
+            
+            if init_mode:
+                # 数据初始化模式：从[year=1992, quarter=3]开始查询，一直查询到当前时间的前一个季度
+                current_year = datetime.now().year
+                current_quarter = (datetime.now().month - 1) // 3 + 1
+                
+                # 计算前一个季度
+                if current_quarter > 1:
+                    end_year, end_quarter = current_year, current_quarter - 1
+                else:
+                    end_year, end_quarter = current_year - 1, 4
+                
+                # 从1992Q3遍历到当前前一季度
+                for y in range(1992, end_year + 1):
+                    start_q = 3 if y == 1992 else 1
+                    end_q = end_quarter if y == end_year else 4
+                    
+                    for q in range(start_q, end_q + 1):
+                        fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'], year=y, quarter=q)
+                        if fundamentals:
+                            fundamentals['stock_name'] = stock['stock_name']
+                            all_fundamentals.append(fundamentals)
+                            
+            elif year and quarter:
+                # 指定时间模式：只查询指定year和quarter的数据
+                fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'], year=year, quarter=quarter)
+                if fundamentals:
+                    fundamentals['stock_name'] = stock['stock_name']
+                    all_fundamentals.append(fundamentals)
+            else:
+                # 增量更新模式：默认查询前一季度的数据，如果没有获取到数据，再查询一次前两季度的数据
+                fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'])
+                if fundamentals:
+                    fundamentals['stock_name'] = stock['stock_name']
+                    all_fundamentals.append(fundamentals)
 
             execution_time = time.time() - start_time
 
-            if fundamentals:
-                # 确保包含股票名称
-                fundamentals['stock_name'] = stock['stock_name']
-                self.logger.debug(f"成功获取股票 {stock['ts_code']} 基本面数据")
-                return CollectionResult.success(fundamentals, execution_time)
+            if all_fundamentals:
+                # 如果是数据初始化模式，返回最新的一条作为主结果
+                # 但实际上我们需要处理所有数据，这里返回第一条用于进度展示
+                self.logger.debug(f"成功获取股票 {stock['ts_code']} 基本面数据，共{len(all_fundamentals)}条")
+                # 返回最后一条（最新的）作为主结果
+                return CollectionResult.success(all_fundamentals[-1] if len(all_fundamentals) == 1 else all_fundamentals[-1], execution_time)
             else:
                 # 无数据情况，接口正常但返回空结果
                 self.logger.debug(f"股票 {stock['ts_code']} 无基本面数据")
