@@ -266,10 +266,10 @@ class AnomalyReportGenerator:
                 f"{record.expected_range} | {severity_icon} {record.severity} |"
             )
 
-        # 原始数据
-        data_key = f"{ts_code}_{records[0].trade_date}"
-        if data_key in raw_data_map:
-            content_parts.append(self._generate_raw_data_section(raw_data_map[data_key]))
+        # 原始数据（已注释，用户要求去掉）
+        # data_key = f"{ts_code}_{records[0].trade_date}"
+        # if data_key in raw_data_map:
+        #     content_parts.append(self._generate_raw_data_section(raw_data_map[data_key]))
 
         content_parts.append("")  # 空行分隔
 

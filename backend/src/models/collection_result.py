@@ -3,7 +3,7 @@
 用于区分采集成功、无数据和异常失败三种状态
 """
 
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any, Union, List
 from enum import Enum
 from datetime import datetime
 
@@ -20,12 +20,13 @@ class CollectionResult:
     数据采集结果封装类
 
     用于封装单只股票的基本面数据采集结果，清晰区分成功、无数据和异常失败状态
+    支持单条数据或多条数据(init模式下)
     """
 
     def __init__(
         self,
         status: CollectionStatus,
-        data: Optional[Dict[str, Any]] = None,
+        data: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
         error_message: Optional[str] = None,
         execution_time: Optional[float] = None
     ):
@@ -34,7 +35,7 @@ class CollectionResult:
 
         Args:
             status: 采集状态
-            data: 采集到的数据（成功时有效）
+            data: 采集到的数据（成功时有效，可以是单条Dict或多条List[Dict]）
             error_message: 错误信息（失败时有效）
             execution_time: 执行耗时（秒）
         """
@@ -64,13 +65,19 @@ class CollectionResult:
         """是否包含有效数据"""
         return self.is_success and self.data is not None
 
-    def get_data_or_none(self) -> Optional[Dict[str, Any]]:
+    def get_data_or_none(self) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """获取数据，如果没有数据则返回None"""
         return self.data if self.has_data else None
 
     @classmethod
-    def success(cls, data: Dict[str, Any], execution_time: Optional[float] = None) -> 'CollectionResult':
-        """创建成功结果"""
+    def success(cls, data: Union[Dict[str, Any], List[Dict[str, Any]]], execution_time: Optional[float] = None) -> 'CollectionResult':
+        """
+        创建成功结果
+
+        Args:
+            data: 单条数据(Dict)或多条数据(List[Dict])
+            execution_time: 执行耗时
+        """
         return cls(
             status=CollectionStatus.SUCCESS,
             data=data,
@@ -107,7 +114,10 @@ class CollectionResult:
     def __str__(self) -> str:
         """字符串表示"""
         if self.is_success:
-            return f"CollectionResult(SUCCESS, data={len(self.data) if self.data else 0} fields, {self.execution_time:.3f}s)"
+            if isinstance(self.data, list):
+                return f"CollectionResult(SUCCESS, {len(self.data)} records, {self.execution_time:.3f}s)"
+            else:
+                return f"CollectionResult(SUCCESS, data={len(self.data) if self.data else 0} fields, {self.execution_time:.3f}s)"
         elif self.is_no_data:
             return f"CollectionResult(NO_DATA, {self.execution_time:.3f}s)"
         else:

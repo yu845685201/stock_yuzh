@@ -17,6 +17,12 @@ from ..utils.log_aggregator import LogAggregator
 class CsvWriter:
     """CSV文件写入器，严格按照产品设计文档要求生成CSV文件，支持智能删除+Append模式"""
 
+    # .day文件解析的原始字段集合（用于验证）
+    DAY_FILE_RAW_FIELDS = {'ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'preclose', 'amount', 'volume'}
+
+    # CSV文件字段顺序（与.day文件解析一致）
+    CSV_FIELD_ORDER = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'preclose', 'amount', 'volume']
+
     def __init__(self, config_manager: ConfigManager = None):
         """
         初始化CSV写入器
@@ -140,17 +146,25 @@ class CsvWriter:
         if session_id in self._write_sessions:
             self._write_sessions[session_id].add(filepath)
 
-    def _generate_filename(self, data_type: str) -> str:
+    def _generate_filename(self, data_type: str, include_time: bool = False) -> str:
         """
         生成符合产品设计文档要求的CSV文件名
 
         Args:
             data_type: 数据类型 (base_stock_info, his_kline_day等)
+            include_time: 是否包含时分信息，默认False
+                         False: yyyyMMdd格式 (如: 20241219)
+                         True: yyyyMMddhhmm格式 (如: 202412191430)
 
         Returns:
-            符合格式的文件名，如: base_stock_info_20241219.csv
+            符合格式的文件名
+            - 不含时分: base_stock_info_20241219.csv
+            - 含时分: base_fundamentals_info_202501051430.csv
         """
-        date_str = datetime.now().strftime('%Y%m%d')
+        if include_time:
+            date_str = datetime.now().strftime('%Y%m%d%H%M')
+        else:
+            date_str = datetime.now().strftime('%Y%m%d')
         return f"{data_type}_{date_str}.csv"
 
     def _write_csv_file(self, filepath: str, data: List[Dict[str, Any]],
@@ -228,7 +242,8 @@ class CsvWriter:
                 'industry_name': stock.get('industry_name') or stock.get('industry'),
                 'list_status': stock.get('list_status') or stock.get('status'),
                 'list_date': stock.get('list_date'),
-                'delist_date': stock.get('delist_date')
+                'delist_date': stock.get('delist_date'),
+                'type': stock.get('type')
             }
             mapped_data.append(mapped_stock)
 
@@ -237,10 +252,15 @@ class CsvWriter:
     
     def write_his_kline_day(self, daily_data: List[Dict[str, Any]]) -> None:
         """
-        写入日K线数据到CSV - 按交易日期分组，每个交易日生成独立文件
+        写入日K线数据到CSV - 按股票分组，每只股票生成一个独立文件
+        CSV数据来源：.day文件解析的原始数据（未经任何加工）
+        字段规则：仅增加ts_code字段，其他字段使用.day文件解析的原始字段名
+
+        文件命名：his_kline_day_{ts_code}_{timestamp}.csv
+        时间戳格式：yyyyMMddhhmmss
 
         Args:
-            daily_data: 日K线数据列表
+            daily_data: 日K线数据列表（.day文件原始数据 + ts_code）
         """
         if not daily_data:
             return
@@ -250,35 +270,90 @@ class CsvWriter:
         dirpath = os.path.join(self.csv_path, subdir)
         os.makedirs(dirpath, exist_ok=True)
 
-        # 确保字段名符合产品设计文档
-        mapped_data = []
-        for data in daily_data:
-            mapped_daily = {
-                'ts_code': data.get('ts_code'),
-                'stock_code': data.get('stock_code') or data.get('code'),
-                'stock_name': data.get('stock_name') or data.get('name'),
-                'trade_date': data.get('trade_date') or data.get('date'),
-                'open': data.get('open'),
-                'high': data.get('high'),
-                'low': data.get('low'),
-                'close': data.get('close'),
-                'preclose': data.get('preclose'),
-                'volume': data.get('volume'),
-                'amount': data.get('amount'),
-                'trade_status': data.get('trade_status', 1),  # 默认正常交易
-                'is_st': data.get('is_st', False),  # 默认非ST
-                'adjust_flag': data.get('adjust_flag', 3),  # 默认不复权
-                'change_rate': data.get('change_rate') or data.get('pct_chg'),
-                'turnover_rate': data.get('turnover_rate') or data.get('turn'),
-                'pe_ttm': data.get('pe_ttm'),  # 无法获取则留空
-                'pb_rate': data.get('pb_rate'),  # 无法获取则留空
-                'ps_ttm': data.get('ps_ttm'),  # 无法获取则留空
-                'pcf_ttm': data.get('pcf_ttm')  # 无法获取则留空
-            }
-            mapped_data.append(mapped_daily)
+        # 直接使用.day文件解析的原始数据，不做任何字段映射和加工
+        self._write_kline_data_by_stock(daily_data, dirpath)
 
-        # 按交易日期分组并写入独立文件
-        self._write_kline_data_by_trade_date(mapped_data, dirpath)
+    def _write_kline_data_by_stock(self, raw_data: List[Dict[str, Any]], dirpath: str) -> None:
+        """
+        按股票分组写入K线数据到独立CSV文件
+        严格保持.day文件解析的原始字段，仅增加ts_code字段
+
+        文件命名：his_kline_day_{ts_code}_{timestamp}.csv
+        时间戳格式：yyyyMMddhhmmss
+        每只股票生成一个CSV文件，包含该股票所有日期的数据
+
+        Args:
+            raw_data: .day文件解析数据列表（仅增加ts_code字段）
+            dirpath: CSV文件目录路径
+        """
+        if not raw_data:
+            return
+
+        try:
+            # 生成时间戳
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+
+            # 转换为DataFrame以便分组处理
+            df = pd.DataFrame(raw_data)
+
+            # 确保ts_code字段存在
+            if 'ts_code' not in df.columns:
+                self.logger.error("数据中缺少ts_code字段，无法按股票分组")
+                return
+
+            # 按ts_code分组
+            grouped = df.groupby('ts_code')
+
+            # 为每只股票生成独立CSV文件
+            for ts_code, group_df in grouped:
+                # 生成文件名：his_kline_day_{ts_code}_{timestamp}.csv
+                filename = f"his_kline_day_{ts_code}_{timestamp}.csv"
+                filepath = os.path.join(dirpath, filename)
+
+                # 如果存在同名文件，先删除
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                        self.logger.debug(f"已删除旧文件: {filename}")
+                    except Exception as e:
+                        self.logger.warning(f"删除旧文件失败: {e}")
+
+                # 将DataFrame转换为字典列表
+                group_data = group_df.to_dict('records')
+
+                # 验证数据原始性：确保只有.day文件解析字段 + ts_code
+                actual_fields = set(group_df.columns)
+
+                if not actual_fields.issubset(self.DAY_FILE_RAW_FIELDS):
+                    unexpected_fields = actual_fields - self.DAY_FILE_RAW_FIELDS
+                    self.logger.warning(f"CSV数据包含非预期字段: {unexpected_fields}")
+                    # 移除非预期字段，确保数据原始性
+                    group_df = group_df[list(self.DAY_FILE_RAW_FIELDS.intersection(actual_fields))]
+
+                # 确保字段顺序与.day文件解析一致，ts_code在前
+                # 只保留存在的字段
+                available_fields = [field for field in self.CSV_FIELD_ORDER if field in group_df.columns]
+
+                try:
+                    # 按指定字段顺序写入CSV，保持原始字段名
+                    group_df[available_fields].to_csv(filepath, index=False, encoding='utf-8-sig')
+                    # 标记文件已写入，用于会话管理
+                    self._mark_file_written(filepath)
+                except Exception as e:
+                    self.logger.error(f"写入CSV文件失败: {filepath}, 错误: {e}")
+                    raise
+
+                # 记录日志，强调数据原始性
+                if self._silent_mode:
+                    self._log_aggregator.add_file_summary(filename, len(group_data), 'csv')
+                else:
+                    field_list = ', '.join(available_fields)
+                    self.logger.info(f"已生成CSV文件: {filename} ({len(group_data)} 条记录)")
+                    self.logger.debug(f"CSV字段: {field_list} (仅.day文件解析字段 + ts_code)")
+
+        except Exception as e:
+            self.logger.error(f"按股票分组写入CSV失败: {e}")
+            raise
 
     def _write_kline_data_by_trade_date(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
         """
@@ -294,6 +369,9 @@ class CsvWriter:
         try:
             # 转换为DataFrame以便分组处理
             df = pd.DataFrame(mapped_data)
+
+            # 获取采集日期（当前日期）
+            collection_date = datetime.now().strftime('%Y%m%d')
 
             # 确保trade_date是datetime类型
             if 'trade_date' in df.columns:
@@ -314,9 +392,10 @@ class CsvWriter:
 
                 # 为每个交易日生成独立CSV文件
                 for trade_date, group_df in grouped:
-                    # 生成文件名：使用交易日期格式 YYYYMMDD
+                    # 生成文件名：使用交易日期和采集日期格式 YYYYMMDD
+                    # 产品设计要求：his_kline_day_交易日_采集日.csv
                     date_str = trade_date.strftime('%Y%m%d')
-                    filename = f"his_kline_day_{date_str}.csv"
+                    filename = f"his_kline_day_{date_str}_{collection_date}.csv"
                     filepath = os.path.join(dirpath, filename)
 
                     # 转换回字典列表格式
@@ -352,7 +431,14 @@ class CsvWriter:
     def write_his_kline_1min(self, min1_data: List[Dict[str, Any]]) -> None:
         """
         写入1分钟K线数据到CSV - 严格按照产品设计文档要求
-        每个交易日生成一个CSV文件
+        每只股票生成一个CSV文件，命名规则为his_kline_1min_{ts_code}_{当前时间}.csv
+
+        包含字段：
+        - 基本信息：ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime
+        - 价格数据：open, high, low, close, preclose
+        - 成交数据：volume, amount, adjust_flag
+        - 计算字段：change_rate, turnover_rate
+        - 关联字段：fundamentals_disclosure_date, total_share, float_share
 
         Args:
             min1_data: 1分钟K线数据列表
@@ -387,20 +473,30 @@ class CsvWriter:
                 'amount': data.get('amount'),
                 'adjust_flag': data.get('adjust_flag', 3),
                 'change_rate': data.get('change_rate'),
-                'turnover_rate': data.get('turnover_rate')
+                'turnover_rate': data.get('turnover_rate'),
+                'fundamentals_disclosure_date': data.get('fundamentals_disclosure_date'),
+                'total_share': data.get('total_share'),
+                'float_share': data.get('float_share')
             }
             mapped_data.append(mapped_min1)
 
-        # 按交易日期分组并写入独立文件（符合文档要求）
+        # 按股票分组并写入独立文件（符合文档要求）
         self._write_1min_data_by_trade_date(mapped_data, dirpath)
 
     def write_his_kline_5min(self, min5_data: List[Dict[str, Any]]) -> None:
         """
         写入5分钟K线数据到CSV - 严格按照产品设计文档要求
-        每个交易日生成一个CSV文件
+        每只股票生成一个CSV文件，命名规则为his_kline_5min_{ts_code}_{当前时间}.csv
+        数据源：ts_code加上.lc5文件中解析出来的未经任何加工的数据
+
+        包含字段（原始数据）：
+        - 基本信息：ts_code, stock_code
+        - 交易时间：trade_date, trade_time
+        - 价格数据：open, high, low, close
+        - 成交数据：volume, amount
 
         Args:
-            min5_data: 5分钟K线数据列表
+            min5_data: 5分钟K线数据列表（原始解析数据）
         """
         if not min5_data:
             print("❌ 没有数据需要写入")
@@ -413,31 +509,95 @@ class CsvWriter:
         # 确保子目录存在
         os.makedirs(dirpath, exist_ok=True)
 
-        # 确保字段名符合产品设计文档
+        # 确保字段名符合产品设计文档，只提取原始字段
         mapped_data = []
         for data in min5_data:
+            # 格式化日期和时间，确保是字符串以便写入
+            trade_date_val = data.get('trade_date')
+            if hasattr(trade_date_val, 'strftime'):
+                trade_date_val = trade_date_val.strftime('%Y%m%d')
+            elif hasattr(data.get('trade_date_str'), '__len__'): # 兼容处理
+                 trade_date_val = data.get('trade_date_str')
+
+            trade_time_val = data.get('trade_time')
+            if hasattr(trade_time_val, 'strftime'):
+                trade_time_val = trade_time_val.strftime('%H%M')
+            elif hasattr(data.get('trade_time_str'), '__len__'): # 兼容处理
+                 trade_time_val = data.get('trade_time_str')
+
             mapped_min5 = {
                 'ts_code': data.get('ts_code'),
-                'stock_code': data.get('stock_code'),
-                'stock_name': data.get('stock_name'),
-                'trade_date': data.get('trade_date'),
-                'trade_time': data.get('trade_time'),
-                'trade_datetime': data.get('trade_datetime'),
+                'stock_code': data.get('stock_code') or data.get('code'),
+                'trade_date': trade_date_val,
+                'trade_time': trade_time_val,
                 'open': data.get('open'),
                 'high': data.get('high'),
                 'low': data.get('low'),
                 'close': data.get('close'),
-                'preclose': data.get('preclose'),
                 'volume': data.get('volume'),
-                'amount': data.get('amount'),
-                'adjust_flag': data.get('adjust_flag', 3),
-                'change_rate': data.get('change_rate'),
-                'turnover_rate': data.get('turnover_rate')
+                'amount': data.get('amount')
             }
             mapped_data.append(mapped_min5)
 
-        # 按交易日期分组并写入独立文件（符合文档要求）
-        self._write_5min_data_by_trade_date(mapped_data, dirpath)
+        # 按股票分组并写入独立文件（符合文档要求）
+        self._write_5min_data_by_stock(mapped_data, dirpath)
+
+    def _write_5min_data_by_stock(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
+        """
+        按股票分组写入5分钟K线数据到独立CSV文件
+        命名规则：his_kline_5min_{ts_code}_{当前时间}.csv
+        时间格式：yyyyMMddhhmmss
+
+        Args:
+            mapped_data: 已映射的5分钟K线数据列表
+            dirpath: CSV文件目录路径
+        """
+        if not mapped_data:
+            return
+
+        try:
+            # 转换为DataFrame以便分组处理
+            df = pd.DataFrame(mapped_data)
+
+            # 在分组前先去重，确保同一股票同一时间只有一条记录
+            if 'ts_code' in df.columns and 'trade_date' in df.columns and 'trade_time' in df.columns:
+                # 确保按时间排序
+                df.sort_values(by=['ts_code', 'trade_date', 'trade_time'], inplace=True)
+
+                df_deduped = df.drop_duplicates(subset=['ts_code', 'trade_date', 'trade_time'], keep='last')
+
+                # 记录去重统计
+                original_count = len(df)
+                deduped_count = len(df_deduped)
+                if original_count > deduped_count:
+                    self.logger.info(f"5分钟K线数据去重：{original_count} -> {deduped_count} 条记录")
+
+                # 生成时间戳：yyyyMMddhhmmss
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+
+                # 按股票分组
+                grouped = df_deduped.groupby('ts_code')
+
+                # 为每只股票生成独立CSV文件（严格按照文档要求）
+                for ts_code, group_df in grouped:
+                    # 生成文件名：his_kline_5min_{ts_code}_{timestamp}.csv
+                    filename = f"his_kline_5min_{ts_code}_{timestamp}.csv"
+                    filepath = os.path.join(dirpath, filename)
+
+                    # 转换回字典列表格式
+                    group_data = group_df.to_dict('records')
+
+                    # 写入该股票的数据（通过文件管理器统一处理，确保代码一致性）
+                    self._write_csv_file(filepath, group_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_5min')
+
+                    print(f"✅ 已生成5分钟K线CSV文件: {filename} ({len(group_data)} 条记录)")
+            else:
+                print("❌ 5分钟K线数据中缺少必要字段(ts_code/trade_date/trade_time)，无法按股票分组")
+
+        except Exception as e:
+            print(f"❌ 按股票分组写入5分钟K线数据失败: {e}")
+            import traceback
+            traceback.print_exc()
 
     # 保持向后兼容的方法名
     def write_stocks(self, stocks: List[Dict[str, Any]]) -> None:
@@ -458,12 +618,17 @@ class CsvWriter:
 
         Args:
             fundamentals_data: 基本面信息列表
+
+        注意:
+            文件名格式为 base_fundamentals_info_{yyyyMMddhhmm}.csv
+            包含时分信息以支持同一天多次采集
         """
         if not fundamentals_data:
             self.logger.info("没有基本面数据需要写入")
             return
 
-        filename = self._generate_filename('base_fundamentals_info')
+        # 基本面信息使用包含时分的文件名格式
+        filename = self._generate_filename('base_fundamentals_info', include_time=True)
         # 按照文档要求：csv文件输出目录为{csv文件根目录}/base_fundamentals_info
         subdir = 'base_fundamentals_info'
         dirpath = os.path.join(self.csv_path, subdir)
@@ -492,6 +657,60 @@ class CsvWriter:
         """新增：5分钟K线数据写入方法"""
         self.write_his_kline_5min(min5_data)
 
+    def validate_csv_data_purity(self, csv_filepath: str) -> Dict[str, Any]:
+        """
+        验证CSV文件数据原始性 - 确保只包含.day文件解析字段 + ts_code
+
+        Args:
+            csv_filepath: CSV文件路径
+
+        Returns:
+            验证结果字典
+        """
+        try:
+            import pandas as pd
+
+            # 读取CSV文件
+            df = pd.read_csv(csv_filepath)
+
+            # 期望的字段集合（.day文件解析字段 + ts_code）
+            expected_fields = self.DAY_FILE_RAW_FIELDS
+            actual_fields = set(df.columns)
+
+            # 验证结果
+            validation_result = {
+                'is_valid': True,
+                'file_path': csv_filepath,
+                'record_count': len(df),
+                'expected_fields': expected_fields,
+                'actual_fields': actual_fields,
+                'missing_fields': expected_fields - actual_fields,
+                'unexpected_fields': actual_fields - expected_fields,
+                'validation_message': ''
+            }
+
+            # 检查是否有缺失字段
+            if validation_result['missing_fields']:
+                validation_result['is_valid'] = False
+                validation_result['validation_message'] += f"缺失字段: {validation_result['missing_fields']}; "
+
+            # 检查是否有非预期字段
+            if validation_result['unexpected_fields']:
+                validation_result['is_valid'] = False
+                validation_result['validation_message'] += f"非预期字段: {validation_result['unexpected_fields']}; "
+
+            if validation_result['is_valid']:
+                validation_result['validation_message'] = "✅ 数据原始性验证通过，仅包含.day文件解析字段 + ts_code"
+
+            return validation_result
+
+        except Exception as e:
+            return {
+                'is_valid': False,
+                'file_path': csv_filepath,
+                'validation_message': f"❌ 验证失败: {str(e)}"
+            }
+
     def get_backup_info(self) -> Dict[str, Any]:
         """
         获取备份信息
@@ -519,7 +738,9 @@ class CsvWriter:
 
     def _write_1min_data_by_trade_date(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
         """
-        按交易日期分组写入1分钟K线数据到独立CSV文件（符合产品设计文档要求）
+        按股票分组写入1分钟K线数据到独立CSV文件 - 严格按照产品设计文档要求
+        命名规则：his_kline_1min_{ts_code}_{当前时间}.csv
+        时间格式：yyyyMMddhhmmss
 
         Args:
             mapped_data: 已映射的1分钟K线数据列表
@@ -532,12 +753,8 @@ class CsvWriter:
             # 转换为DataFrame以便分组处理
             df = pd.DataFrame(mapped_data)
 
-            # 确保trade_date字段存在
-            if 'trade_date' in df.columns:
-                # 确保trade_date是datetime类型
-                df['trade_date'] = pd.to_datetime(df['trade_date']).dt.normalize()
-
-                # 在分组前先去重，确保同一股票同一时间只有一条记录
+            # 在分组前先去重，确保同一股票同一时间只有一条记录
+            if 'ts_code' in df.columns and 'trade_date' in df.columns and 'trade_time' in df.columns:
                 df_deduped = df.drop_duplicates(subset=['ts_code', 'trade_date', 'trade_time'], keep='last')
 
                 # 记录去重统计
@@ -546,104 +763,50 @@ class CsvWriter:
                 if original_count > deduped_count:
                     self.logger.info(f"1分钟K线数据去重：{original_count} -> {deduped_count} 条记录，去除 {original_count - deduped_count} 条重复")
 
-                # 按交易日期分组
-                grouped = df_deduped.groupby('trade_date')
+                # 生成时间戳：yyyyMMddhhmmss
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
 
-                # 为每个交易日生成独立CSV文件（严格按照文档要求）
-                for trade_date, group_df in grouped:
-                    # 生成文件名：使用交易日期格式 YYYYMMDD
-                    date_str = trade_date.strftime('%Y%m%d')
-                    filename = f"his_kline_1min_{date_str}.csv"  # 符合文档要求的命名规则
+                # 按股票分组
+                grouped = df_deduped.groupby('ts_code')
+
+                # 为每只股票生成独立CSV文件（严格按照文档要求）
+                for ts_code, group_df in grouped:
+                    # 生成文件名：his_kline_1min_{ts_code}_{timestamp}.csv
+                    filename = f"his_kline_1min_{ts_code}_{timestamp}.csv"
                     filepath = os.path.join(dirpath, filename)
 
                     # 转换回字典列表格式
                     group_data = group_df.to_dict('records')
 
-                    # 写入该交易日的数据（通过文件管理器统一处理，确保代码一致性）
+                    # 写入该股票的数据（通过文件管理器统一处理，确保代码一致性）
                     self._write_csv_file(filepath, group_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_1min')
 
                     print(f"✅ 已生成1分钟K线CSV文件: {filename} ({len(group_data)} 条记录)")
-
             else:
-                print("❌ 1分钟K线数据中缺少trade_date字段，无法按日期分组")
+                print("❌ 1分钟K线数据中缺少必要字段(ts_code/trade_date/trade_time)，无法按股票分组")
                 # 回退到原始方式
-                filename = self._generate_filename('his_kline_1min')
+                filename = self._generate_1min_filename()
                 filepath = os.path.join(dirpath, filename)
                 self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_1min')
                 print(f"⚠️  已回退到原始方式写入: {filename}")
 
         except Exception as e:
-            print(f"❌ 按交易日期分组写入1分钟K线数据失败: {e}")
+            print(f"❌ 按股票分组写入1分钟K线数据失败: {e}")
             # 回退到原始方式
             try:
-                filename = self._generate_filename('his_kline_1min')
+                filename = self._generate_1min_filename()
                 filepath = os.path.join(dirpath, filename)
                 self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_1min')
                 print(f"⚠️  已回退到原始方式写入: {filename}")
             except Exception as fallback_error:
                 print(f"❌ 回退写入也失败: {fallback_error}")
-    def _write_5min_data_by_trade_date(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
+
+    def _generate_1min_filename(self) -> str:
         """
-        按交易日期分组写入5分钟K线数据到独立CSV文件（符合产品设计文档要求）
+        生成符合产品设计文档要求的1分钟K线CSV文件名
 
-        Args:
-            mapped_data: 已映射的5分钟K线数据列表
-            dirpath: CSV文件目录路径
+        Returns:
+            文件名，如: his_kline_1min_{ts_code}_20241219123045.csv
         """
-        if not mapped_data:
-            return
-
-        try:
-            # 转换为DataFrame以便分组处理
-            df = pd.DataFrame(mapped_data)
-
-            # 确保trade_date字段存在
-            if 'trade_date' in df.columns:
-                # 确保trade_date是datetime类型
-                df['trade_date'] = pd.to_datetime(df['trade_date']).dt.normalize()
-
-                # 在分组前先去重，确保同一股票同一时间只有一条记录
-                df_deduped = df.drop_duplicates(subset=['ts_code', 'trade_date', 'trade_time'], keep='last')
-
-                # 记录去重统计
-                original_count = len(df)
-                deduped_count = len(df_deduped)
-                if original_count > deduped_count:
-                    self.logger.info(f"5分钟K线数据去重：{original_count} -> {deduped_count} 条记录，去除 {original_count - deduped_count} 条重复")
-
-                # 按交易日期分组
-                grouped = df_deduped.groupby('trade_date')
-
-                # 为每个交易日生成独立CSV文件（严格按照文档要求）
-                for trade_date, group_df in grouped:
-                    # 生成文件名：使用交易日期格式 YYYYMM（5分钟K线文档要求）
-                    date_str = trade_date.strftime('%Y%m')
-                    filename = f"his_kline_5min_{date_str}.csv"  # 符合文档要求的命名规则
-                    filepath = os.path.join(dirpath, filename)
-
-                    # 转换回字典列表格式
-                    group_data = group_df.to_dict('records')
-
-                    # 写入该交易日的数据（通过文件管理器统一处理，确保代码一致性）
-                    self._write_csv_file(filepath, group_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_5min')
-
-                    print(f"✅ 已生成5分钟K线CSV文件: {filename} ({len(group_data)} 条记录)")
-
-            else:
-                print("❌ 5分钟K线数据中缺少trade_date字段，无法按日期分组")
-                # 回退到原始方式
-                filename = self._generate_filename('his_kline_5min')
-                filepath = os.path.join(dirpath, filename)
-                self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_5min')
-                print(f"⚠️  已回退到原始方式写入: {filename}")
-
-        except Exception as e:
-            print(f"❌ 按交易日期分组写入5分钟K线数据失败: {e}")
-            # 回退到原始方式
-            try:
-                filename = self._generate_filename('his_kline_5min')
-                filepath = os.path.join(dirpath, filename)
-                self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code', 'trade_date', 'trade_time'], data_type='his_kline_5min')
-                print(f"⚠️  已回退到原始方式写入: {filename}")
-            except Exception as fallback_error:
-                print(f"❌ 回退写入也失败: {fallback_error}")
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        return f"his_kline_1min_{timestamp}.csv"

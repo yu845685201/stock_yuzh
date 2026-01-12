@@ -4,8 +4,13 @@
 
 import click
 import sys
+import os
 import logging
 from datetime import date, datetime
+
+# Add the backend directory to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
 from src.config import ConfigManager
 from src.sync import SyncManager
 from src.database import DatabaseConnection
@@ -63,15 +68,19 @@ def init(ctx, init_db):
 
 
 @cli.command()
-@click.option('--csv', is_flag=True, default=True, help='保存到CSV文件')
-@click.option('--db', is_flag=True, default=True, help='保存到数据库')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.pass_context
-def sync_all(ctx, csv, db):
+def sync_all(ctx, no_csv, no_db):
     """同步所有数据"""
     click.echo("开始同步所有数据...")
 
+    # 默认都保存，除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
+
     sync_manager = SyncManager(ctx.obj['config_manager'])
-    result = sync_manager.sync_all(save_to_csv=csv, save_to_db=db)
+    result = sync_manager.sync_all(save_to_csv=save_to_csv, save_to_db=save_to_db)
 
     if result['success']:
         click.echo("\n✓ 数据同步完成!")
@@ -86,41 +95,44 @@ def sync_all(ctx, csv, db):
 
 
 @cli.command()
-@click.option('--csv', is_flag=True, help='保存到CSV文件')
-@click.option('--db', is_flag=True, help='保存到数据库')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.pass_context
-def sync_stocks(ctx, csv, db):
+def sync_stocks(ctx, no_csv, no_db):
     """同步股票列表"""
     click.echo("同步股票列表...")
 
-    # 如果没有指定任何标志，默认同时保存CSV和数据库
-    if not csv and not db:
-        csv = True
-        db = True
+    # 默认都保存，除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
-    stocks = sync_manager.sync_stocks(save_to_csv=csv, save_to_db=db)
+    stocks = sync_manager.sync_stocks(save_to_csv=save_to_csv, save_to_db=save_to_db)
 
     click.echo(f"\n✓ 股票列表同步完成，共 {len(stocks)} 只股票")
 
 
 @cli.command()
-@click.option('--csv', is_flag=True, default=True, help='保存到CSV文件')
-@click.option('--db', is_flag=True, default=True, help='保存到数据库')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--collect-only', is_flag=True, default=False, help='只采集不保存')
-@click.option('--silent', is_flag=True, default=False, help='静默模式，隐藏实时进度日志')
+@click.option('--silent', is_flag=True, default=False, help='静默模式,隐藏实时进度日志')
 @click.option('--no-anomaly-report', is_flag=True, default=False, help='不生成异常报告')
 @click.option('--start-date', help='开始日期 (YYYY-MM-DD)')
 @click.option('--end-date', help='结束日期 (YYYY-MM-DD)')
-@click.option('--codes', help='股票代码列表，逗号分隔')
+@click.option('--codes', help='股票代码列表,逗号分隔')
 @click.pass_context
-def sync_daily(ctx, csv, db, collect_only, silent, no_anomaly_report, start_date, end_date, codes):
+def sync_daily(ctx, no_csv, no_db, collect_only, silent, no_anomaly_report, start_date, end_date, codes):
     """同步日K线数据"""
-    # 如果是只采集模式，自动设置不保存
+    # 默认都保存,除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
+
+    # 如果是只采集模式,自动设置不保存
     if collect_only:
-        csv = False
-        db = False
-        click.echo("🔍 只采集模式：不会保存到CSV文件或数据库")
+        save_to_csv = False
+        save_to_db = False
+        click.echo("🔍 只采集模式:不会保存到CSV文件或数据库")
 
     # 解析日期
     start_dt = None
@@ -152,10 +164,6 @@ def sync_daily(ctx, csv, db, collect_only, silent, no_anomaly_report, start_date
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
 
-    # 使用参数值
-    save_to_csv = csv
-    save_to_db = db
-
     count = sync_manager.sync_daily_data(
         save_to_csv=save_to_csv,
         save_to_db=save_to_db,
@@ -175,14 +183,25 @@ def sync_daily(ctx, csv, db, collect_only, silent, no_anomaly_report, start_date
 
 
 @cli.command()
-@click.option('--csv', is_flag=True, default=True, help='保存到CSV文件')
-@click.option('--db', is_flag=True, default=True, help='保存到数据库')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@click.option('--mode', type=click.Choice(['init', 'incremental']), default='incremental',
+              help='采集模式: init=数据初始化(加载全部数据不过滤), incremental=增量更新(默认,过滤当天数据)')
+@click.option('--no-anomaly-report', is_flag=True, default=False, help='不生成异常报告')
 @click.option('--start-date', help='开始日期 (YYYY-MM-DD)')
 @click.option('--end-date', help='结束日期 (YYYY-MM-DD)')
 @click.option('--codes', help='股票代码列表，逗号分隔')
 @click.pass_context
-def sync_1min(ctx, csv, db, start_date, end_date, codes):
-    """同步1分钟K线数据"""
+def sync_1min(ctx, no_csv, no_db, mode, no_anomaly_report, start_date, end_date, codes):
+    """同步1分钟K线数据
+
+    采集模式说明：
+    - init: 数据初始化，加载全部.lc1文件，不过滤日期范围
+    - incremental: 增量更新(默认)，加载全部.lc1文件，过滤指定日期范围
+    """
+    # 默认都保存，除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
     # 解析日期
     start_dt = None
     end_dt = None
@@ -197,34 +216,51 @@ def sync_1min(ctx, csv, db, start_date, end_date, codes):
         codes_list = [code.strip() for code in codes.split(',')]
 
     click.echo("同步1分钟K线数据...")
-    if start_dt:
-        click.echo(f"  - 开始日期: {start_dt}")
-    if end_dt:
-        click.echo(f"  - 结束日期: {end_dt}")
+    click.echo(f"  - 采集模式: {mode}")
+    if mode == 'incremental':
+        if start_dt:
+            click.echo(f"  - 开始日期: {start_dt}")
+        if end_dt:
+            click.echo(f"  - 结束日期: {end_dt}")
     if codes_list:
         click.echo(f"  - 股票数量: {len(codes_list)}")
+    if no_anomaly_report:
+        click.echo(f"  - 异常报告: 禁用")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
     count = sync_manager.sync_1min_data(
-        save_to_csv=csv,
-        save_to_db=db,
+        save_to_csv=save_to_csv,
+        save_to_db=save_to_db,
+        mode=mode,
         start_date=start_dt,
         end_date=end_dt,
-        codes=codes_list
+        codes=codes_list,
+        generate_anomaly_report=not no_anomaly_report
     )
 
     click.echo(f"\n✓ 1分钟K线数据同步完成，共 {count} 条数据")
 
 
 @cli.command()
-@click.option('--csv', is_flag=True, default=True, help='保存到CSV文件')
-@click.option('--db', is_flag=True, default=True, help='保存到数据库')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@click.option('--mode', type=click.Choice(['init', 'incremental']), default='incremental',
+              help='采集模式: init=数据初始化(加载全部数据不过滤), incremental=增量更新(默认,过滤日期数据)')
+@click.option('--no-anomaly-report', is_flag=True, default=False, help='不生成异常报告')
 @click.option('--start-date', help='开始日期 (YYYY-MM-DD)')
 @click.option('--end-date', help='结束日期 (YYYY-MM-DD)')
 @click.option('--codes', help='股票代码列表，逗号分隔')
 @click.pass_context
-def sync_5min(ctx, csv, db, start_date, end_date, codes):
-    """同步5分钟K线数据"""
+def sync_5min(ctx, no_csv, no_db, mode, no_anomaly_report, start_date, end_date, codes):
+    """同步5分钟K线数据
+
+    采集模式说明：
+    - init: 数据初始化，加载全部.lc5文件，不过滤日期范围
+    - incremental: 增量更新(默认)，加载全部.lc5文件，过滤指定日期范围
+    """
+    # 默认都保存，除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
     # 解析日期
     start_dt = None
     end_dt = None
@@ -239,26 +275,34 @@ def sync_5min(ctx, csv, db, start_date, end_date, codes):
         codes_list = [code.strip() for code in codes.split(',')]
 
     click.echo("同步5分钟K线数据...")
-    if start_dt:
-        click.echo(f"  - 开始日期: {start_dt}")
-    if end_dt:
-        click.echo(f"  - 结束日期: {end_dt}")
+    click.echo(f"  - 采集模式: {mode}")
+    if mode == 'incremental':
+        if start_dt:
+            click.echo(f"  - 开始日期: {start_dt}")
+        if end_dt:
+            click.echo(f"  - 结束日期: {end_dt}")
     if codes_list:
         click.echo(f"  - 股票数量: {len(codes_list)}")
+    if no_anomaly_report:
+        click.echo(f"  - 异常报告: 禁用")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
     count = sync_manager.sync_5min_data(
-        save_to_csv=csv,
-        save_to_db=db,
+        save_to_csv=save_to_csv,
+        save_to_db=save_to_db,
+        mode=mode,
         start_date=start_dt,
         end_date=end_dt,
-        codes=codes_list
+        codes=codes_list,
+        generate_anomaly_report=not no_anomaly_report
     )
 
     click.echo(f"\n✓ 5分钟K线数据同步完成，共 {count} 条数据")
 
 
 @cli.command()
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')
 @click.option('--dry-run', is_flag=True, help='试运行模式，不实际写入数据')
 @click.option('--list-status', type=click.Choice(['L', 'D', 'P']), default='L',
@@ -270,22 +314,42 @@ def sync_5min(ctx, csv, db, start_date, end_date, codes):
 @click.option('--year', type=int, help='指定年份（与--quarter配合使用）')
 @click.option('--quarter', type=click.Choice(['1', '2', '3', '4']), help='指定季度1-4（与--year配合使用）')
 @click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
+@click.option('--batch', type=int, help='指定批次编号（仅在init模式下有效，从1开始）')
 @click.pass_context
-def sync_fundamentals(ctx, batch_size, dry_run, list_status, qps_limit, max_workers, concurrent, init_mode, year, quarter, codes):
+def sync_fundamentals(ctx, no_csv, no_db, batch_size, dry_run, list_status, qps_limit, max_workers, concurrent, init_mode, year, quarter, codes, batch):
     """同步股票基本面数据 - 支持三种采集方式：数据初始化/增量更新/指定股票和时间"""
+
+    # 默认都保存，除非明确指定不保存
+    save_to_csv = not no_csv
+    save_to_db = not no_db
+
     click.echo("开始同步股票基本面数据...")
+    click.echo(f"  - 保存到CSV: {'是' if save_to_csv else '否'}")
+    click.echo(f"  - 保存到数据库: {'是' if save_to_db else '否'}")
     click.echo(f"  - 批次大小: {batch_size}")
     click.echo(f"  - 试运行模式: {'是' if dry_run else '否'}")
     click.echo(f"  - 上市状态: {list_status}")
-    
+
     # 采集模式提示
     if init_mode:
-        click.echo(f"  - 采集模式: 数据初始化（1992Q3至今全时段）")
+        if batch:
+            click.echo(f"  - 采集模式: 数据初始化（批次{batch}）")
+        else:
+            click.echo(f"  - 采集模式: 数据初始化（全量股票全时段）")
     elif year and quarter:
         click.echo(f"  - 采集模式: 指定时间（{year}年Q{quarter}）")
     else:
         click.echo(f"  - 采集模式: 增量更新（最近两个季度）")
-    
+
+    # batch参数验证
+    if batch is not None:
+        if not init_mode:
+            click.echo("\n✗ 错误: --batch参数仅在init模式(--init)下有效")
+            return
+        if batch < 1:
+            click.echo(f"\n✗ 错误: 批次编号必须从1开始，当前值: {batch}")
+            return
+
     # 解析股票代码列表
     ts_codes = None
     if codes:
@@ -314,7 +378,10 @@ def sync_fundamentals(ctx, batch_size, dry_run, list_status, qps_limit, max_work
         'init_mode': init_mode,
         'year': year,
         'quarter': int(quarter) if quarter else None,
-        'ts_codes': ts_codes
+        'ts_codes': ts_codes,
+        'save_to_csv': save_to_csv,
+        'save_to_db': save_to_db,
+        'batch': batch
     }
 
     # 根据并发参数选择处理方式

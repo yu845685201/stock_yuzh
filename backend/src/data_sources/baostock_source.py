@@ -67,16 +67,16 @@ class BaostockSource(DataSourceBase):
             while (rs.error_code == '0') & rs.next():
                 row = rs.get_row_data()
 
-                # 严格按照文档要求：只保留type=1的股票信息
-                if row[4] != '1':  # type字段不为1则跳过
-                    continue
+                # 严格按照文档要求：不再进行type=1和2的过滤，全都入库
+                # if row[4] not in ('1', '2'):  # type不为1或2则跳过
+                #    continue
 
                 # 解析baostock返回的数据
                 baostock_code = row[0]  # 如: sz.000001
                 stock_name = row[1]
                 ipo_date = DataTransformer.format_date_string(row[2])
                 out_date = DataTransformer.format_date_string(row[3])
-                stock_type = row[4]  # type=1 (股票)
+                stock_type = row[4]  # type=1 (股票), 2(指数), 3(其它), 4(可转债), 5(ETF)
                 status = row[5]
 
                 # 严格按照文档要求处理字段
@@ -104,7 +104,8 @@ class BaostockSource(DataSourceBase):
                     'industry_name': None,  # 严格按照文档要求：留空
                     'list_status': list_status,
                     'list_date': ipo_date,
-                    'delist_date': out_date
+                    'delist_date': out_date,
+                    'type': stock_type  # 新增type字段
                 }
 
                 stock_list.append(stock_info)

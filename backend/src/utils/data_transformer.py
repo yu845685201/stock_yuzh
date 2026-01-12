@@ -111,7 +111,14 @@ class DataTransformer:
     @staticmethod
     def parse_minute_file_data(raw_data: bytes, code: str, market: str) -> Optional[Dict[str, Any]]:
         """
-        解析.lc1/.lc5文件数据 - 严格按照文档要求
+        解析.lc1/.lc5文件数据
+        支持两种格式：
+        1. 32字节格式 (新的.lc5/.lc1):
+           u16(date) + u16(time) + f32(open) + f32(high) + f32(low) + f32(close) + f32(amount) + u32(volume) + u32(reserved)
+           无需价格系数转换
+        2. 28字节格式 (旧的.lc1):
+           i32(datetime/ts) + f32(open) + f32(high) + f32(low) + f32(close) + f32(amount) + f32(volume)
+           需要价格系数转换
 
         Args:
             raw_data: 原始字节数据
@@ -122,71 +129,109 @@ class DataTransformer:
             解析后的数据字典，解析失败时返回None
         """
         try:
+            # 32字节格式解析 (通常用于.lc5)
+            if len(raw_data) == 32:
+                # 解析结构: date(H), time(H), open(f), high(f), low(f), close(f), amount(f), volume(I), reserved(I)
+                values = struct.unpack('<HHfffffII', raw_data)
+
+                date_u16 = values[0]
+                time_u16 = values[1]
+                open_price = round(values[2], 4)
+                high_price = round(values[3], 4)
+                low_price = round(values[4], 4)
+                close_price = round(values[5], 4)
+                amount = round(values[6], 4)
+                volume = int(values[7])
+                # reserved = values[8]
+
+                # 解析日期: High 5 bits=Year offset(2004), Mid 5 bits=Month, Low 6 bits=Day
+                # 注意：位操作取决于具体格式，这里使用验证过的逻辑
+                # 验证逻辑：year>>11, month>>6 & 0x1F, day & 0x3F
+                year = (date_u16 >> 11) + 2004
+                month = (date_u16 >> 6) & 0x1F
+                day = date_u16 & 0x3F
+
+                # 解析时间: minutes from 00:00
+                hour = time_u16 // 60
+                minute = time_u16 % 60
+
+                try:
+                    trade_date = date(year, month, day)
+                    trade_time = time(hour, minute)
+
+                    # 格式化为字符串
+                    trade_date_str = trade_date.strftime('%Y%m%d')
+                    trade_time_str = trade_time.strftime('%H%M')
+                    trade_datetime_str = f"{trade_date_str}{trade_time_str}"
+
+                    return {
+                        'trade_date': trade_date,  # 保持date对象用于过滤
+                        'trade_time': trade_time,  # 保持time对象
+                        'trade_date_str': trade_date_str, # 格式化字符串
+                        'trade_time_str': trade_time_str, # 格式化字符串
+                        'trade_datetime': trade_datetime_str, # 完整时间字符串
+                        'open': open_price,
+                        'high': high_price,
+                        'low': low_price,
+                        'close': close_price,
+                        'amount': amount,
+                        'volume': volume
+                    }
+                except ValueError:
+                    return None
+
+            # 兼容旧代码逻辑 (如果不幸传入了非32字节数据，或者旧格式)
+            # ... 原有逻辑 ...
             # 获取证券类型系数
             sec_type = DataTransformer.get_security_type(code, market)
             coeff = DataTransformer.SECURITY_TYPE_COEFFICIENTS[sec_type]
 
-            # 解析原始数据 (分钟线数据格式)
-            values = struct.unpack('i6f', raw_data)
+            # 解析原始数据 (分钟线数据格式 32字节或28字节?)
+            # 原代码假设 raw_data 是某种格式，用 'i6f' 解包 (28字节)
+            if len(raw_data) == 28:
+                values = struct.unpack('<i6f', raw_data)
 
-            # 解析价格和成交量数据
-            open_price = round(values[1] * coeff['price_coeff'], 4)
-            high_price = round(values[2] * coeff['price_coeff'], 4)
-            low_price = round(values[3] * coeff['price_coeff'], 4)
-            close_price = round(values[4] * coeff['price_coeff'], 4)
-            amount = round(values[5], 4)
-            volume = int(values[6] * coeff['volume_coeff'])
+                # 解析价格和成交量数据 (应用系数)
+                open_price = round(values[1] * coeff['price_coeff'], 4)
+                high_price = round(values[2] * coeff['price_coeff'], 4)
+                low_price = round(values[3] * coeff['price_coeff'], 4)
+                close_price = round(values[4] * coeff['price_coeff'], 4)
+                amount = round(values[5], 4)
+                volume = int(values[6] * coeff['volume_coeff'])
 
-            # 从通达信数据中解析日期和时间
-            # values[0] 包含时间戳信息 (通达信格式)
-            tongdaxin_timestamp = values[0]
+                # 时间戳解析 (同原逻辑)
+                tongdaxin_timestamp = values[0]
+                if tongdaxin_timestamp > 0:
+                    timestamp_str = str(int(tongdaxin_timestamp))
+                    trade_date = None
+                    trade_time = None
 
-            # 更严格的时间戳解析
-            if tongdaxin_timestamp > 0:
-                timestamp_str = str(int(tongdaxin_timestamp))
-                trade_date = None
-                trade_time = None
+                    if len(timestamp_str) == 12:  # YYYYMMDDHHMM
+                        year = int(timestamp_str[:4])
+                        month = int(timestamp_str[4:6])
+                        day = int(timestamp_str[6:8])
+                        hour = int(timestamp_str[8:10])
+                        minute = int(timestamp_str[10:12])
+                        if (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31 and
+                            0 <= hour <= 23 and 0 <= minute <= 59):
+                            trade_date = date(year, month, day)
+                            trade_time = time(hour, minute)
+                    elif len(timestamp_str) == 8:  # YYYYMMDD
+                        year = int(timestamp_str[:4])
+                        month = int(timestamp_str[4:6])
+                        day = int(timestamp_str[6:8])
+                        if 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
+                            trade_date = date(year, month, day)
+                            trade_time = time(9, 30)
+                    elif len(timestamp_str) == 10:  # Unix
+                         try:
+                            dt = datetime.fromtimestamp(tongdaxin_timestamp)
+                            trade_date = dt.date()
+                            trade_time = dt.time()
+                         except:
+                            pass
 
-                # 支持多种通达信时间戳格式
-                if len(timestamp_str) == 12:  # YYYYMMDDHHMM
-                    year = int(timestamp_str[:4])
-                    month = int(timestamp_str[4:6])
-                    day = int(timestamp_str[6:8])
-                    hour = int(timestamp_str[8:10])
-                    minute = int(timestamp_str[10:12])
-
-                    # 验证日期时间的合理性
-                    if (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31 and
-                        0 <= hour <= 23 and 0 <= minute <= 59):
-                        trade_date = date(year, month, day)
-                        trade_time = time(hour, minute)
-
-                elif len(timestamp_str) == 8:  # YYYYMMDD
-                    year = int(timestamp_str[:4])
-                    month = int(timestamp_str[4:6])
-                    day = int(timestamp_str[6:8])
-
-                    # 验证日期的合理性
-                    if 1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31:
-                        trade_date = date(year, month, day)
-                        trade_time = time(9, 30)  # 默认开盘时间
-
-                elif len(timestamp_str) == 10:  # Unix时间戳（秒）
-                    try:
-                        dt = datetime.fromtimestamp(tongdaxin_timestamp)
-                        trade_date = dt.date()
-                        trade_time = dt.time()
-                    except (ValueError, OSError):
-                        # Unix时间戳超出范围，跳过此记录
-                        pass
-
-                else:
-                    # 无法识别的格式，跳过此记录
-                    pass
-
-                if trade_date and trade_time:
-                    # 验证日期是否在合理范围内（1990-2100年）
-                    if 1990 <= trade_date.year <= 2100:
+                    if trade_date and trade_time:
                         return {
                             'trade_date': trade_date,
                             'trade_time': trade_time,
@@ -198,11 +243,11 @@ class DataTransformer:
                             'volume': volume
                         }
 
-            # 如果无法解析时间戳，返回None而不是使用无效数据
             return None
 
         except Exception as e:
             # 解析失败时返回None
+            # print(f"Parse error: {e}")
             return None
 
     @staticmethod

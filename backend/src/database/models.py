@@ -25,6 +25,7 @@ class BaseStockInfo:
     list_status: str = 'L'  # L-上市，D-退市，P-暂停上市
     list_date: Optional[date] = None
     delist_date: Optional[date] = None
+    type: Optional[str] = None  # 1：股票，2：指数，3：其它，4：可转债，5：ETF
     create_time: Optional[datetime] = None
     update_time: Optional[datetime] = None
 
@@ -47,6 +48,7 @@ class BaseStockInfo:
             list_status=data.get('list_status', 'L'),
             list_date=data.get('list_date'),
             delist_date=data.get('delist_date'),
+            type=data.get('type'),
             create_time=data.get('create_time'),
             update_time=data.get('update_time')
         )
@@ -69,6 +71,7 @@ class BaseStockInfo:
             'list_status': self.list_status,
             'list_date': self.list_date,
             'delist_date': self.delist_date,
+            'type': self.type,
             'create_time': self.create_time,
             'update_time': self.update_time
         }

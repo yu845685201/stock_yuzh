@@ -215,8 +215,8 @@ class PytdxSource(DataSourceBase):
             # 按照文档要求进行格式转换
             # 根据数据类型确定trade_date格式
             if data_type == '5min':
-                # 5分钟K线：trade_date转换为yyyyMM格式（文档要求）
-                trade_date_str = trade_date.strftime('%Y%m')    # yyyyMM格式
+                # 5分钟K线：trade_date转换为yyyyMMdd格式（修正：原文档要求yyyyMM可能为误写，为了统一和数据库存储，使用yyyyMMdd）
+                trade_date_str = trade_date.strftime('%Y%m%d')    # yyyyMMdd格式
             else:
                 # 1分钟K线：trade_date转换为yyyyMMdd格式（文档要求）
                 trade_date_str = trade_date.strftime('%Y%m%d')  # yyyyMMdd格式
@@ -312,10 +312,21 @@ class PytdxSource(DataSourceBase):
         # 支持三个市场：北交所(bj)、沪市(sh)、深证(sz)
         for market in ['bj', 'sh', 'sz']:
             # 严格按照要求：文件名是股票的不包含"."的ts编码（如sh000001.lc1）
-            filename_without_dot = f'{market}{code}'  # 例如：sh000001
+            # 注意：传入的code可能是6位代码（如600000），也可能是ts_code（如sh.600000）
+            # 如果是纯数字，需要拼接市场前缀
+            clean_code = code.replace(f"{market}.", "") if code.startswith(f"{market}.") else code
+
+            # 对于纯数字代码，尝试拼接市场前缀
+            if clean_code.isdigit():
+                filename_without_dot = f'{market}{clean_code}'  # 例如：sh600000
+            else:
+                # 如果已经包含了市场前缀（如sh600000），直接使用
+                filename_without_dot = clean_code
+
             filepath = os.path.join(self.vipdoc_path, market, subdir, f'{filename_without_dot}{ext}')
 
             if not os.path.exists(filepath):
+                # 尝试另一种组合：如果传入的是纯数字代码，可能对应的市场不匹配，继续尝试下一个市场
                 continue
 
             try:

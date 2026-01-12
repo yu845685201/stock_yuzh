@@ -31,7 +31,7 @@ def fix_table_schema():
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),  -- 扩展为50字符以容纳长名称如"中证财通中国可持续发展100(ECPIESG)指数"
             cnspell VARCHAR(10),
             market_code VARCHAR(5),
             market_name VARCHAR(20),

@@ -268,6 +268,68 @@ class DailyKlineAnomalyDetector:
         return anomalies
 
     
+    def _get_market_type(self, ts_code: str) -> str:
+        """
+        根据ts_code判断市场类型
+
+        Args:
+            ts_code: TS代码，如 sh.600000, sz.000001, bj.830001
+
+        Returns:
+            市场类型: 'main' (沪深主板), 'star' (科创板/创业板), 'bj' (北交所)
+        """
+        if not ts_code:
+            return 'main'
+
+        # 提取市场前缀
+        if ts_code.startswith('sh.'):
+            code = ts_code[3:]
+            # 科创板以68开头
+            if code.startswith('68'):
+                return 'star'
+            else:
+                return 'main'
+        elif ts_code.startswith('sz.'):
+            code = ts_code[3:]
+            # 创业板以30开头
+            if code.startswith('30'):
+                return 'star'
+            else:
+                return 'main'
+        elif ts_code.startswith('bj.'):
+            return 'bj'
+        else:
+            return 'main'
+
+    def _get_change_rate_limit(self, ts_code: str, is_st: bool = False) -> float:
+        """
+        根据股票类型获取涨跌幅限制
+
+        Args:
+            ts_code: TS代码
+            is_st: 是否ST股
+
+        Returns:
+            涨跌幅限制百分比
+        """
+        # ST股票限制为 5.1%
+        if is_st:
+            return 5.1
+
+        market_type = self._get_market_type(ts_code)
+
+        # 根据市场类型返回限制
+        if market_type == 'star':
+            # 科创板和创业板限制为 20.1%
+            return 20.1
+        elif market_type == 'main':
+            # 沪深主板限制为 10.1%
+            return 10.1
+        elif market_type == 'bj':
+            return 30.1 # 北交所保持默认或者按需调整，这里假设也加0.1宽松
+        else:
+            return 10.1 # 默认
+
     def _detect_change_rate_anomalies(self, data: Dict[str, Any], ts_code: str, trade_date: date) -> List[AnomalyRecord]:
         """检测涨跌幅异常"""
         anomalies = []
@@ -279,22 +341,24 @@ class DailyKlineAnomalyDetector:
         if change_rate is None:
             return anomalies
 
-        # 根据股票类型确定涨跌幅限制
-        max_change_rate = self.config.get('max_change_rate', 20)
+        # 根据市场类型和股票状态获取涨跌幅限制
         is_st = data.get('is_st', False)
-
-        # ST股使用更严格的限制
-        if is_st:
-            st_config = self.config.get('st_stock_config', {})
-            max_change_rate = st_config.get('max_change_rate', 6)
+        max_change_rate = self._get_change_rate_limit(ts_code, is_st)
 
         # 检查涨跌幅超过限制
         if abs(change_rate) > max_change_rate:
+            market_type = self._get_market_type(ts_code)
+            market_desc = {
+                'main': '沪深主板',
+                'star': '科创板/创业板',
+                'bj': '北交所'
+            }.get(market_type, '未知')
+
             anomalies.append(AnomalyRecord(
                 ts_code=ts_code,
                 trade_date=trade_date,
                 anomaly_type='change_rate_excessive',
-                description='涨跌幅超过限制',
+                description=f'涨跌幅超过{market_desc}限制',
                 field_name='change_rate',
                 actual_value=f'{change_rate:.2f}%',
                 expected_range=f'±{max_change_rate}%',

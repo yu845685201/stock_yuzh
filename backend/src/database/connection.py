@@ -237,7 +237,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             cnspell VARCHAR(10),
             market_code VARCHAR(5),
             market_name VARCHAR(20),
@@ -259,7 +259,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             trade_date DATE,
             open NUMERIC(10,4),
             high NUMERIC(10,4),
@@ -286,7 +286,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             trade_date DATE,
             trade_time TIME,
             open NUMERIC(10,4),
@@ -299,6 +299,9 @@ class DatabaseConnection:
             adjust_flag SMALLINT,
             change_rate NUMERIC(10,6),
             turnover_rate NUMERIC(10,6),
+            fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期
+            total_share NUMERIC(20,4),                -- 总股本
+            float_share NUMERIC(20,4),                -- 流通股本
             create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -308,7 +311,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             trade_date DATE,
             trade_time TIME,
             open NUMERIC(10,4),
@@ -321,6 +324,9 @@ class DatabaseConnection:
             adjust_flag SMALLINT,
             change_rate NUMERIC(10,6),
             turnover_rate NUMERIC(10,6),
+            fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期
+            total_share NUMERIC(20,4),                -- 总股本
+            float_share NUMERIC(20,4),                -- 流通股本
             create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -330,7 +336,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             trade_date DATE,
             trade_time TIME,
             open NUMERIC(10,4),
@@ -351,7 +357,7 @@ class DatabaseConnection:
             id BIGSERIAL PRIMARY KEY,
             ts_code VARCHAR(20),
             stock_code VARCHAR(20),
-            stock_name VARCHAR(20),
+            stock_name VARCHAR(50),
             disclosure_date TIMESTAMP,
             total_share NUMERIC(20, 4),
             float_share NUMERIC(20, 4),
