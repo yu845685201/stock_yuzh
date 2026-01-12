@@ -1507,9 +1507,9 @@ class SyncManager:
                 end_date = date.today()
             print(f"开始同步1分钟K线数据（数据初始化模式）: 无日期限制")
         else:
-            # 增量更新：默认7天前到今天
+            # 增量更新：默认今天
             if not start_date:
-                start_date = date.today() - timedelta(days=7)
+                start_date = date.today()
             if not end_date:
                 end_date = date.today()
             print(f"开始同步1分钟K线数据（增量更新模式）: {start_date} 至 {end_date}")
@@ -1529,6 +1529,17 @@ class SyncManager:
         batch_size = self.config_manager.get('sync.batch_size', 1000)  # 1分钟数据量更大
         all_min1_data = []
 
+        # 缓冲区
+        csv_buffer = []
+        db_buffer = []
+
+        # 初始化异常检测器
+        if generate_anomaly_report:
+            if not hasattr(self, 'minute_anomaly_detector') or self.minute_anomaly_detector is None:
+                self.minute_anomaly_detector = DailyKlineAnomalyDetector(self.config_manager)
+
+        anomaly_records = []
+
         for i, code in enumerate(codes):
             try:
                 # 使用Pytdx获取1分钟K线数据（记录耗时）
@@ -1542,45 +1553,59 @@ class SyncManager:
                 lc1_read_time += (lc1_end - lc1_start)
 
                 if data:
-                    # 提取股票ts_code，查询base_fundamentals_info表
+                    # 1. 收集原始数据用于CSV生成
+                    if save_to_csv:
+                        csv_buffer.extend(data)
+
+                    # 2. 收集丰富后的数据用于数据库写入
                     ts_code = data[0].get('ts_code') if data else None
                     if ts_code:
                         enriched_data = self._enrich_minute_data_with_fundamentals(data, ts_code)
-                        all_min1_data.extend(enriched_data)
+                        db_buffer.extend(enriched_data)
 
-                    # 批量处理
-                    if len(all_min1_data) >= batch_size or i == len(codes) - 1:
-                        # CSV生成（记录耗时）
+                # 批量处理：达到批次大小 或 最后一个股票
+                # 注意：这里判断的是累积的记录数，或者简单的按股票数量处理也可以
+                # 为了防止内存溢出，按记录数判断更安全
+                current_records_count = len(db_buffer)
+                is_last_stock = (i == len(codes) - 1)
+
+                if current_records_count >= batch_size or is_last_stock:
+                    # 处理CSV生成
+                    if save_to_csv and csv_buffer:
                         csv_start = time.time()
-                        if save_to_csv:
-                            self.csv_writer.write_his_kline_1min(all_min1_data)
+                        self.csv_writer.write_his_kline_1min(csv_buffer)
                         csv_end = time.time()
                         csv_generation_time += (csv_end - csv_start)
+                        csv_buffer = [] # 清空缓冲区
 
-                        # 数据库写入（记录耗时）
-                        db_start = time.time()
+                    # 处理数据库写入
+                    if db_buffer:
+                        # 异常检测
+                        if generate_anomaly_report:
+                            try:
+                                batch_anomalies = self.minute_anomaly_detector.detect_anomalies_batch(db_buffer)
+                                anomaly_records.extend(batch_anomalies)
+                            except Exception as e:
+                                self.logger.error(f"1分钟K线异常检测失败: {e}")
+
+                        # 写入数据库
                         if save_to_db:
-                            self._save_1min_data_to_db(all_min1_data)
-                        db_end = time.time()
-                        db_write_time += (db_end - db_start)
+                            db_start = time.time()
+                            self._save_1min_data_to_db(db_buffer)
+                            db_end = time.time()
+                            db_write_time += (db_end - db_start)
 
-                        total_count += len(all_min1_data)
+                        total_count += len(db_buffer)
                         print(f"已处理 {i+1}/{len(codes)} 只股票，同步1分钟数据 {total_count} 条")
-                        all_min1_data = []
+                        db_buffer = [] # 清空缓冲区
 
             except Exception as e:
                 print(f"同步股票 {code} 的1分钟K线数据失败: {e}")
+                # 发生异常时也要清理缓冲区，防止坏数据影响后续
+                csv_buffer = []
+                db_buffer = []
 
-        # 异常检测
-        anomaly_records = []
-        if generate_anomaly_report and total_count > 0:
-            try:
-                from ..utils.daily_kline_anomaly_detector import DailyKlineAnomalyDetector
-                if not hasattr(self, 'minute_anomaly_detector') or self.minute_anomaly_detector is None:
-                    self.minute_anomaly_detector = DailyKlineAnomalyDetector(self.config_manager)
-                anomaly_records = self.minute_anomaly_detector.detect_anomalies_batch(all_min1_data if all_min1_data else [])
-            except Exception as e:
-                self.logger.error(f"1分钟K线异常检测失败: {e}")
+        # 生成异常报告
 
         # 生成异常报告
         if generate_anomaly_report and anomaly_records:
@@ -1707,7 +1732,7 @@ class SyncManager:
     def _save_1min_data_to_db(self, min1_data: List[Dict[str, Any]]) -> None:
         """保存1分钟K线数据到数据库 - 严格按照文档要求使用ts_code+trade_date+trade_time判断
 
-        包含字段：ts_code, stock_code, stock_name, trade_date, trade_time, open, high, low,
+        包含字段：ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime, open, high, low,
                  close, preclose, volume, amount, adjust_flag, change_rate, turnover_rate,
                  fundamentals_disclosure_date, total_share, float_share
         """
@@ -1716,12 +1741,20 @@ class SyncManager:
             batch = min1_data[i:i+batch_size]
             values = []
             for data in batch:
+                # 确保trade_datetime存在
+                trade_date = data.get('trade_date')
+                trade_time = data.get('trade_time')
+                trade_datetime = data.get('trade_datetime')
+                if not trade_datetime and trade_date and trade_time:
+                    trade_datetime = f"{trade_date}{trade_time}"
+
                 values.append((
                     data.get('ts_code'),
                     data.get('stock_code'),
                     data.get('stock_name'),
                     data.get('trade_date'),
                     data.get('trade_time'),
+                    trade_datetime,
                     data.get('open'),
                     data.get('high'),
                     data.get('low'),
@@ -1739,15 +1772,16 @@ class SyncManager:
 
             query = """
                 INSERT INTO his_kline_1min (
-                    ts_code, stock_code, stock_name, trade_date, trade_time,
+                    ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
                     open, high, low, close, preclose, volume, amount,
                     adjust_flag, change_rate, turnover_rate,
                     fundamentals_disclosure_date, total_share, float_share
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (ts_code, trade_date, trade_time) DO UPDATE SET
                     stock_code = EXCLUDED.stock_code,
                     stock_name = EXCLUDED.stock_name,
+                    trade_datetime = EXCLUDED.trade_datetime,
                     open = EXCLUDED.open,
                     high = EXCLUDED.high,
                     low = EXCLUDED.low,

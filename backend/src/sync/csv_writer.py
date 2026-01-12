@@ -432,13 +432,13 @@ class CsvWriter:
         """
         写入1分钟K线数据到CSV - 严格按照产品设计文档要求
         每只股票生成一个CSV文件，命名规则为his_kline_1min_{ts_code}_{当前时间}.csv
+        数据源：ts_code加上.lc1文件中解析出来的未经任何加工的数据
 
-        包含字段：
-        - 基本信息：ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime
-        - 价格数据：open, high, low, close, preclose
-        - 成交数据：volume, amount, adjust_flag
-        - 计算字段：change_rate, turnover_rate
-        - 关联字段：fundamentals_disclosure_date, total_share, float_share
+        包含字段（原始数据）：
+        - 基本信息：ts_code, stock_code
+        - 交易时间：trade_date, trade_time
+        - 价格数据：open, high, low, close
+        - 成交数据：volume, amount
 
         Args:
             min1_data: 1分钟K线数据列表
@@ -454,34 +454,38 @@ class CsvWriter:
         # 确保子目录存在
         os.makedirs(dirpath, exist_ok=True)
 
-        # 确保字段名符合产品设计文档
+        # 确保字段名符合产品设计文档，只提取原始字段
         mapped_data = []
         for data in min1_data:
+            # 格式化日期和时间
+            trade_date_val = data.get('trade_date')
+            if hasattr(trade_date_val, 'strftime'):
+                trade_date_val = trade_date_val.strftime('%Y%m%d')
+            elif hasattr(data.get('trade_date_str'), '__len__'):
+                 trade_date_val = data.get('trade_date_str')
+
+            trade_time_val = data.get('trade_time')
+            if hasattr(trade_time_val, 'strftime'):
+                trade_time_val = trade_time_val.strftime('%H%M')
+            elif hasattr(data.get('trade_time_str'), '__len__'):
+                 trade_time_val = data.get('trade_time_str')
+
             mapped_min1 = {
                 'ts_code': data.get('ts_code'),
                 'stock_code': data.get('stock_code'),
-                'stock_name': data.get('stock_name'),
-                'trade_date': data.get('trade_date'),
-                'trade_time': data.get('trade_time'),
-                'trade_datetime': data.get('trade_datetime'),
+                'trade_date': trade_date_val,
+                'trade_time': trade_time_val,
                 'open': data.get('open'),
                 'high': data.get('high'),
                 'low': data.get('low'),
                 'close': data.get('close'),
-                'preclose': data.get('preclose'),
                 'volume': data.get('volume'),
-                'amount': data.get('amount'),
-                'adjust_flag': data.get('adjust_flag', 3),
-                'change_rate': data.get('change_rate'),
-                'turnover_rate': data.get('turnover_rate'),
-                'fundamentals_disclosure_date': data.get('fundamentals_disclosure_date'),
-                'total_share': data.get('total_share'),
-                'float_share': data.get('float_share')
+                'amount': data.get('amount')
             }
             mapped_data.append(mapped_min1)
 
         # 按股票分组并写入独立文件（符合文档要求）
-        self._write_1min_data_by_trade_date(mapped_data, dirpath)
+        self._write_1min_data_by_stock(mapped_data, dirpath)
 
     def write_his_kline_5min(self, min5_data: List[Dict[str, Any]]) -> None:
         """
@@ -736,7 +740,7 @@ class CsvWriter:
 
         self.file_manager.config['per_type_settings'][data_type] = {'mode': mode}
 
-    def _write_1min_data_by_trade_date(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
+    def _write_1min_data_by_stock(self, mapped_data: List[Dict[str, Any]], dirpath: str) -> None:
         """
         按股票分组写入1分钟K线数据到独立CSV文件 - 严格按照产品设计文档要求
         命名规则：his_kline_1min_{ts_code}_{当前时间}.csv

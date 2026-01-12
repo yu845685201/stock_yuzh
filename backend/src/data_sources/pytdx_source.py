@@ -334,7 +334,7 @@ class PytdxSource(DataSourceBase):
                 df = reader.get_df(filepath)
 
                 # 转换为系统标准格式
-                converted_data = self._convert_minute_dataframe(df, code, market, data_type, start_date, end_date)
+                converted_data = self._convert_minute_dataframe(df, clean_code, market, data_type, start_date, end_date)
                 minute_data.extend(converted_data)
 
             except Exception as e:
