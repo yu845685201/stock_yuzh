@@ -134,6 +134,7 @@ class PytdxSource(DataSourceBase):
                                 start_date: date = None, end_date: date = None) -> List[Dict[str, Any]]:
         """
         将pytdx Reader的日K线DataFrame转换为系统标准格式
+        在此处计算preclose和change_rate，确保基于全量数据计算，不受日期过滤影响
 
         Args:
             df: pytdx Reader返回的DataFrame
@@ -146,6 +147,28 @@ class PytdxSource(DataSourceBase):
             转换后的数据列表
         """
         daily_data = []
+
+        if df.empty:
+            return daily_data
+
+        # 1. 预处理：排序并计算preclose和change_rate（在过滤日期之前）
+        # 确保按时间排序
+        df = df.sort_index()
+
+        # 计算preclose：上一条记录的close
+        df['preclose'] = df['close'].shift(1)
+
+        # 第一条记录的preclose设为open (如果没有获取到前一天数据，就使用本条数据open字段值)
+        if pd.isna(df.iloc[0]['preclose']):
+            df.iloc[0, df.columns.get_loc('preclose')] = df.iloc[0]['open']
+
+        # 计算涨跌幅: (close - preclose) / preclose * 100
+        def calculate_change(row):
+            if row['preclose'] and row['preclose'] != 0:
+                return round((row['close'] - row['preclose']) / row['preclose'] * 100, 4)
+            return None
+
+        df['change_rate'] = df.apply(calculate_change, axis=1)
 
         for date_index, row in df.iterrows():
             # 解析日期和格式转换 - date是索引，yyyy-MM-dd → yyyyMMdd
@@ -170,13 +193,13 @@ class PytdxSource(DataSourceBase):
                 'high': round(float(row['high']), 4),
                 'low': round(float(row['low']), 4),
                 'close': round(float(row['close']), 4),
-                'preclose': None,  # 在后处理中计算
+                'preclose': round(float(row['preclose']), 4),  # 使用预计算的值
                 'volume': int(row['volume']),
                 'amount': round(float(row['amount']), 4),
                 'trade_status': None,  # 无法直接从文件获取，需要结合交易日历判断
                 'is_st': None,  # 通过股票名称判断是否包含ST标记
                 'adjust_flag': 3,  # 默认为不复权状态
-                'change_rate': None,  # 在后处理中计算
+                'change_rate': row['change_rate'],  # 使用预计算的值
                 'turnover_rate': None,  # 在后处理中计算
                 'pe_ttm': None,  # 无法直接从文件获取，需要财务数据配合计算
                 'pb_rate': None,  # 无法直接从文件获取，需要财务数据配合计算
@@ -192,6 +215,7 @@ class PytdxSource(DataSourceBase):
                                  data_type: str = '1min', start_date: date = None, end_date: date = None) -> List[Dict[str, Any]]:
         """
         将pytdx Reader的分钟K线DataFrame转换为系统标准格式
+        在此处计算preclose和change_rate，确保基于全量数据计算，不受日期过滤影响
 
         Args:
             df: pytdx Reader返回的DataFrame
@@ -206,29 +230,54 @@ class PytdxSource(DataSourceBase):
         """
         minute_data = []
 
+        if df.empty:
+            return minute_data
+
+        # 1. 预处理：排序并计算preclose和change_rate（在过滤日期之前）
+        # 确保按时间排序
+        df = df.sort_index()
+
+        # 计算preclose：上一条记录的close
+        # shift(1)会将第一条记录设为NaN
+        df['preclose'] = df['close'].shift(1)
+
+        # 第一条记录的preclose设为open (根据文档要求: 如果没有获取到前一分钟数据的close字段，就使用本条数据open字段值)
+        # 注意：这里是文件的第一条记录，不仅仅是过滤后的第一条
+        if pd.isna(df.iloc[0]['preclose']):
+            df.iloc[0, df.columns.get_loc('preclose')] = df.iloc[0]['open']
+
+        # 计算涨跌幅: (close - preclose) / preclose * 100
+        # 避免除以0
+        def calculate_change(row):
+            if row['preclose'] and row['preclose'] != 0:
+                return round((row['close'] - row['preclose']) / row['preclose'] * 100, 6)
+            return None
+
+        df['change_rate'] = df.apply(calculate_change, axis=1)
+
         for datetime_index, row in df.iterrows():
             # 解析日期时间 - datetime是索引，yyyy-MM-dd hh:mm:ss
             datetime_obj = pd.to_datetime(datetime_index)
             trade_date = datetime_obj.date()
             trade_time = datetime_obj.time()
 
-            # 按照文档要求进行格式转换
-            # 根据数据类型确定trade_date格式
-            if data_type == '5min':
-                # 5分钟K线：trade_date转换为yyyyMMdd格式（修正：原文档要求yyyyMM可能为误写，为了统一和数据库存储，使用yyyyMMdd）
-                trade_date_str = trade_date.strftime('%Y%m%d')    # yyyyMMdd格式
-            else:
-                # 1分钟K线：trade_date转换为yyyyMMdd格式（文档要求）
-                trade_date_str = trade_date.strftime('%Y%m%d')  # yyyyMMdd格式
-
-            trade_time_str = trade_time.strftime('%H%M')     # hhmm格式
-            trade_datetime_str = datetime_obj.strftime('%Y%m%d%H%M')  # yyyyMMddhhmm格式
-
-            # 过滤日期范围
+            # 过滤日期范围（在计算完preclose之后进行）
             if start_date and trade_date < start_date:
                 continue
             if end_date and trade_date > end_date:
                 continue
+
+            # 按照文档要求进行格式转换
+            # 根据数据类型确定trade_date格式
+            if data_type == '5min':
+                # 5分钟K线：trade_date转换为yyyyMMdd格式
+                trade_date_str = trade_date.strftime('%Y%m%d')    # yyyyMMdd格式
+            else:
+                # 1分钟K线：trade_date转换为yyyyMMdd格式
+                trade_date_str = trade_date.strftime('%Y%m%d')  # yyyyMMdd格式
+
+            trade_time_str = trade_time.strftime('%H%M')     # hhmm格式
+            trade_datetime_str = datetime_obj.strftime('%Y%m%d%H%M')  # yyyyMMddhhmm格式
 
             minute_record = {
                 'ts_code': f'{market}.{code}',
@@ -241,11 +290,11 @@ class PytdxSource(DataSourceBase):
                 'high': round(float(row['high']), 4),
                 'low': round(float(row['low']), 4),
                 'close': round(float(row['close']), 4),
-                'preclose': None,  # 在后处理中计算
+                'preclose': round(float(row['preclose']), 4),  # 使用预计算的值
                 'volume': int(row['volume']),
                 'amount': round(float(row['amount']), 4),
                 'adjust_flag': 3,  # 默认为不复权状态
-                'change_rate': None,  # 在后处理中计算
+                'change_rate': row['change_rate'],  # 使用预计算的值
                 'turnover_rate': None  # 在后处理中计算
             }
 
@@ -340,8 +389,8 @@ class PytdxSource(DataSourceBase):
             except Exception as e:
                 print(f"使用pytdx Reader读取文件 {filepath} 失败: {e}")
 
-        # 后处理：计算涨跌幅和preclose字段
-        minute_data = self._post_process_minute_data(minute_data, data_type)
+        # 后处理：不再需要重新计算涨跌幅和preclose，已在_convert_minute_dataframe中处理
+        # minute_data = self._post_process_minute_data(minute_data, data_type)
 
         return minute_data
 

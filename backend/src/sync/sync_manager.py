@@ -594,6 +594,9 @@ class SyncManager:
                 # 读取文件数据
                 with open(filepath, 'rb') as f:
                     file_data = []
+                    # 维护昨收价状态
+                    last_close = None
+
                     # 每条记录的字节数
                     while True:
                         data = f.read(record_size)
@@ -605,6 +608,13 @@ class SyncManager:
                         if parsed_data is None:
                             continue
 
+                        # 1. 优先计算preclose（在日期过滤之前）
+                        # 如果是文件的第一条记录，preclose设为open
+                        current_preclose = last_close if last_close is not None else parsed_data['open']
+
+                        # 更新last_close供下一条记录使用
+                        last_close = parsed_data['close']
+
                         trade_date = parsed_data['trade_date']
 
                         # 过滤日期范围
@@ -612,6 +622,11 @@ class SyncManager:
                             continue
                         if end_date and trade_date > end_date:
                             continue
+
+                        # 计算涨跌幅
+                        change_rate = None
+                        if current_preclose and current_preclose != 0:
+                            change_rate = round((parsed_data['close'] - current_preclose) / current_preclose * 100, 4)
 
                         # 构建K线记录（带元数据，用于数据库写入）
                         record = {
@@ -623,13 +638,13 @@ class SyncManager:
                             'high': parsed_data['high'],
                             'low': parsed_data['low'],
                             'close': parsed_data['close'],
-                            'preclose': parsed_data.get('preclose'),  # 从文件解析
+                            'preclose': current_preclose,  # 使用正确计算的preclose
                             'volume': parsed_data['volume'],
                             'amount': parsed_data['amount'],
                             'trade_status': None,
                             'is_st': None,
                             'adjust_flag': 3,  # 默认不复权
-                            'change_rate': None,  # 后续计算
+                            'change_rate': change_rate,  # 实时计算
                             'turnover_rate': None,  # 后续计算
                             'pe_ttm': None,
                             'pb_rate': None,
@@ -639,8 +654,9 @@ class SyncManager:
 
                         file_data.append(record)
 
-                    # 后处理：计算涨跌幅
-                    file_data = self._post_process_daily_data(file_data)
+                    # 后处理：计算涨跌幅 (已在循环中计算，此处保留调用但需修改方法实现以避免覆盖)
+                    # 或者直接在此处移除调用，改用安全的后处理
+                    # file_data = self._post_process_daily_data(file_data)
 
                     # 保存原始.day文件数据（仅添加ts_code，保持.day文件解析的原始字段名）
                     raw_file_data = []
@@ -711,48 +727,48 @@ class SyncManager:
             ts_code = record['ts_code']
             trade_date = record.get('trade_date')
 
-            # 设置股票名称（优先使用基本面数据中的名称）
-            if ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
-                enriched_record['stock_name'] = latest_fundamentals_data[ts_code]['stock_name']
-            elif ts_code in missing_stock_names:
-                enriched_record['stock_name'] = missing_stock_names[ts_code]
-            else:
-                enriched_record['stock_name'] = None
-
             # 按交易日动态查找最近的披露日及相关字段
+            nearest_fundamentals = {}
             if ts_code in all_fundamentals_data and trade_date:
                 # 获取该交易日之前最近的基本面信息
                 nearest_fundamentals = self._get_nearest_fundamentals(
                     ts_code, trade_date, all_fundamentals_data[ts_code]
                 )
 
-                if nearest_fundamentals:
-                    # 添加新字段：关联的基本面信息披露日期、总股本、流通股本
-                    enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
-                    enriched_record['total_share'] = nearest_fundamentals.get('total_share')
-                    enriched_record['float_share'] = nearest_fundamentals.get('float_share')
+            # 设置股票名称
+            # 优先级1：最近的基本面信息（历史名称，Point-in-Time）
+            if nearest_fundamentals and nearest_fundamentals.get('stock_name'):
+                enriched_record['stock_name'] = nearest_fundamentals['stock_name']
+            # 优先级2：最新基本面信息
+            elif ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
+                enriched_record['stock_name'] = latest_fundamentals_data[ts_code]['stock_name']
+            # 优先级3：基础股票信息表
+            elif ts_code in missing_stock_names:
+                enriched_record['stock_name'] = missing_stock_names[ts_code]
+            else:
+                enriched_record['stock_name'] = None
 
-                    # 计算换手率（使用动态查找到的float_share）
-                    float_share = nearest_fundamentals.get('float_share')
-                    if float_share and record.get('volume'):
-                        try:
-                            from ..utils.data_transformer import DataTransformer
-                            enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
-                                record['volume'], float_share
-                            )
-                        except Exception as e:
-                            self.logger.warning(f"计算换手率失败 {ts_code}: {e}")
-                            enriched_record['turnover_rate'] = None
-                    else:
+            if nearest_fundamentals:
+                # 添加新字段：关联的基本面信息披露日期、总股本、流通股本
+                enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
+                enriched_record['total_share'] = nearest_fundamentals.get('total_share')
+                enriched_record['float_share'] = nearest_fundamentals.get('float_share')
+
+                # 计算换手率（使用动态查找到的float_share）
+                float_share = nearest_fundamentals.get('float_share')
+                if float_share and record.get('volume'):
+                    try:
+                        from ..utils.data_transformer import DataTransformer
+                        enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
+                            record['volume'], float_share
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"计算换手率失败 {ts_code}: {e}")
                         enriched_record['turnover_rate'] = None
                 else:
-                    # 没有找到满足条件的基本面数据
-                    enriched_record['fundamentals_disclosure_date'] = None
-                    enriched_record['total_share'] = None
-                    enriched_record['float_share'] = None
                     enriched_record['turnover_rate'] = None
             else:
-                # 没有基本面数据
+                # 没有找到满足条件的基本面数据
                 enriched_record['fundamentals_disclosure_date'] = None
                 enriched_record['total_share'] = None
                 enriched_record['float_share'] = None
@@ -1105,6 +1121,9 @@ class SyncManager:
                         # 读取文件数据
                         with open(filepath, 'rb') as f:
                             file_data = []
+                            # 维护昨收价状态
+                            last_close = None
+
                             # 每条记录的字节数
                             while True:
                                 data = f.read(record_size)
@@ -1116,6 +1135,13 @@ class SyncManager:
                                 if parsed_data is None:
                                     continue
 
+                                # 1. 优先计算preclose（在日期过滤之前）
+                                # 如果是文件的第一条记录，preclose设为open
+                                current_preclose = last_close if last_close is not None else parsed_data['open']
+
+                                # 更新last_close供下一条记录使用
+                                last_close = parsed_data['close']
+
                                 trade_date = parsed_data['trade_date']
 
                                 # 过滤日期范围
@@ -1123,6 +1149,11 @@ class SyncManager:
                                     continue
                                 if end_date and trade_date > end_date:
                                     continue
+
+                                # 计算涨跌幅
+                                change_rate = None
+                                if current_preclose and current_preclose != 0:
+                                    change_rate = round((parsed_data['close'] - current_preclose) / current_preclose * 100, 4)
 
                                 # 构建K线记录
                                 if file_type == 'day':
@@ -1135,13 +1166,13 @@ class SyncManager:
                                         'high': parsed_data['high'],
                                         'low': parsed_data['low'],
                                         'close': parsed_data['close'],
-                                        'preclose': parsed_data.get('preclose'),  # 从文件解析
+                                        'preclose': current_preclose,  # 使用正确计算的preclose
                                         'volume': parsed_data['volume'],
                                         'amount': parsed_data['amount'],
                                         'trade_status': None,
                                         'is_st': None,
                                         'adjust_flag': 3,  # 默认不复权
-                                        'change_rate': None,  # 后续计算
+                                        'change_rate': change_rate,  # 实时计算
                                         'turnover_rate': None,  # 后续计算
                                         'pe_ttm': None,
                                         'pb_rate': None,
@@ -1165,21 +1196,21 @@ class SyncManager:
                                         'high': parsed_data['high'],
                                         'low': parsed_data['low'],
                                         'close': parsed_data['close'],
-                                        'preclose': None,  # 后续计算
+                                        'preclose': current_preclose,  # 使用正确计算的preclose
                                         'volume': parsed_data['volume'],
                                         'amount': parsed_data['amount'],
                                         'adjust_flag': 3,
-                                        'change_rate': None,  # 后续计算
+                                        'change_rate': change_rate,  # 实时计算
                                         'turnover_rate': None  # 后续计算
                                     }
 
                                 file_data.append(record)
 
-                            # 后处理：计算涨跌幅（仅对日K线）
-                            if file_type == 'day':
-                                file_data = self._post_process_daily_data(file_data)
-                            else:  # 5min
-                                file_data = self._post_process_5min_data(file_data)
+                            # 后处理：不再需要调用_post_process计算涨跌幅，防止覆盖正确计算的preclose
+                            # if file_type == 'day':
+                            #     file_data = self._post_process_daily_data(file_data)
+                            # else:  # 5min
+                            #     file_data = self._post_process_5min_data(file_data)
 
                             all_data.extend(file_data)
                             processed_files += 1
@@ -1345,9 +1376,21 @@ class SyncManager:
                 ts_code = record['ts_code']
                 trade_date = record.get('trade_date')
 
-                # 5.1 设置stock_name（优先base_fundamentals_info表）
-                if ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
+                # 获取该交易日之前最近的基本面信息
+                nearest_fundamentals = {}
+                if ts_code in all_fundamentals_data and trade_date:
+                    nearest_fundamentals = self._get_nearest_fundamentals(
+                        ts_code, trade_date, all_fundamentals_data[ts_code]
+                    )
+
+                # 5.1 设置stock_name
+                # 优先级1：最近的基本面信息（历史名称，Point-in-Time）
+                if nearest_fundamentals and nearest_fundamentals.get('stock_name'):
+                    enriched_record['stock_name'] = nearest_fundamentals['stock_name']
+                # 优先级2：最新基本面信息
+                elif ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
                     enriched_record['stock_name'] = latest_fundamentals_data[ts_code]['stock_name']
+                # 优先级3：基础股票信息表
                 elif ts_code in missing_stock_names:
                     enriched_record['stock_name'] = missing_stock_names[ts_code]
                 else:
@@ -1360,40 +1403,28 @@ class SyncManager:
                 else:
                     enriched_record['is_st'] = False
 
-                # 5.2 按交易日动态查找最近的披露日及相关字段
-                if ts_code in all_fundamentals_data and trade_date:
-                    # 获取该交易日之前最近的基本面信息
-                    nearest_fundamentals = self._get_nearest_fundamentals(
-                        ts_code, trade_date, all_fundamentals_data[ts_code]
-                    )
+                # 5.2 设置关联的基本面信息披露日期及相关字段
+                if nearest_fundamentals:
+                    enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
+                    enriched_record['total_share'] = nearest_fundamentals.get('total_share')
+                    enriched_record['float_share'] = nearest_fundamentals.get('float_share')
 
-                    if nearest_fundamentals:
-                        enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
-                        enriched_record['total_share'] = nearest_fundamentals.get('total_share')
-                        enriched_record['float_share'] = nearest_fundamentals.get('float_share')
-
-                        # 5.3 计算换手率
-                        float_share = nearest_fundamentals.get('float_share')
-                        volume = record.get('volume')
-                        if float_share and volume:
-                            try:
-                                from ..utils.data_transformer import DataTransformer
-                                enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
-                                    volume, float_share
-                                )
-                            except Exception as e:
-                                self.logger.warning(f"计算5分钟换手率失败 {ts_code}: {e}")
-                                enriched_record['turnover_rate'] = None
-                        else:
+                    # 5.3 计算换手率
+                    float_share = nearest_fundamentals.get('float_share')
+                    volume = record.get('volume')
+                    if float_share and volume:
+                        try:
+                            from ..utils.data_transformer import DataTransformer
+                            enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
+                                volume, float_share
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"计算5分钟换手率失败 {ts_code}: {e}")
                             enriched_record['turnover_rate'] = None
                     else:
-                        # 没有找到满足条件的基本面数据
-                        enriched_record['fundamentals_disclosure_date'] = None
-                        enriched_record['total_share'] = None
-                        enriched_record['float_share'] = None
                         enriched_record['turnover_rate'] = None
                 else:
-                    # 没有基本面数据
+                    # 没有找到满足条件的基本面数据
                     enriched_record['fundamentals_disclosure_date'] = None
                     enriched_record['total_share'] = None
                     enriched_record['float_share'] = None
@@ -1667,9 +1698,21 @@ class SyncManager:
                 enriched_record = record.copy()
                 trade_date = record.get('trade_date')
 
-                # 4.1 设置stock_name（优先base_fundamentals_info表）
-                if ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
+                # 获取该交易日之前最近的基本面信息
+                nearest_fundamentals = {}
+                if ts_code in all_fundamentals_data and trade_date:
+                    nearest_fundamentals = self._get_nearest_fundamentals(
+                        ts_code, trade_date, all_fundamentals_data[ts_code]
+                    )
+
+                # 4.1 设置stock_name
+                # 优先级1：最近的基本面信息（历史名称，Point-in-Time）
+                if nearest_fundamentals and nearest_fundamentals.get('stock_name'):
+                    enriched_record['stock_name'] = nearest_fundamentals['stock_name']
+                # 优先级2：最新基本面信息
+                elif ts_code in latest_fundamentals_data and latest_fundamentals_data[ts_code].get('stock_name'):
                     enriched_record['stock_name'] = latest_fundamentals_data[ts_code]['stock_name']
+                # 优先级3：基础股票信息表
                 elif ts_code in missing_stock_names:
                     enriched_record['stock_name'] = missing_stock_names[ts_code]
                 else:
@@ -1682,40 +1725,28 @@ class SyncManager:
                 else:
                     enriched_record['is_st'] = False
 
-                # 4.2 按交易日动态查找最近的披露日及相关字段
-                if ts_code in all_fundamentals_data and trade_date:
-                    # 获取该交易日之前最近的基本面信息
-                    nearest_fundamentals = self._get_nearest_fundamentals(
-                        ts_code, trade_date, all_fundamentals_data[ts_code]
-                    )
+                # 4.2 设置关联的基本面信息披露日期及相关字段
+                if nearest_fundamentals:
+                    enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
+                    enriched_record['total_share'] = nearest_fundamentals.get('total_share')
+                    enriched_record['float_share'] = nearest_fundamentals.get('float_share')
 
-                    if nearest_fundamentals:
-                        enriched_record['fundamentals_disclosure_date'] = nearest_fundamentals.get('disclosure_date')
-                        enriched_record['total_share'] = nearest_fundamentals.get('total_share')
-                        enriched_record['float_share'] = nearest_fundamentals.get('float_share')
-
-                        # 4.3 计算换手率
-                        float_share = nearest_fundamentals.get('float_share')
-                        volume = record.get('volume')
-                        if float_share and volume:
-                            try:
-                                from ..utils.data_transformer import DataTransformer
-                                enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
-                                    volume, float_share
-                                )
-                            except Exception as e:
-                                self.logger.warning(f"计算换手率失败 {ts_code}: {e}")
-                                enriched_record['turnover_rate'] = None
-                        else:
+                    # 4.3 计算换手率
+                    float_share = nearest_fundamentals.get('float_share')
+                    volume = record.get('volume')
+                    if float_share and volume:
+                        try:
+                            from ..utils.data_transformer import DataTransformer
+                            enriched_record['turnover_rate'] = DataTransformer.calculate_turnover_rate(
+                                volume, float_share
+                            )
+                        except Exception as e:
+                            self.logger.warning(f"计算换手率失败 {ts_code}: {e}")
                             enriched_record['turnover_rate'] = None
                     else:
-                        # 没有找到满足条件的基本面数据
-                        enriched_record['fundamentals_disclosure_date'] = None
-                        enriched_record['total_share'] = None
-                        enriched_record['float_share'] = None
                         enriched_record['turnover_rate'] = None
                 else:
-                    # 没有基本面数据
+                    # 没有找到满足条件的基本面数据
                     enriched_record['fundamentals_disclosure_date'] = None
                     enriched_record['total_share'] = None
                     enriched_record['float_share'] = None
