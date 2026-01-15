@@ -244,3 +244,159 @@ class HisKline5Min:
 
 # 为了向后兼容，保留Min5Data别名
 Min5Data = HisKline5Min
+
+
+@dataclass
+class HisKline1Min:
+    """历史1分钟K线数据模型 - 严格按照文档要求"""
+    id: Optional[int] = None
+    ts_code: Optional[str] = None
+    stock_code: str = ""
+    stock_name: Optional[str] = None
+    trade_date: Optional[str] = None  # yyyyMMdd
+    trade_time: Optional[str] = None  # hhmm
+    trade_datetime: Optional[str] = None  # yyyyMMddhhmm
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    preclose: Optional[float] = None
+    volume: Optional[int] = None
+    amount: Optional[float] = None
+    adjust_flag: Optional[int] = None  # 1：后复权，2：前复权，3：不复权
+    change_rate: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'HisKline1Min':
+        """从字典创建HisKline1Min对象"""
+        return cls(
+            id=data.get('id'),
+            ts_code=data.get('ts_code'),
+            stock_code=data.get('stock_code') or data.get('code', ''),
+            stock_name=data.get('stock_name') or data.get('name'),
+            trade_date=data.get('trade_date') or data.get('date'),
+            trade_time=data.get('trade_time'),
+            trade_datetime=data.get('trade_datetime'),
+            open=data.get('open'),
+            high=data.get('high'),
+            low=data.get('low'),
+            close=data.get('close'),
+            preclose=data.get('preclose'),
+            volume=data.get('volume'),
+            amount=data.get('amount'),
+            adjust_flag=data.get('adjust_flag'),
+            change_rate=data.get('change_rate') or data.get('pct_chg') or data.get('pctChg'),
+            turnover_rate=data.get('turnover_rate') or data.get('turn'),
+            create_time=data.get('create_time'),
+            update_time=data.get('update_time')
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'id': self.id,
+            'ts_code': self.ts_code,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'trade_date': self.trade_date,
+            'trade_time': self.trade_time,
+            'trade_datetime': self.trade_datetime,
+            'open': self.open,
+            'high': self.high,
+            'low': self.low,
+            'close': self.close,
+            'preclose': self.preclose,
+            'volume': self.volume,
+            'amount': self.amount,
+            'adjust_flag': self.adjust_flag,
+            'change_rate': self.change_rate,
+            'turnover_rate': self.turnover_rate,
+            'create_time': self.create_time,
+            'update_time': self.update_time
+        }
+
+
+# 为了向后兼容，保留Min1Data别名
+Min1Data = HisKline1Min
+
+
+@dataclass
+class AnalKlineRise25Pre:
+    """立体K线数据模型 (上涨2.5%)"""
+    id: Optional[int] = None
+    ts_code: Optional[str] = None
+    stock_code: str = ""
+    stock_name: Optional[str] = None
+    trade_begin_date: Optional[str] = None  # 区间起始交易日，yyyyMMdd
+    trade_begin_time: Optional[str] = None  # 区间起始时间，hhmm
+    trade_begin_datetime: Optional[str] = None  # 区间起始日期时间，yyyyMMddhhmm
+    trade_date: Optional[str] = None  # 区间结束交易日，yyyyMMdd
+    trade_time: Optional[str] = None  # 区间结束时间，hhmm
+    trade_datetime: Optional[str] = None  # 区间结束日期时间，yyyyMMddhhmm
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    close: Optional[float] = None
+    volume: Optional[int] = None
+    amount: Optional[float] = None
+    adjust_flag: Optional[int] = None
+    change_rate: Optional[float] = None
+    turnover_rate: Optional[float] = None
+    create_time: Optional[datetime] = None
+    update_time: Optional[datetime] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'AnalKlineRise25Pre':
+        """从字典创建AnalKlineRise25Pre对象"""
+        return cls(
+            id=data.get('id'),
+            ts_code=data.get('ts_code'),
+            stock_code=data.get('stock_code') or data.get('code', ''),
+            stock_name=data.get('stock_name') or data.get('name'),
+            trade_begin_date=data.get('trade_begin_date'),
+            trade_begin_time=data.get('trade_begin_time'),
+            trade_begin_datetime=data.get('trade_begin_datetime'),
+            trade_date=data.get('trade_date') or data.get('date'),
+            trade_time=data.get('trade_time'),
+            trade_datetime=data.get('trade_datetime'),
+            open=data.get('open'),
+            high=data.get('high'),
+            low=data.get('low'),
+            close=data.get('close'),
+            volume=data.get('volume'),
+            amount=data.get('amount'),
+            adjust_flag=data.get('adjust_flag'),
+            change_rate=data.get('change_rate'),
+            turnover_rate=data.get('turnover_rate'),
+            create_time=data.get('create_time'),
+            update_time=data.get('update_time')
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return {
+            'id': self.id,
+            'ts_code': self.ts_code,
+            'stock_code': self.stock_code,
+            'stock_name': self.stock_name,
+            'trade_begin_date': self.trade_begin_date,
+            'trade_begin_time': self.trade_begin_time,
+            'trade_begin_datetime': self.trade_begin_datetime,
+            'trade_date': self.trade_date,
+            'trade_time': self.trade_time,
+            'trade_datetime': self.trade_datetime,
+            'open': self.open,
+            'high': self.high,
+            'low': self.low,
+            'close': self.close,
+            'volume': self.volume,
+            'amount': self.amount,
+            'adjust_flag': self.adjust_flag,
+            'change_rate': self.change_rate,
+            'turnover_rate': self.turnover_rate,
+            'create_time': self.create_time,
+            'update_time': self.update_time
+        }

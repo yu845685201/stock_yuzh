@@ -476,7 +476,6 @@ CREATE TABLE anal_kline_rise_25pre (
     high NUMERIC(30, 8) DEFAULT 0.00000000,
     low NUMERIC(30, 8) DEFAULT 0.00000000,
     close NUMERIC(30, 8) DEFAULT 0.00000000,
-    preclose NUMERIC(30, 8) DEFAULT 0.00000000,
     
     -- 成交量与成交额
     volume NUMERIC(30, 8) DEFAULT 0.00000000,  -- 成交量（单位：股）
@@ -524,7 +523,6 @@ COMMENT ON COLUMN anal_kline_rise_25pre.open IS '该周期开盘价，精度：�
 COMMENT ON COLUMN anal_kline_rise_25pre.high IS '该周期最高价，精度：小数点后8位，单位：人民币元';
 COMMENT ON COLUMN anal_kline_rise_25pre.low IS '该周期最低价，精度：小数点后8位，单位：人民币元';
 COMMENT ON COLUMN anal_kline_rise_25pre.close IS '该周期收盘价，精度：小数点后8位，单位：人民币元';
-COMMENT ON COLUMN anal_kline_rise_25pre.preclose IS '前一周期收盘价，精度：小数点后8位，单位：人民币元';
 COMMENT ON COLUMN anal_kline_rise_25pre.volume IS '成交量，单位：股，精度：小数点后8位';
 COMMENT ON COLUMN anal_kline_rise_25pre.amount IS '成交额，精度：小数点后8位，单位：人民币元';
 COMMENT ON COLUMN anal_kline_rise_25pre.change_rate IS '涨跌幅，精度：小数点后8位，计算公式：[(指定交易日的收盘价-指定交易日前收盘价)/指定交易日前收盘价]*100%';

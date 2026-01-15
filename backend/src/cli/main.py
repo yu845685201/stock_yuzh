@@ -443,6 +443,87 @@ def status(ctx):
         click.echo(f"  - {path_name}目录: {'存在' if exists else '不存在'} ({path_value})")
 
 
+@cli.command()
+@click.option('--start-date', help='开始日期 (YYYY-MM-DD)')
+@click.option('--end-date', help='结束日期 (YYYY-MM-DD)')
+@click.option('--codes', help='股票代码列表，逗号分隔')
+@click.option('--source-type', type=click.Choice(['1min', '5min']), default='5min',
+              help='K线数据源类型: 1min=1分钟K线, 5min=5分钟K线 (默认: 5min)')
+@click.pass_context
+def analyze_stereo(ctx, start_date, end_date, codes, source_type):
+    """生成立体K线数据 (上涨2.5%)"""
+    from src.services.stereo_kline_service import StereoKlineService
+
+    click.echo("开始生成立体K线数据...")
+    click.echo(f"  - 数据源类型: {source_type}")
+
+    # 解析日期
+    start_dt = None
+    end_dt = None
+    if start_date:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d').date()
+    else:
+        # 默认为最近30天? 或者必须指定?
+        # 如果未指定，默认处理所有历史数据可能太慢。
+        # 这里建议用户指定，或者默认最近一年?
+        # 暂时设为默认为空，服务层处理(服务层如果是None会怎样?)
+        # 最好在CLI层处理好默认值
+        start_dt = date(2020, 1, 1) # 默认一个较早的时间
+        click.echo(f"  - 未指定开始日期，默认从 {start_dt} 开始")
+
+    if end_date:
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d').date()
+    else:
+        end_dt = date.today()
+        click.echo(f"  - 未指定结束日期，默认至 {end_dt}")
+
+    # 解析股票代码
+    target_codes = []
+    if codes:
+        target_codes = [code.strip() for code in codes.split(',')]
+        click.echo(f"  - 指定股票: {len(target_codes)}只")
+    else:
+        click.echo("  - 未指定股票，将处理数据库中所有股票")
+        # 从数据库获取所有股票代码
+        db_conn = DatabaseConnection(ctx.obj['config_manager'])
+        try:
+            results = db_conn.execute_query("SELECT ts_code FROM base_stock_info WHERE list_status = 'L'")
+            target_codes = [r['ts_code'] for r in results]
+            click.echo(f"  - 数据库中共有 {len(target_codes)} 只在上市股票")
+        except Exception as e:
+            click.echo(f"✗ 获取股票列表失败: {e}")
+            return
+
+    if not target_codes:
+        click.echo("没有需要处理的股票")
+        return
+
+    service = StereoKlineService(ctx.obj['config_manager'])
+
+    success_count = 0
+    total_generated = 0
+
+    with click.progressbar(target_codes, label='处理进度') as bar:
+        for ts_code in bar:
+            try:
+                result = service.generate_stereo_klines(
+                    ts_code,
+                    start_dt,
+                    end_dt,
+                    source_type=source_type
+                )
+                if result['success']:
+                    success_count += 1
+                    total_generated += result.get('count', 0)
+            except Exception as e:
+                # 记录错误但不中断整个过程
+                logging.error(f"处理 {ts_code} 失败: {e}")
+
+    click.echo(f"\n✓ 处理完成!")
+    click.echo(f"  - 成功处理股票: {success_count}/{len(target_codes)}")
+    click.echo(f"  - 生成立体K线: {total_generated} 条")
+
+
 def main():
     """命令行入口函数"""
     # 设置日志配置，确保进度条能够正常显示
