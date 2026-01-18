@@ -373,39 +373,42 @@ COMMENT ON COLUMN his_kline_1min.update_time IS '数据修改时间，自动更�
 CREATE TABLE his_kline_5min (
     -- 主键
     id BIGSERIAL PRIMARY KEY,
-    
+
     -- 股票基本信息
     ts_code VARCHAR(20) NOT NULL,
     stock_code VARCHAR(20) NOT NULL,
     stock_name VARCHAR(20) NOT NULL,
-    
+
     -- 交易日期和时间
     trade_date VARCHAR(8) NOT NULL,      -- 交易日，格式：yyyyMMdd
     trade_time VARCHAR(4) NOT NULL,      -- 交易时间，格式：hhmm
     trade_datetime VARCHAR(12) NOT NULL, -- 交易日期时间，格式：yyyyMMddhhmm
-    
+
     -- 价格数据（精度：小数点后8位）
     open NUMERIC(30, 8) DEFAULT 0.00000000,
     high NUMERIC(30, 8) DEFAULT 0.00000000,
     low NUMERIC(30, 8) DEFAULT 0.00000000,
     close NUMERIC(30, 8) DEFAULT 0.00000000,
     preclose NUMERIC(30, 8) DEFAULT 0.00000000,
-    
+
     -- 成交量与成交额
     volume NUMERIC(30, 8) DEFAULT 0.00000000,  -- 成交量（单位：股）
     amount NUMERIC(30, 8) DEFAULT 0.00000000,  -- 成交额（单位：人民币元）
-    
+
     -- 涨跌幅（精度：小数点后8位）
     change_rate NUMERIC(30, 8) DEFAULT 0.00000000,
-    
+
     -- 换手率（精度：小数点后8位）
     turnover_rate NUMERIC(30, 8) DEFAULT 0.00000000,
-    
+
     -- 关联的基本面信息
     fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期，格式：yyyyMMdd
     total_share NUMERIC(30, 8),  -- 总股本
     float_share NUMERIC(30, 8),  -- 流通股本
-    
+
+    -- 数据来源标识
+    source VARCHAR(20) DEFAULT 'PYTDX_FILE',  -- 数据来源：PYTDX_FILE - 通达信文件，BAOSTOCK - baostock接口
+
     -- 系统时间
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

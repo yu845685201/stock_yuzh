@@ -24,8 +24,6 @@ class CoreComplianceShield:
         self.data_sources_whitelist = {
             'basic_info': ['BaostockSource'],  # 文档指定baostock
             'fundamentals': ['BaostockSource'],  # 文档指定baostock
-            'daily_kline': ['PytdxSource'],  # 文档指定pytdx文件方案
-            'minute_kline': ['PytdxSource']  # 文档指定pytdx文件方案
         }
 
         # 关键字段清单 - 基于产品设计文档要求
@@ -37,14 +35,6 @@ class CoreComplianceShield:
             ],
             'fundamentals': [
                 'stock_code', 'disclosure_date', 'total_share', 'float_share'
-            ],
-            'daily_kline': [
-                'ts_code', 'stock_code', 'trade_date', 'open', 'high',
-                'low', 'close', 'preclose', 'volume', 'amount'
-            ],
-            'minute_kline': [
-                'ts_code', 'stock_code', 'trade_date', 'trade_time',
-                'open', 'high', 'low', 'close', 'volume', 'amount'
             ]
         }
 
@@ -55,16 +45,6 @@ class CoreComplianceShield:
             ],
             'fundamentals': [
                 # 文档中未明确所有字段，根据baostock实际能力标注
-            ],
-            'daily_kline': [
-                'stock_name', 'industry_code', 'industry_name', 'is_st',
-                'trade_status', 'adjust_flag', 'change_rate', 'turnover_rate',
-                'pe_ttm', 'pb_rate', 'ps_ttm', 'pcf_ttm'
-            ],
-            'minute_kline': [
-                'stock_name', 'preclose', 'change_rate', 'turnover_rate',
-                'adjust_flag', 'trade_status', 'pe_ttm', 'pb_rate',
-                'ps_ttm', 'pcf_ttm'
             ]
         }
 
@@ -81,7 +61,7 @@ class CoreComplianceShield:
         核心合规检查 - 100%严格执行
 
         Args:
-            data_type: 数据类型 (basic_info, fundamentals, daily_kline, minute_kline)
+            data_type: 数据类型 (basic_info, fundamentals)
             source_name: 数据源类名
             data: 实际数据
             source_only_mode: 是否仅检查数据源授权，跳过数据验证
@@ -135,19 +115,6 @@ class CoreComplianceShield:
             'sample' in stock_name,  # 股票名称包含sample
         ]
 
-        # 检查明显的测试数据模式（基于数据类型）
-        if data_type in ['daily_kline', 'minute_kline']:
-            # 检查价格数据是否过于规整（如都是整数）
-            price_fields = ['open', 'high', 'low', 'close']
-            all_integers = all(
-                isinstance(data.get(field, 0), (int, float)) and
-                data.get(field, 0) == int(data.get(field, 0))
-                for field in price_fields if field in data
-            )
-
-            if all_integers and len(price_fields) > 0:
-                mock_indicators.append(True)
-
         return not any(mock_indicators)
 
     def _check_critical_fields(self, data_type: str, data: Dict[str, Any]) -> bool:
@@ -162,20 +129,7 @@ class CoreComplianceShield:
 
     def _check_data_format(self, data_type: str, data: Dict[str, Any]) -> bool:
         """检查数据格式是否符合文档要求"""
-        if data_type in ['daily_kline', 'minute_kline']:
-            # 检查日期格式
-            trade_date = str(data.get('trade_date', ''))
-            if not (trade_date.replace('-', '').isdigit() and len(trade_date) in [8, 10]):
-                return False
-
-            # 检查价格数据格式（应该为正数）
-            price_fields = ['open', 'high', 'low', 'close']
-            for field in price_fields:
-                price = data.get(field)
-                if price is not None and (not isinstance(price, (int, float)) or price <= 0):
-                    return False
-
-        elif data_type == 'basic_info':
+        if data_type == 'basic_info':
             # 检查TS代码格式
             ts_code = str(data.get('ts_code', ''))
             if not ('.' in ts_code and len(ts_code.split('.')) == 2):

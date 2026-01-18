@@ -410,3 +410,136 @@ class BaostockSource(DataSourceBase):
         """
         logger.warning(f"Baostock不支持分钟数据采集: code={code}, data_type={data_type}")
         return []
+
+    def get_5min_data(
+        self,
+        code: str,
+        start_date: date = None,
+        end_date: date = None
+    ) -> List[Dict[str, Any]]:
+        """
+        获取5分钟K线数据 - 基于baostock API方案
+
+        根据产品设计文档，调用bs.query_history_k_data_plus()接口获取5分钟K线数据。
+
+        Args:
+            code: 股票代码（6位代码或ts_code格式）
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            List[Dict]: 5分钟K线数据列表
+        """
+        if not self._connected:
+            return []
+
+        try:
+            # 设置默认日期范围
+            if not start_date:
+                start_date = date(2020, 1, 1)
+            if not end_date:
+                end_date = date.today()
+
+            # 生成ts_code格式
+            if '.' not in code:
+                market = 'sz' if code.startswith(('00', '30')) else 'sh'
+                ts_code = f"{market}.{code}"
+                stock_code = code
+            else:
+                ts_code = code
+                stock_code = code.split('.')[1]
+
+            # API限流检查
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+
+            # 调用baostock API获取5分钟K线数据
+            # 注意：baostock 5分钟K线不支持turn(换手率)和pctChg(涨跌幅)字段
+            # 使用经过验证的可用字段列表
+            rs = bs.query_history_k_data_plus(
+                ts_code,
+                "date,time,code,open,high,low,close,volume,amount,adjustflag",
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d'),
+                frequency="5",  # 5分钟频率
+                adjustflag="3"  # 不复权
+            )
+
+            if rs.error_code != '0':
+                logger.error(f"查询5分钟K线数据失败: {rs.error_msg}")
+                return []
+
+            data_list = []
+            last_close = None  # 维护上一个收盘价用于计算preclose
+
+            while (rs.error_code == '0') & rs.next():
+                row = rs.get_row_data()
+                try:
+                    # 解析日期和时间
+                    trade_date_str = row[0]  # date: YYYY-MM-DD
+                    trade_time_str = row[1]  # time: YYYYMMDDhhmmss000
+                    # row[2] is code, we already have it
+
+                    # 转换日期格式: YYYY-MM-DD -> yyyyMMdd
+                    trade_date = datetime.strptime(trade_date_str, '%Y-%m-%d').date()
+
+                    # 从trade_time_str提取时间: YYYYMMDDhhmmss000 -> hhmm
+                    # 例: 20250115093500000 -> 0935
+                    if trade_time_str and len(trade_time_str) >= 12:
+                        hour_minute = trade_time_str[8:12]  # 提取hhmm
+                        trade_time = datetime.strptime(hour_minute, '%H%M').time()
+                    else:
+                        continue  # 时间格式异常，跳过此记录
+
+                    # 解析价格数据 (注意索引偏移)
+                    open_price = float(row[3]) if row[3] else None
+                    high_price = float(row[4]) if row[4] else None
+                    low_price = float(row[5]) if row[5] else None
+                    close_price = float(row[6]) if row[6] else None
+                    volume = int(row[7]) if row[7] else None
+                    amount = float(row[8]) if row[8] else None
+                    # adjustflag = row[9]
+
+                    # 计算preclose（使用上一根K线的收盘价）
+                    # 如果是第一条记录，preclose设为open
+                    current_preclose = last_close if last_close is not None else open_price
+
+                    # 计算涨跌幅: (close - preclose) / preclose * 100
+                    pct_chg = None
+                    if current_preclose and current_preclose != 0 and close_price is not None:
+                        pct_chg = round((close_price - current_preclose) / current_preclose * 100, 4)
+
+                    # 更新last_close供下一条记录使用
+                    last_close = close_price
+
+                    # 构建5分钟K线记录（返回字符串格式，与pytdx保持一致）
+                    record = {
+                        'ts_code': ts_code,
+                        'stock_code': stock_code,
+                        'stock_name': None,  # 后续在数据组装阶段填充
+                        'trade_date': trade_date.strftime('%Y%m%d'),  # 字符串格式 yyyyMMdd
+                        'trade_time': trade_time.strftime('%H%M'),   # 字符串格式 hhmm
+                        'trade_datetime': f"{trade_date.strftime('%Y%m%d')}{trade_time.strftime('%H%M')}",  # yyyyMMddhhmm
+                        'open': round(open_price, 4) if open_price else None,
+                        'high': round(high_price, 4) if high_price else None,
+                        'low': round(low_price, 4) if low_price else None,
+                        'close': round(close_price, 4) if close_price else None,
+                        'preclose': round(current_preclose, 4) if current_preclose else None,
+                        'volume': volume,
+                        'amount': round(amount, 4) if amount else None,
+                        'change_rate': pct_chg,  # 手动计算
+                        'turnover_rate': None  # 无法获取，由后续流程计算
+                    }
+
+                    data_list.append(record)
+
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"解析5分钟K线数据行失败: {row}, 错误: {e}")
+                    continue
+
+            logger.info(f"✅ 成功获取 {ts_code} 的5分钟K线数据: {len(data_list)} 条")
+            return data_list
+
+        except Exception as e:
+            logger.error(f"获取5分钟K线数据异常: {e}")
+            return []

@@ -74,26 +74,3 @@ class StockListTask(SyncTask):
     def execute(self) -> Dict[str, Any]:
         # 实现细节在具体类中
         pass
-
-
-class DailyDataTask(SyncTask):
-    """日K线数据同步任务"""
-
-    def __init__(self, task_id: str, config: Dict[str, Any]):
-        super().__init__(task_id, config)
-        self.start_date = config.get('start_date')
-        self.end_date = config.get('end_date')
-        self.codes = config.get('codes')
-        self.save_to_csv = config.get('save_to_csv', True)
-        self.save_to_db = config.get('save_to_db', True)
-
-    def validate(self) -> bool:
-        if self.start_date and self.end_date:
-            return self.start_date <= self.end_date
-        return True
-
-    def execute(self) -> Dict[str, Any]:
-        # 实现细节在具体类中
-        pass
-
-

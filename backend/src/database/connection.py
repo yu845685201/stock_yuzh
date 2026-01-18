@@ -12,7 +12,6 @@ from ..config import ConfigManager
 import logging
 import threading
 
-
 class DatabaseConnectionPool:
     """数据库连接池管理类 - 提供高性能的连接复用"""
 
@@ -102,7 +101,6 @@ class DatabaseConnectionPool:
                 self.logger.info("连接池已关闭")
         except Exception as e:
             self.logger.error(f"关闭连接池失败: {e}")
-
 
 class DatabaseConnection:
     """数据库连接管理类 - 向后兼容，支持连接池优化"""
@@ -254,103 +252,6 @@ class DatabaseConnection:
         );
 
         
-        -- 历史日K线数据表
-        CREATE TABLE IF NOT EXISTS his_kline_day (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date DATE,
-            open NUMERIC(10,4),
-            high NUMERIC(10,4),
-            low NUMERIC(10,4),
-            close NUMERIC(10,4),
-            preclose NUMERIC(10,4),
-            volume NUMERIC,
-            amount NUMERIC(15,4),
-            trade_status SMALLINT,
-            is_st BOOLEAN,
-            adjust_flag SMALLINT,
-            change_rate NUMERIC(10,6),
-            turnover_rate NUMERIC(10,6),
-            pe_ttm NUMERIC(10,6),
-            pb_rate NUMERIC(10,6),
-            ps_ttm NUMERIC(10,6),
-            pcf_ttm NUMERIC(10,6),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 历史1分钟K线数据表
-        CREATE TABLE IF NOT EXISTS his_kline_1min (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date DATE,
-            trade_time TIME,
-            open NUMERIC(10,4),
-            high NUMERIC(10,4),
-            low NUMERIC(10,4),
-            close NUMERIC(10,4),
-            preclose NUMERIC(10,4),
-            volume NUMERIC,
-            amount NUMERIC(15,4),
-            adjust_flag SMALLINT,
-            change_rate NUMERIC(10,6),
-            turnover_rate NUMERIC(10,6),
-            fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期
-            total_share NUMERIC(20,4),                -- 总股本
-            float_share NUMERIC(20,4),                -- 流通股本
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 历史5分钟K线数据表
-        CREATE TABLE IF NOT EXISTS his_kline_5min (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date DATE,
-            trade_time TIME,
-            open NUMERIC(10,4),
-            high NUMERIC(10,4),
-            low NUMERIC(10,4),
-            close NUMERIC(10,4),
-            preclose NUMERIC(10,4),
-            volume NUMERIC,
-            amount NUMERIC(15,4),
-            adjust_flag SMALLINT,
-            change_rate NUMERIC(10,6),
-            turnover_rate NUMERIC(10,6),
-            fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期
-            total_share NUMERIC(20,4),                -- 总股本
-            float_share NUMERIC(20,4),                -- 流通股本
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 立体K线数据表
-        CREATE TABLE IF NOT EXISTS anal_kline_rise_25pre (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date VARCHAR(8),
-            trade_time VARCHAR(8),
-            open NUMERIC(10,4),
-            high NUMERIC(10,4),
-            low NUMERIC(10,4),
-            close NUMERIC(10,4),
-            volume NUMERIC,
-            amount NUMERIC(15,4),
-            adjust_flag SMALLINT,
-            change_rate NUMERIC(10,6),
-            turnover_rate NUMERIC(10,6),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
 
         -- 基本面信息数据表
         CREATE TABLE IF NOT EXISTS base_fundamentals_info (
@@ -378,24 +279,12 @@ class DatabaseConnection:
             
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_his_kline_day_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
-            END IF;
 
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_his_kline_1min_code_date_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
-            END IF;
 
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_his_kline_5min_code_date_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE his_kline_5min ADD CONSTRAINT uk_his_kline_5min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
-            END IF;
 
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint
@@ -408,10 +297,6 @@ class DatabaseConnection:
 
         -- 创建索引
         CREATE INDEX IF NOT EXISTS idx_base_stock_info_code ON base_stock_info(stock_code);
-                CREATE INDEX IF NOT EXISTS idx_his_kline_day_code_date ON his_kline_day(ts_code, trade_date);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_code_date ON his_kline_1min(ts_code, trade_date, trade_time);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_5min_code_date ON his_kline_5min(ts_code, trade_date, trade_time);
-        CREATE INDEX IF NOT EXISTS idx_anal_kline_code_date ON anal_kline_rise_25pre(stock_code, trade_date);
         CREATE INDEX IF NOT EXISTS idx_base_fundamentals_info_code ON base_fundamentals_info(ts_code);
         """
 
