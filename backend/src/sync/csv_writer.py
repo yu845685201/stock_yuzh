@@ -16,9 +16,7 @@ from ..utils.log_aggregator import LogAggregator
 class CsvWriter:
     """CSV文件写入器，严格按照产品设计文档要求生成CSV文件，支持智能删除+Append模式"""
 
-    # .day文件解析的原始字段集合（用于验证）
-
-    # CSV文件字段顺序（与.day文件解析一致）
+    # CSV文件字段顺序
 
     def __init__(self, config_manager: ConfigManager = None):
         """
@@ -148,7 +146,7 @@ class CsvWriter:
         生成符合产品设计文档要求的CSV文件名
 
         Args:
-            data_type: 数据类型 (base_stock_info, his_kline_day等)
+            data_type: 数据类型 (base_stock_info, base_fundamentals_info等)
             include_time: 是否包含时分信息，默认False
                          False: yyyyMMdd格式 (如: 20241219)
                          True: yyyyMMddhhmm格式 (如: 202412191430)
@@ -320,3 +318,29 @@ class CsvWriter:
             self.file_manager.config['per_type_settings'] = {}
 
         self.file_manager.config['per_type_settings'][data_type] = {'mode': mode}
+
+    def write_daily_kline_data(self, data: List[Dict[str, Any]], ts_code: str) -> None:
+        """
+        写入日线行情数据到CSV
+
+        注意：现在接收原始Baostock数据字典，不进行字段映射，直接写入原始字段。
+        文件名格式: his_kline_day_{ts_code}_{yyyyMMddhhmmss}.csv
+
+        Args:
+            data: 日线数据列表 (原始Baostock数据)
+            ts_code: 股票代码
+        """
+        if not data:
+            return
+
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        filename = f"his_kline_day_{ts_code}_{timestamp}.csv"
+        subdir = "his_kline_day"
+        dirpath = os.path.join(self.csv_path, subdir)
+
+        os.makedirs(dirpath, exist_ok=True)
+        filepath = os.path.join(dirpath, filename)
+
+        self._write_csv_file(filepath, data, data_type='his_kline_day')
+        if not self._silent_mode:
+            self.logger.info(f"日线数据CSV已生成: {filename} ({len(data)} 条记录)")

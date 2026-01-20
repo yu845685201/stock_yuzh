@@ -52,7 +52,7 @@ class CsvFileManager:
 
         Args:
             filepath: 文件路径
-            data_type: 数据类型（base_stock_info, his_kline_day等）
+            data_type: 数据类型（base_stock_info, base_fundamentals_info等）
         """
         if not os.path.exists(filepath):
             # 文件不存在，无需处理

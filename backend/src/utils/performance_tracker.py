@@ -1,5 +1,5 @@
 """
-性能跟踪器 - 用于记录日K线数据采集各关键节点的耗时
+性能跟踪器 - 用于记录数据采集各关键节点的耗时
 """
 
 import time
@@ -44,7 +44,7 @@ class PerformanceMetric:
 class PerformanceTracker:
     """性能跟踪器，记录关键节点耗时"""
 
-    def __init__(self, operation_name: str = "日K线数据采集"):
+    def __init__(self, operation_name: str = "数据采集"):
         """
         初始化性能跟踪器
 

@@ -66,10 +66,6 @@ class ConfigManager:
                 }
             },
             'data_sources': {
-                'pytdx': {
-                    'enabled': True,
-                    'vipdoc_path': 'uat/vipdoc'
-                },
                 'baostock': {
                     'enabled': True
                 }

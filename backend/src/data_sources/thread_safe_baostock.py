@@ -304,6 +304,133 @@ class ThreadSafeBaostockSource:
 
         return quarter_end_dates.get(quarter, f'{year}1231')
 
+    def fetch_daily_k_data_raw(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, str]]:
+        """
+        获取原始日线K线数据 - 线程安全版本
+
+        Args:
+            code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            adjustflag: 复权类型
+
+        Returns:
+            原始数据字典列表
+        """
+        # 检查全局连接状态
+        if not ThreadSafeBaostockSource._is_connected:
+            return []
+
+        try:
+            # API限流检查
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+
+            fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+
+            if rs is None or rs.error_code != '0':
+                error_msg = rs.error_msg if rs else "Result is None"
+                logger.error(f"查询日线数据失败: {error_msg} code={code}, start={start_date}, end={end_date}")
+                return []
+
+            data_list = []
+            while (rs.error_code == '0') & rs.next():
+                # 获取原始行数据（字符串列表）
+                row_data = rs.get_row_data()
+                # 映射到字段名
+                item = dict(zip(fields.split(','), row_data))
+                data_list.append(item)
+
+            return data_list
+
+        except Exception as e:
+            logger.error(f"获取原始日线数据异常: {e}")
+            return []
+
+    def get_daily_k_data(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, Any]]:
+        """
+        获取日线K线数据 - 线程安全版本
+
+        Args:
+            code: 股票代码 (e.g., 'sz.000001')
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            adjustflag: 复权类型，默认'1'：后复权，'2'：前复权，'3'：不复权
+
+        Returns:
+            日线数据列表
+        """
+        # 检查全局连接状态
+        if not ThreadSafeBaostockSource._is_connected:
+            return []
+
+        try:
+            # API限流检查
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+
+            fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+
+            if rs is None or rs.error_code != '0':
+                error_msg = rs.error_msg if rs else "Result is None (likely date format error)"
+                logger.error(f"查询日线数据失败: {error_msg} code={code}, start={start_date}, end={end_date}")
+                return []
+
+            data_list = []
+            while (rs.error_code == '0') & rs.next():
+                row = rs.get_row_data()
+
+                try:
+                    # 转换数据格式
+                    # 处理数值类型，空字符串转None
+                    def to_float(val):
+                        return float(val) if val and val != '' else None
+
+                    close_val = to_float(row[4])
+                    pre_close_val = to_float(row[5])
+
+                    item = {
+                        'ts_code': code,
+                        'trade_date': DataTransformer.format_date_string(row[0]),
+                        'open': to_float(row[1]),
+                        'high': to_float(row[2]),
+                        'low': to_float(row[3]),
+                        'close': close_val,
+                        'pre_close': pre_close_val,
+                        'change': round(close_val - pre_close_val, 2) if close_val is not None and pre_close_val is not None else None,
+                        'pct_chg': to_float(row[11]),
+                        'vol': to_float(row[6]),
+                        'amount': to_float(row[7]),
+                        'turnover_rate': to_float(row[9]),
+                        'volume_ratio': None,
+                        'pe': to_float(row[12]),
+                        'pb': to_float(row[13]),
+                        'ps': to_float(row[14]),
+                        'pcf': to_float(row[15]),
+                        'total_share': None,
+                        'float_share': None,
+                        'free_share': None,
+                        'total_mv': None,
+                        'circ_mv': None,
+                        'adj_factor': None,
+                        'is_st': row[16],
+                        'trade_status': row[10],
+                        'create_time': datetime.now(),
+                        'update_time': datetime.now()
+                    }
+                    data_list.append(item)
+                except Exception as parse_err:
+                    logger.error(f"解析K线数据行异常: {parse_err}, row: {row}")
+                    continue
+
+            return data_list
+
+        except Exception as e:
+            logger.error(f"获取日线数据异常: {e}")
+            return []
+
     def __enter__(self):
         """上下文管理器入口"""
         self._ensure_connection()

@@ -59,9 +59,6 @@ python -m src.cli.main sync-all
 # 只同步股票列表
 python -m src.cli.main sync-stocks
 
-# 同步指定日期范围的日K线数据
-python -m src.cli.main sync-daily --start-date 2024-01-01 --end-date 2024-01-31
-
 # 同步指定股票的财务数据
 python -m src.cli.main sync-financial --year 2023 --quarter 4 --codes 000001,000002
 ```
@@ -118,12 +115,11 @@ python -m src.cli.main sync-financial [--csv] [--db] [--year] [--quarter] [--cod
 
 ### Pytdx数据源
 - 用于读取通达信数据文件（.day, .lc1, .lc5等）
-- 支持日K线、分钟K线等行情数据
 - 无需网络连接，直接读取本地文件
 
 ### Baostock数据源
 - 提供免费、纯净的证券数据
-- 支持股票列表、日K线、财务数据等
+- 支持股票列表、财务数据等
 - 需要网络连接
 
 ## 开发指南

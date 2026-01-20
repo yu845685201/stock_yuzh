@@ -115,99 +115,6 @@ class BaostockSource(DataSourceBase):
             print(f"获取股票列表异常: {e}")
             return []
 
-    
-    def get_daily_data(
-        self,
-        code: str,
-        start_date: date = None,
-        end_date: date = None
-    ) -> List[Dict[str, Any]]:
-        """获取日K线数据 - 严格按照文档要求"""
-        if not self._connected:
-            return []
-
-        try:
-            # 设置默认日期范围
-            if not start_date:
-                start_date = date(2020, 1, 1)
-            if not end_date:
-                end_date = date.today()
-
-            # 生成TS代码 - baostock API需要完整格式
-            market = 'sz' if code.startswith(('00', '30')) else 'sh'
-            ts_code = DataTransformer.generate_ts_code(code, market)
-
-            # 获取K线数据
-            rs = bs.query_history_k_data_plus(
-                ts_code,
-                "date,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,pctChg",
-                start_date=start_date.strftime('%Y-%m-%d'),
-                end_date=end_date.strftime('%Y-%m-%d'),
-                frequency="d"
-            )
-
-            if rs.error_code != '0':
-                print(f"查询K线数据失败: {rs.error_msg}")
-                return []
-
-            data_list = []
-            while (rs.error_code == '0') & rs.next():
-                row = rs.get_row_data()
-                try:
-                    # 解析数据
-                    trade_date = datetime.strptime(row[0], '%Y-%m-%d').date()
-                    open_price = float(row[1]) if row[1] else None
-                    high_price = float(row[2]) if row[2] else None
-                    low_price = float(row[3]) if row[3] else None
-                    close_price = float(row[4]) if row[4] else None
-                    volume = int(row[5]) if row[5] else None
-                    amount = float(row[6]) if row[6] else None
-                    adjust_flag = int(row[7]) if row[7] else 3  # 默认不复权
-                    turn = float(row[8]) if row[8] else None
-                    trade_status = int(row[9]) if row[9] else 1  # 默认正常交易
-                    pct_chg = float(row[10]) if row[10] else None
-
-                    # ts_code已在上面生成
-
-                    # 检查是否为ST股
-                    stock_name = self._get_stock_name(code)
-                    is_st = DataTransformer.check_is_st(stock_name) if stock_name else False
-
-                    daily_record = {
-                        'ts_code': ts_code,
-                        'stock_code': code,
-                        'stock_name': stock_name,
-                        'trade_date': trade_date,
-                        'open': round(open_price, 4) if open_price else None,
-                        'high': round(high_price, 4) if high_price else None,
-                        'low': round(low_price, 4) if low_price else None,
-                        'close': round(close_price, 4) if close_price else None,
-                        'preclose': None,  # 需要计算
-                        'volume': volume,
-                        'amount': round(amount, 4) if amount else None,
-                        'trade_status': trade_status,
-                        'is_st': is_st,
-                        'adjust_flag': adjust_flag,
-                        'change_rate': pct_chg,  # baostock已提供涨跌幅
-                        'turnover_rate': round(turn, 6) if turn else None,
-                        'pe_ttm': None,  # 无法直接获取
-                        'pb_rate': None,  # 无法直接获取
-                        'ps_ttm': None,  # 无法直接获取
-                        'pcf_ttm': None  # 无法直接获取
-                    }
-
-                    data_list.append(daily_record)
-                except (ValueError, IndexError) as e:
-                    print(f"解析数据行失败: {row}, 错误: {e}")
-                    continue
-
-            # 后处理：计算昨日收盘价
-            data_list = self._post_process_daily_data(data_list)
-
-            return data_list
-        except Exception as e:
-            print(f"获取日K线数据异常: {e}")
-            return []
 
     def _get_stock_name(self, code: str) -> Optional[str]:
         """
@@ -233,22 +140,6 @@ class BaostockSource(DataSourceBase):
         except Exception:
             return None
 
-    def _post_process_daily_data(self, daily_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        后处理日K线数据 - 计算昨日收盘价
-        """
-        if len(daily_data) <= 1:
-            return daily_data
-
-        # 按日期排序
-        daily_data.sort(key=lambda x: x['trade_date'])
-
-        # 计算昨日收盘价
-        for i in range(len(daily_data)):
-            if i > 0:
-                daily_data[i]['preclose'] = daily_data[i-1]['close']
-
-        return daily_data
 
     def get_financial_data(self, code: str, year: int, quarter: int) -> Optional[Dict[str, Any]]:
         """获取财务数据 - 严格按照文档要求"""
@@ -389,157 +280,132 @@ class BaostockSource(DataSourceBase):
 
         return quarter_end_dates.get(quarter, f'{year}1231')
 
-    def get_minute_data(
-        self,
-        code: str,
-        data_type: str = '1min',
-        start_date: date = None,
-        end_date: date = None
-    ) -> List[Dict[str, Any]]:
+    def fetch_daily_k_data_raw(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, str]]:
         """
-        获取分钟K线数据 - Baostock暂不支持分钟数据
+        获取原始日线K线数据（不进行类型转换和计算）
 
         Args:
-            code: 股票代码
-            data_type: 数据类型 ('1min', '5min', '15min', '30min', '60min')
-            start_date: 开始日期
-            end_date: 结束日期
+            code: 股票代码 (e.g., 'sz.000001')
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            adjustflag: 复权类型，默认'1'：后复权
 
         Returns:
-            List[Dict]: 空列表，Baostock不支持分钟数据
-        """
-        logger.warning(f"Baostock不支持分钟数据采集: code={code}, data_type={data_type}")
-        return []
-
-    def get_5min_data(
-        self,
-        code: str,
-        start_date: date = None,
-        end_date: date = None
-    ) -> List[Dict[str, Any]]:
-        """
-        获取5分钟K线数据 - 基于baostock API方案
-
-        根据产品设计文档，调用bs.query_history_k_data_plus()接口获取5分钟K线数据。
-
-        Args:
-            code: 股票代码（6位代码或ts_code格式）
-            start_date: 开始日期
-            end_date: 结束日期
-
-        Returns:
-            List[Dict]: 5分钟K线数据列表
+            原始数据字典列表（值为字符串）
         """
         if not self._connected:
             return []
 
         try:
-            # 设置默认日期范围
-            if not start_date:
-                start_date = date(2020, 1, 1)
-            if not end_date:
-                end_date = date.today()
-
-            # 生成ts_code格式
-            if '.' not in code:
-                market = 'sz' if code.startswith(('00', '30')) else 'sh'
-                ts_code = f"{market}.{code}"
-                stock_code = code
-            else:
-                ts_code = code
-                stock_code = code.split('.')[1]
-
             # API限流检查
             if self.rate_limiter:
                 self.rate_limiter.wait_if_needed()
 
-            # 调用baostock API获取5分钟K线数据
-            # 注意：baostock 5分钟K线不支持turn(换手率)和pctChg(涨跌幅)字段
-            # 使用经过验证的可用字段列表
-            rs = bs.query_history_k_data_plus(
-                ts_code,
-                "date,time,code,open,high,low,close,volume,amount,adjustflag",
-                start_date=start_date.strftime('%Y-%m-%d'),
-                end_date=end_date.strftime('%Y-%m-%d'),
-                frequency="5",  # 5分钟频率
-                adjustflag="3"  # 不复权
-            )
+            fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
 
-            if rs.error_code != '0':
-                logger.error(f"查询5分钟K线数据失败: {rs.error_msg}")
+            if rs is None or rs.error_code != '0':
+                error_msg = rs.error_msg if rs else "Result is None"
+                print(f"查询日线数据失败: {error_msg} code={code}, start={start_date}, end={end_date}")
                 return []
 
             data_list = []
-            last_close = None  # 维护上一个收盘价用于计算preclose
-
             while (rs.error_code == '0') & rs.next():
-                row = rs.get_row_data()
-                try:
-                    # 解析日期和时间
-                    trade_date_str = row[0]  # date: YYYY-MM-DD
-                    trade_time_str = row[1]  # time: YYYYMMDDhhmmss000
-                    # row[2] is code, we already have it
+                # 获取原始行数据（字符串列表）
+                row_data = rs.get_row_data()
+                # 映射到字段名
+                item = dict(zip(fields.split(','), row_data))
+                data_list.append(item)
 
-                    # 转换日期格式: YYYY-MM-DD -> yyyyMMdd
-                    trade_date = datetime.strptime(trade_date_str, '%Y-%m-%d').date()
-
-                    # 从trade_time_str提取时间: YYYYMMDDhhmmss000 -> hhmm
-                    # 例: 20250115093500000 -> 0935
-                    if trade_time_str and len(trade_time_str) >= 12:
-                        hour_minute = trade_time_str[8:12]  # 提取hhmm
-                        trade_time = datetime.strptime(hour_minute, '%H%M').time()
-                    else:
-                        continue  # 时间格式异常，跳过此记录
-
-                    # 解析价格数据 (注意索引偏移)
-                    open_price = float(row[3]) if row[3] else None
-                    high_price = float(row[4]) if row[4] else None
-                    low_price = float(row[5]) if row[5] else None
-                    close_price = float(row[6]) if row[6] else None
-                    volume = int(row[7]) if row[7] else None
-                    amount = float(row[8]) if row[8] else None
-                    # adjustflag = row[9]
-
-                    # 计算preclose（使用上一根K线的收盘价）
-                    # 如果是第一条记录，preclose设为open
-                    current_preclose = last_close if last_close is not None else open_price
-
-                    # 计算涨跌幅: (close - preclose) / preclose * 100
-                    pct_chg = None
-                    if current_preclose and current_preclose != 0 and close_price is not None:
-                        pct_chg = round((close_price - current_preclose) / current_preclose * 100, 4)
-
-                    # 更新last_close供下一条记录使用
-                    last_close = close_price
-
-                    # 构建5分钟K线记录（返回字符串格式，与pytdx保持一致）
-                    record = {
-                        'ts_code': ts_code,
-                        'stock_code': stock_code,
-                        'stock_name': None,  # 后续在数据组装阶段填充
-                        'trade_date': trade_date.strftime('%Y%m%d'),  # 字符串格式 yyyyMMdd
-                        'trade_time': trade_time.strftime('%H%M'),   # 字符串格式 hhmm
-                        'trade_datetime': f"{trade_date.strftime('%Y%m%d')}{trade_time.strftime('%H%M')}",  # yyyyMMddhhmm
-                        'open': round(open_price, 4) if open_price else None,
-                        'high': round(high_price, 4) if high_price else None,
-                        'low': round(low_price, 4) if low_price else None,
-                        'close': round(close_price, 4) if close_price else None,
-                        'preclose': round(current_preclose, 4) if current_preclose else None,
-                        'volume': volume,
-                        'amount': round(amount, 4) if amount else None,
-                        'change_rate': pct_chg,  # 手动计算
-                        'turnover_rate': None  # 无法获取，由后续流程计算
-                    }
-
-                    data_list.append(record)
-
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"解析5分钟K线数据行失败: {row}, 错误: {e}")
-                    continue
-
-            logger.info(f"✅ 成功获取 {ts_code} 的5分钟K线数据: {len(data_list)} 条")
             return data_list
 
         except Exception as e:
-            logger.error(f"获取5分钟K线数据异常: {e}")
+            print(f"获取原始日线数据异常: {e}")
+            return []
+
+    def get_daily_k_data(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, Any]]:
+        """
+        获取日线K线数据
+
+        Args:
+            code: 股票代码 (e.g., 'sz.000001')
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            adjustflag: 复权类型，默认'1'：后复权，'2'：前复权，'3'：不复权
+
+        Returns:
+            日线数据列表
+        """
+        if not self._connected:
+            return []
+
+        try:
+            # API限流检查
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+
+            fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+
+            if rs is None or rs.error_code != '0':
+                error_msg = rs.error_msg if rs else "Result is None (likely date format error)"
+                print(f"查询日线数据失败: {error_msg} code={code}, start={start_date}, end={end_date}")
+                return []
+
+            data_list = []
+            while (rs.error_code == '0') & rs.next():
+                row = rs.get_row_data()
+
+                try:
+                    # 转换数据格式
+                    # row indices:
+                    # 0:date, 1:open, 2:high, 3:low, 4:close, 5:preclose, 6:volume, 7:amount,
+                    # 8:adjustflag, 9:turn, 10:tradestatus, 11:pctChg, 12:peTTM, 13:pbMRQ,
+                    # 14:psTTM, 15:pcfNcfTTM, 16:isST
+
+                    # 处理数值类型，空字符串转None
+                    def to_float(val):
+                        return float(val) if val and val != '' else None
+
+                    close_val = to_float(row[4])
+                    pre_close_val = to_float(row[5])
+
+                    item = {
+                        'ts_code': code,
+                        'trade_date': DataTransformer.format_date_string(row[0]),
+                        'open': to_float(row[1]),
+                        'high': to_float(row[2]),
+                        'low': to_float(row[3]),
+                        'close': close_val,
+                        'pre_close': pre_close_val,
+                        'change': round(close_val - pre_close_val, 2) if close_val is not None and pre_close_val is not None else None,
+                        'pct_chg': to_float(row[11]),
+                        'vol': to_float(row[6]),
+                        'amount': to_float(row[7]),
+                        'turnover_rate': to_float(row[9]),
+                        'volume_ratio': None, # Baostock不提供
+                        'pe': to_float(row[12]),
+                        'pb': to_float(row[13]),
+                        'ps': to_float(row[14]),
+                        'pcf': to_float(row[15]),
+                        'total_share': None, # K线接口不提供
+                        'float_share': None, # K线接口不提供
+                        'free_share': None, # K线接口不提供
+                        'total_mv': None, # K线接口不提供
+                        'circ_mv': None, # K线接口不提供
+                        'adj_factor': None, # 后复权模式下不直接提供因子
+                        'is_st': row[16],
+                        'trade_status': row[10],
+                        'create_time': datetime.now(),
+                        'update_time': datetime.now()
+                    }
+                    data_list.append(item)
+                except Exception as parse_err:
+                    print(f"解析K线数据行异常: {parse_err}, row: {row}")
+                    continue
+
+            return data_list
+
+        except Exception as e:
+            print(f"获取日线数据异常: {e}")
             return []

@@ -279,15 +279,6 @@ class DatabaseConnection:
             
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
                 WHERE conname = 'uk_base_fundamentals_info_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
             ) THEN
                 -- 按照产品设计文档要求，使用ts_code+disclosure_date组合作为唯一约束
@@ -298,12 +289,113 @@ class DatabaseConnection:
         -- 创建索引
         CREATE INDEX IF NOT EXISTS idx_base_stock_info_code ON base_stock_info(stock_code);
         CREATE INDEX IF NOT EXISTS idx_base_fundamentals_info_code ON base_fundamentals_info(ts_code);
+
+        -- 日线行情数据表 (严格匹配现有数据库结构)
+        CREATE TABLE IF NOT EXISTS his_kline_day (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20) NOT NULL,
+            stock_code VARCHAR(20) NOT NULL,
+            stock_name VARCHAR(20) NOT NULL,
+            trade_date VARCHAR(8) NOT NULL,
+            open NUMERIC(30, 8) DEFAULT 0,
+            high NUMERIC(30, 8) DEFAULT 0,
+            low NUMERIC(30, 8) DEFAULT 0,
+            close NUMERIC(30, 8) DEFAULT 0,
+            preclose NUMERIC(30, 8) DEFAULT 0,
+            volume NUMERIC(30, 8) DEFAULT 0,
+            amount NUMERIC(30, 8) DEFAULT 0,
+            trade_status SMALLINT DEFAULT 1,
+            is_st BOOLEAN DEFAULT FALSE,
+            change_rate NUMERIC(30, 8) DEFAULT 0,
+            turnover_rate NUMERIC(30, 8) DEFAULT 0,
+            fundamentals_disclosure_date VARCHAR(8),
+            total_share NUMERIC(30, 8),
+            float_share NUMERIC(30, 8),
+            pe_ttm NUMERIC(30, 8),
+            pb_rate NUMERIC(30, 8),
+            ps_ttm NUMERIC(30, 8),
+            pcf_ttm NUMERIC(30, 8),
+            source VARCHAR(20) DEFAULT 'BAOSTOCK',
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- unique constraint for his_kline_day
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_his_kline_day_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
+            END IF;
+        END $$;
+
+        -- index for his_kline_day
+        CREATE INDEX IF NOT EXISTS idx_his_kline_day_ts_code ON his_kline_day(ts_code);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_day_trade_date ON his_kline_day(trade_date);
         """
 
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(create_tables_sql)
                 conn.commit()
+
+    def upsert_kline_data(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert日线行情数据 - 严格适配现有表结构
+
+        Args:
+            kline_data: 日线数据列表
+
+        Returns:
+            影响的行数
+        """
+        if not kline_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO his_kline_day
+        (ts_code, stock_code, stock_name, trade_date, open, high, low, close, preclose,
+         volume, amount, trade_status, is_st, change_rate, turnover_rate,
+         fundamentals_disclosure_date, total_share, float_share,
+         pe_ttm, pb_rate, ps_ttm, pcf_ttm, source, create_time, update_time)
+        VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s, %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s,
+                %(volume)s, %(amount)s, %(trade_status)s, %(is_st)s, %(change_rate)s, %(turnover_rate)s,
+                %(fundamentals_disclosure_date)s, %(total_share)s, %(float_share)s,
+                %(pe_ttm)s, %(pb_rate)s, %(ps_ttm)s, %(pcf_ttm)s, %(source)s, %(create_time)s, NOW())
+        ON CONFLICT (ts_code, trade_date)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            preclose = EXCLUDED.preclose,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            trade_status = EXCLUDED.trade_status,
+            is_st = EXCLUDED.is_st,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
+            total_share = EXCLUDED.total_share,
+            float_share = EXCLUDED.float_share,
+            pe_ttm = EXCLUDED.pe_ttm,
+            pb_rate = EXCLUDED.pb_rate,
+            ps_ttm = EXCLUDED.ps_ttm,
+            pcf_ttm = EXCLUDED.pcf_ttm,
+            source = EXCLUDED.source,
+            update_time = NOW()
+        """
+
+        # 确保数据中有create_time
+        for item in kline_data:
+             if 'create_time' not in item:
+                 item['create_time'] = datetime.now()
+
+        return self.execute_batch(upsert_sql, kline_data)
 
     def upsert_fundamentals_data(self, fundamentals_data: List[Dict[str, Any]]) -> int:
         """

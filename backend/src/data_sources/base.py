@@ -46,48 +46,6 @@ class DataSourceBase(ABC):
         pass
 
     @abstractmethod
-    def get_daily_data(
-        self,
-        code: str,
-        start_date: date = None,
-        end_date: date = None
-    ) -> List[Dict[str, Any]]:
-        """
-        获取日K线数据
-
-        Args:
-            code: 股票代码
-            start_date: 开始日期，默认为None表示获取所有
-            end_date: 结束日期，默认为None表示获取所有
-
-        Returns:
-            List[Dict]: 日K线数据列表
-        """
-        pass
-
-    @abstractmethod
-    def get_minute_data(
-        self,
-        code: str,
-        data_type: str = '1min',
-        start_date: date = None,
-        end_date: date = None
-    ) -> List[Dict[str, Any]]:
-        """
-        获取分钟K线数据
-
-        Args:
-            code: 股票代码
-            data_type: 数据类型 ('1min', '5min', '15min', '30min', '60min')
-            start_date: 开始日期，默认为None表示获取所有
-            end_date: 结束日期，默认为None表示获取所有
-
-        Returns:
-            List[Dict]: 分钟K线数据列表
-        """
-        pass
-
-    @abstractmethod
     def get_financial_data(self, code: str, year: int, quarter: int) -> Optional[Dict[str, Any]]:
         """
         获取财务数据

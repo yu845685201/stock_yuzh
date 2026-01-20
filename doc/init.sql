@@ -227,11 +227,25 @@ CREATE TABLE his_kline_day (
     pb_rate NUMERIC(30, 8),  -- 市净率
     ps_ttm NUMERIC(30, 8),  -- 滚动市销率
     pcf_ttm NUMERIC(30, 8),  -- 滚动市现率
+
+    -- 数据来源标识
+    source VARCHAR(20) DEFAULT 'BAOSTOCK',  -- 数据来源：PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口
     
     -- 系统时间
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- unique constraint for his_kline_day
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uk_his_kline_day_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+    ) THEN
+        ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
+    END IF;
+END $$;
 
 -- 创建索引以提高查询性能
 CREATE INDEX idx_his_kline_day_ts_code ON his_kline_day(ts_code);
@@ -276,6 +290,7 @@ COMMENT ON COLUMN his_kline_day.pe_ttm IS '滚动市盈率，精度：小数点�
 COMMENT ON COLUMN his_kline_day.pb_rate IS '市净率，精度：小数点后8位，计算公式：(指定交易日的股票收盘价/指定交易日的每股净资产)=总市值/(最近披露的归属母公司股东的权益-其他权益工具)';
 COMMENT ON COLUMN his_kline_day.ps_ttm IS '滚动市销率，精度：小数点后8位，计算公式：(指定交易日的股票收盘价/指定交易日的每股销售额)=(指定交易日的股票收盘价*截至当日公司总股本)/营业总收入TTM';
 COMMENT ON COLUMN his_kline_day.pcf_ttm IS '滚动市现率，精度：小数点后8位，计算公式：(指定交易日的股票收盘价/指定交易日的每股现金流TTM)=(指定交易日的股票收盘价*截至当日公司总股本)/现金以及现金等价物净增加额TTM';
+comment on column his_kline_day.source is '数据来源，PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口';
 COMMENT ON COLUMN his_kline_day.create_time IS '数据创建时间，自动生成';
 COMMENT ON COLUMN his_kline_day.update_time IS '数据修改时间，自动更新';
 
@@ -318,6 +333,9 @@ CREATE TABLE his_kline_1min (
     fundamentals_disclosure_date VARCHAR(8),  -- 关联的基本面信息披露日期，格式：yyyyMMdd
     total_share NUMERIC(30, 8),  -- 总股本
     float_share NUMERIC(30, 8),  -- 流通股本
+
+    -- 数据来源标识
+    source VARCHAR(20) DEFAULT 'BAOSTOCK',  -- 数据来源：PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口
     
     -- 系统时间
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -363,6 +381,7 @@ COMMENT ON COLUMN his_kline_1min.turnover_rate IS '换手率，精度：小数�
 COMMENT ON COLUMN his_kline_1min.fundamentals_disclosure_date IS '关联的基本面信息披露日期，格式：yyyyMMdd';
 COMMENT ON COLUMN his_kline_1min.total_share IS '总股本，精度：小数点后8位';
 COMMENT ON COLUMN his_kline_1min.float_share IS '流通股本，精度：小数点后8位';
+comment on column his_kline_1min.source is '数据来源，PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口';
 COMMENT ON COLUMN his_kline_1min.create_time IS '数据创建时间，自动生成';
 COMMENT ON COLUMN his_kline_1min.update_time IS '数据修改时间，自动更新';
 
@@ -407,7 +426,7 @@ CREATE TABLE his_kline_5min (
     float_share NUMERIC(30, 8),  -- 流通股本
 
     -- 数据来源标识
-    source VARCHAR(20) DEFAULT 'PYTDX_FILE',  -- 数据来源：PYTDX_FILE - 通达信文件，BAOSTOCK - baostock接口
+    source VARCHAR(20) DEFAULT 'BAOSTOCK',  -- 数据来源：PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口
 
     -- 系统时间
     create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -453,6 +472,7 @@ COMMENT ON COLUMN his_kline_5min.turnover_rate IS '换手率，精度：小数�
 COMMENT ON COLUMN his_kline_5min.fundamentals_disclosure_date IS '关联的基本面信息披露日期，格式：yyyyMMdd';
 COMMENT ON COLUMN his_kline_5min.total_share IS '总股本，精度：小数点后8位';
 COMMENT ON COLUMN his_kline_5min.float_share IS '流通股本，精度：小数点后8位';
+comment on column his_kline_5min.source is '数据来源，PYTDX_FILE - 通达信文件，PYTDX_API - 通达信接口，BAOSTOCK - baostock接口';
 COMMENT ON COLUMN his_kline_5min.create_time IS '数据创建时间，自动生成';
 COMMENT ON COLUMN his_kline_5min.update_time IS '数据修改时间，自动更新';
 

@@ -59,13 +59,6 @@ class ConfigValidator:
         if not isinstance(config, dict):
             raise ConfigurationError("数据源配置必须是字典格式")
 
-        # 验证pytdx配置
-        if 'pytdx' in config:
-            pytdx_config = config['pytdx']
-            if pytdx_config.get('enabled', True):
-                if 'vipdoc_path' not in pytdx_config:
-                    raise ConfigurationError("pytdx配置缺少vipdoc_path")
-
         # 验证baostock配置
         if 'baostock' in config:
             baostock_config = config['baostock']

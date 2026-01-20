@@ -37,14 +37,8 @@ def monitor_performance(operation_name: str = None):
                             for _ in range(stocks_count):
                                 metrics.record_stock_processed()
 
-                        if 'daily_data_count' in result:
-                            metrics.record_data_records(result['daily_data_count'])
-
                         if 'financial_data_count' in result:
                             metrics.record_data_records(result['financial_data_count'])
-
-                        if 'min5_data_count' in result:
-                            metrics.record_data_records(result['min5_data_count'])
 
                     elif isinstance(result, int):
                         # 如果返回的是数量，记录为数据记录

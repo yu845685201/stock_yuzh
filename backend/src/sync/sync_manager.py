@@ -11,7 +11,6 @@ from ..data_sources import BaostockSource
 from ..database import DatabaseConnection, Stock
 from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
-from ..utils.progress_tracker import MultiStageProgressTracker
 from ..utils.log_aggregator import LogAggregator
 
 class SyncManager:
@@ -65,8 +64,6 @@ class SyncManager:
             'start_time': datetime.now(),
             'success': False,
             'stocks_count': 0,
-            'daily_data_count': 0,
-            'min5_data_count': 0,
             'errors': []
         }
 
