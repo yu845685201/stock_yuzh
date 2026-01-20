@@ -348,6 +348,48 @@ class ThreadSafeBaostockSource:
             logger.error(f"获取原始日线数据异常: {e}")
             return []
 
+    def fetch_5min_k_data_raw(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, str]]:
+        """
+        获取原始5分钟K线数据 - 线程安全版本
+
+        Args:
+            code: 股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            adjustflag: 复权类型，默认'1'：后复权
+
+        Returns:
+            原始数据字典列表
+        """
+        # 检查全局连接状态
+        if not ThreadSafeBaostockSource._is_connected:
+            return []
+
+        try:
+            # API限流检查
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
+
+            fields = "date,time,open,high,low,close,volume,amount,adjustflag"
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="5", adjustflag=adjustflag)
+
+            if rs is None or rs.error_code != '0':
+                error_msg = rs.error_msg if rs else "Result is None"
+                logger.error(f"查询5分钟数据失败: {error_msg} code={code}, start={start_date}, end={end_date}")
+                return []
+
+            data_list = []
+            while (rs.error_code == '0') & rs.next():
+                row_data = rs.get_row_data()
+                item = dict(zip(fields.split(','), row_data))
+                data_list.append(item)
+
+            return data_list
+
+        except Exception as e:
+            logger.error(f"获取原始5分钟数据异常: {e}")
+            return []
+
     def get_daily_k_data(self, code: str, start_date: str, end_date: str, adjustflag: str = '1') -> List[Dict[str, Any]]:
         """
         获取日线K线数据 - 线程安全版本

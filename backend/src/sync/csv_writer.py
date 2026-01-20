@@ -344,3 +344,28 @@ class CsvWriter:
         self._write_csv_file(filepath, data, data_type='his_kline_day')
         if not self._silent_mode:
             self.logger.info(f"日线数据CSV已生成: {filename} ({len(data)} 条记录)")
+
+    def write_5min_kline_data(self, data: List[Dict[str, Any]], ts_code: str) -> None:
+        """
+        写入5分钟K线数据到CSV
+
+        文件名格式: his_kline_5min_{ts_code}_{yyyyMMddhhmmss}.csv
+
+        Args:
+            data: 5分钟K线数据列表 (原始Baostock数据)
+            ts_code: 股票代码
+        """
+        if not data:
+            return
+
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        filename = f"his_kline_5min_{ts_code}_{timestamp}.csv"
+        subdir = "his_kline_5min"
+        dirpath = os.path.join(self.csv_path, subdir)
+
+        os.makedirs(dirpath, exist_ok=True)
+        filepath = os.path.join(dirpath, filename)
+
+        self._write_csv_file(filepath, data, data_type='his_kline_5min')
+        if not self._silent_mode:
+            self.logger.info(f"5分钟K线数据CSV已生成: {filename} ({len(data)} 条记录)")

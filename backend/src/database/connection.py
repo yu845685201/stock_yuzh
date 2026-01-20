@@ -334,6 +334,17 @@ class DatabaseConnection:
         -- index for his_kline_day
         CREATE INDEX IF NOT EXISTS idx_his_kline_day_ts_code ON his_kline_day(ts_code);
         CREATE INDEX IF NOT EXISTS idx_his_kline_day_trade_date ON his_kline_day(trade_date);
+
+        -- unique constraint for his_kline_5min
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_his_kline_5min_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE his_kline_5min ADD CONSTRAINT uk_his_kline_5min_code_time UNIQUE (ts_code, trade_date, trade_time);
+            END IF;
+        END $$;
         """
 
         with self.get_connection() as conn:
@@ -386,6 +397,58 @@ class DatabaseConnection:
             pb_rate = EXCLUDED.pb_rate,
             ps_ttm = EXCLUDED.ps_ttm,
             pcf_ttm = EXCLUDED.pcf_ttm,
+            source = EXCLUDED.source,
+            update_time = NOW()
+        """
+
+        # 确保数据中有create_time
+        for item in kline_data:
+             if 'create_time' not in item:
+                 item['create_time'] = datetime.now()
+
+        return self.execute_batch(upsert_sql, kline_data)
+
+    def upsert_kline_5min(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert 5分钟K线数据
+
+        Args:
+            kline_data: 5分钟K线数据列表
+
+        Returns:
+            影响的行数
+        """
+        if not kline_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO his_kline_5min
+        (ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+         open, high, low, close, preclose, volume, amount,
+         change_rate, turnover_rate, fundamentals_disclosure_date,
+         total_share, float_share, adjust_flag, source, create_time, update_time)
+        VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s, %(trade_time)s, %(trade_datetime)s,
+                %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s, %(volume)s, %(amount)s,
+                %(change_rate)s, %(turnover_rate)s, %(fundamentals_disclosure_date)s,
+                %(total_share)s, %(float_share)s, %(adjust_flag)s, %(source)s, %(create_time)s, NOW())
+        ON CONFLICT (ts_code, trade_date, trade_time)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            trade_datetime = EXCLUDED.trade_datetime,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            preclose = EXCLUDED.preclose,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
+            total_share = EXCLUDED.total_share,
+            float_share = EXCLUDED.float_share,
+            adjust_flag = EXCLUDED.adjust_flag,
             source = EXCLUDED.source,
             update_time = NOW()
         """
