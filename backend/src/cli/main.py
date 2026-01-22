@@ -14,6 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 from src.config import ConfigManager
 from src.sync import SyncManager
 from src.database import DatabaseConnection
+from .analysis_cli import generate_3d_kline
 
 
 def setup_logging():
@@ -439,6 +440,7 @@ def main():
     """命令行入口函数"""
     # 设置日志配置，确保进度条能够正常显示
     setup_logging()
+    cli.add_command(generate_3d_kline)
     cli()
 
 

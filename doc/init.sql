@@ -552,3 +552,94 @@ COMMENT ON COLUMN anal_kline_rise_25pre.change_rate IS '涨跌幅，精度：小
 COMMENT ON COLUMN anal_kline_rise_25pre.turnover_rate IS '换手率，精度：小数点后8位，计算公式：[指定交易日的成交量(股)/指定交易日的股票的流通股总股数(股)]*100%';
 COMMENT ON COLUMN anal_kline_rise_25pre.create_time IS '数据创建时间，自动生成';
 COMMENT ON COLUMN anal_kline_rise_25pre.update_time IS '数据修改时间，自动更新';
+
+-- 创建立体K线数据表 - 涨跌幅25%预设分析 (1分钟)
+CREATE TABLE anal_kline_rise_25pre_1min (
+    -- 主键
+    id BIGSERIAL PRIMARY KEY,
+
+    -- 股票基本信息
+    ts_code VARCHAR(20) NOT NULL,
+    stock_code VARCHAR(20) NOT NULL,
+    stock_name VARCHAR(20) NOT NULL,
+
+    -- 交易日期和时间
+    trade_begin_date VARCHAR(8),
+    trade_begin_time VARCHAR(4),
+    trade_begin_datetime VARCHAR(12),
+    trade_date VARCHAR(8) NOT NULL,      -- 交易日，格式：yyyyMMdd
+    trade_time VARCHAR(4) NOT NULL,      -- 交易时间，格式：hhmm
+    trade_datetime VARCHAR(12) NOT NULL, -- 交易日期时间，格式：yyyyMMddhhmm
+
+    -- 价格数据（精度：小数点后8位）
+    open NUMERIC(30, 8) DEFAULT 0.00000000,
+    high NUMERIC(30, 8) DEFAULT 0.00000000,
+    low NUMERIC(30, 8) DEFAULT 0.00000000,
+    close NUMERIC(30, 8) DEFAULT 0.00000000,
+
+    -- 成交量与成交额
+    volume NUMERIC(30, 8) DEFAULT 0.00000000,  -- 成交量（单位：股）
+    amount NUMERIC(30, 8) DEFAULT 0.00000000,  -- 成交额（单位：人民币元）
+
+    -- 涨跌幅（精度：小数点后8位）
+    change_rate NUMERIC(30, 8) DEFAULT 0.00000000,
+
+    -- 换手率（精度：小数点后8位）
+    turnover_rate NUMERIC(30, 8) DEFAULT 0.00000000,
+
+    -- 复权标志
+    adjust_flag SMALLINT DEFAULT 3,
+
+    -- 系统时间
+    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 创建索引以提高查询性能
+CREATE INDEX idx_anal_kline_rise_1min_ts_code ON anal_kline_rise_25pre_1min(ts_code);
+CREATE INDEX idx_anal_kline_rise_1min_stock_code ON anal_kline_rise_25pre_1min(stock_code);
+CREATE INDEX idx_anal_kline_rise_1min_trade_date ON anal_kline_rise_25pre_1min(trade_date);
+CREATE INDEX idx_anal_kline_rise_1min_trade_time ON anal_kline_rise_25pre_1min(trade_time);
+CREATE INDEX idx_anal_kline_rise_1min_trade_datetime ON anal_kline_rise_25pre_1min(trade_datetime);
+CREATE INDEX idx_anal_kline_rise_1min_ts_trade_datetime ON anal_kline_rise_25pre_1min(ts_code, trade_datetime);
+CREATE INDEX idx_anal_kline_rise_1min_stock_trade_datetime ON anal_kline_rise_25pre_1min(stock_code, trade_datetime);
+CREATE INDEX idx_anal_kline_rise_1min_date_time_range ON anal_kline_rise_25pre_1min(trade_datetime DESC);
+CREATE INDEX idx_anal_kline_rise_1min_change_rate ON anal_kline_rise_25pre_1min(change_rate DESC);
+CREATE INDEX idx_anal_kline_rise_1min_price_volume ON anal_kline_rise_25pre_1min(close, volume);
+
+-- unique constraint for anal_kline_rise_25pre_1min
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uk_anal_kline_rise_25pre_1min_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+    ) THEN
+        ALTER TABLE anal_kline_rise_25pre_1min ADD CONSTRAINT uk_anal_kline_rise_25pre_1min_code_time UNIQUE (ts_code, trade_date, trade_time);
+    END IF;
+END $$;
+
+-- 创建触发器
+CREATE TRIGGER update_anal_kline_rise_25pre_1min_modtime
+    BEFORE UPDATE ON anal_kline_rise_25pre_1min
+    FOR EACH ROW
+    EXECUTE FUNCTION update_modtime();
+
+-- 添加表和字段注释
+COMMENT ON TABLE anal_kline_rise_25pre_1min IS '立体K线数据表 - 涨跌幅25%预设分析 (1分钟)';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.id IS '主键ID，自增';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.ts_code IS 'TS代码';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.stock_code IS '股票编码';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.stock_name IS '股票名称';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.trade_date IS '交易日，格式：yyyyMMdd';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.trade_time IS '交易时间，格式：hhmm';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.trade_datetime IS '交易日期时间，格式：yyyyMMddhhmm';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.open IS '该周期开盘价，精度：小数点后8位，单位：人民币元';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.high IS '该周期最高价，精度：小数点后8位，单位：人民币元';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.low IS '该周期最低价，精度：小数点后8位，单位：人民币元';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.close IS '该周期收盘价，精度：小数点后8位，单位：人民币元';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.volume IS '成交量，单位：股，精度：小数点后8位';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.amount IS '成交额，精度：小数点后8位，单位：人民币元';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.change_rate IS '涨跌幅，精度：小数点后8位，计算公式：[(指定交易日的收盘价-指定交易日前收盘价)/指定交易日前收盘价]*100%';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.turnover_rate IS '换手率，精度：小数点后8位，计算公式：[指定交易日的成交量(股)/指定交易日的股票的流通股总股数(股)]*100%';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.create_time IS '数据创建时间，自动生成';
+COMMENT ON COLUMN anal_kline_rise_25pre_1min.update_time IS '数据修改时间，自动更新';

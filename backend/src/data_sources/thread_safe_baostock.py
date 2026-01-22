@@ -3,6 +3,7 @@
 解决baostock全局会话的线程安全问题
 """
 
+import time
 import threading
 import logging
 from typing import List, Dict, Any, Optional
@@ -96,6 +97,52 @@ class ThreadSafeBaostockSource:
         """
         return ThreadSafeBaostockSource._is_connected
 
+    def _execute_query_with_retry(self, query_func, error_context: str = ""):
+        """
+        执行Baostock查询并带重试机制
+
+        Args:
+            query_func: 查询函数（无参lambda）
+            error_context: 错误上下文描述
+
+        Returns:
+            查询结果对象
+
+        Raises:
+            Exception: 重试耗尽后抛出最后一次异常
+        """
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                # 每次尝试前确保连接
+                # 注意：不能直接调用connect()因为它是带锁的，如果已经在锁内则没事，
+                # 但这里通常是在业务方法内，没有持有锁。
+                if not ThreadSafeBaostockSource._is_connected:
+                    self.connect()
+
+                return query_func()
+            except Exception as e:
+                last_error = e
+                # 检查是否是网络相关错误
+                error_str = str(e)
+                is_network_error = "Broken pipe" in error_str or "Connection reset" in error_str or "socket" in error_str.lower()
+
+                logger.warning(f"Baostock查询异常 (尝试 {attempt+1}/{max_retries}) {error_context}: {e}")
+
+                if attempt < max_retries - 1:
+                    # 尝试断开重连
+                    try:
+                        self.disconnect()
+                        time.sleep(1) # 简单等待
+                        self.connect()
+                    except Exception as re_e:
+                        logger.error(f"重连失败: {re_e}")
+
+        # 重试耗尽，抛出最后一次异常
+        raise last_error
+
     def get_stock_list(self) -> List[Dict[str, Any]]:
         """获取股票列表 - 线程安全版本"""
         if not self._ensure_connection():
@@ -107,7 +154,7 @@ class ThreadSafeBaostockSource:
                 self.rate_limiter.wait_if_needed()
 
             # 获取证券信息
-            rs = bs.query_stock_basic()
+            rs = self._execute_query_with_retry(lambda: bs.query_stock_basic(), "query_stock_basic")
             if rs.error_code != '0':
                 logger.error(f"查询股票列表失败: {rs.error_msg}")
                 return []
@@ -176,7 +223,10 @@ class ThreadSafeBaostockSource:
                 self.rate_limiter.wait_if_needed()
 
             # 获取财务数据
-            rs = bs.query_profit_data(code=code, year=year, quarter=quarter)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_profit_data(code=code, year=year, quarter=quarter),
+                f"query_profit_data {code} {year}Q{quarter}"
+            )
             if rs.error_code != '0':
                 logger.debug(f"查询财务数据失败: {rs.error_msg}")
                 return None
@@ -327,7 +377,10 @@ class ThreadSafeBaostockSource:
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag),
+                f"fetch_daily_k_data_raw {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None"
@@ -371,7 +424,10 @@ class ThreadSafeBaostockSource:
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,time,open,high,low,close,volume,amount,adjustflag"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="5", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="5", adjustflag=adjustflag),
+                f"fetch_5min_k_data_raw {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None"
@@ -413,7 +469,10 @@ class ThreadSafeBaostockSource:
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag),
+                f"get_daily_k_data {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None (likely date format error)"

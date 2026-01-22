@@ -345,6 +345,92 @@ class DatabaseConnection:
                 ALTER TABLE his_kline_5min ADD CONSTRAINT uk_his_kline_5min_code_time UNIQUE (ts_code, trade_date, trade_time);
             END IF;
         END $$;
+
+        -- 3D K线数据表 (涨幅累计 >= 2.5%)
+        CREATE TABLE IF NOT EXISTS anal_kline_rise_25pre (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20) NOT NULL,
+            stock_code VARCHAR(20) NOT NULL,
+            stock_name VARCHAR(20) NOT NULL,
+            trade_begin_date VARCHAR(8),
+            trade_begin_time VARCHAR(4),
+            trade_begin_datetime VARCHAR(12),
+            trade_date VARCHAR(8) NOT NULL,
+            trade_time VARCHAR(4) NOT NULL,
+            trade_datetime VARCHAR(12),
+            open NUMERIC(30, 8) DEFAULT 0,
+            high NUMERIC(30, 8) DEFAULT 0,
+            low NUMERIC(30, 8) DEFAULT 0,
+            close NUMERIC(30, 8) DEFAULT 0,
+            volume NUMERIC(30, 8) DEFAULT 0,
+            amount NUMERIC(30, 8) DEFAULT 0,
+            change_rate NUMERIC(30, 8) DEFAULT 0,
+            turnover_rate NUMERIC(30, 8) DEFAULT 0,
+            adjust_flag SMALLINT DEFAULT 3,
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Add columns if they don't exist (Migration)
+        DO $$
+        BEGIN
+            BEGIN
+                ALTER TABLE anal_kline_rise_25pre ADD COLUMN trade_begin_date VARCHAR(8);
+            EXCEPTION WHEN duplicate_column THEN END;
+            BEGIN
+                ALTER TABLE anal_kline_rise_25pre ADD COLUMN trade_begin_time VARCHAR(4);
+            EXCEPTION WHEN duplicate_column THEN END;
+            BEGIN
+                ALTER TABLE anal_kline_rise_25pre ADD COLUMN trade_begin_datetime VARCHAR(12);
+            EXCEPTION WHEN duplicate_column THEN END;
+        END $$;
+
+        -- unique constraint for anal_kline_rise_25pre
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_anal_kline_rise_25pre_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE anal_kline_rise_25pre ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time UNIQUE (ts_code, trade_date, trade_time);
+            END IF;
+        END $$;
+
+        -- 3D K线数据表 (涨幅累计 >= 2.5%) - 1分钟
+        CREATE TABLE IF NOT EXISTS anal_kline_rise_25pre_1min (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20) NOT NULL,
+            stock_code VARCHAR(20) NOT NULL,
+            stock_name VARCHAR(20) NOT NULL,
+            trade_begin_date VARCHAR(8),
+            trade_begin_time VARCHAR(4),
+            trade_begin_datetime VARCHAR(12),
+            trade_date VARCHAR(8) NOT NULL,
+            trade_time VARCHAR(4) NOT NULL,
+            trade_datetime VARCHAR(12),
+            open NUMERIC(30, 8) DEFAULT 0,
+            high NUMERIC(30, 8) DEFAULT 0,
+            low NUMERIC(30, 8) DEFAULT 0,
+            close NUMERIC(30, 8) DEFAULT 0,
+            volume NUMERIC(30, 8) DEFAULT 0,
+            amount NUMERIC(30, 8) DEFAULT 0,
+            change_rate NUMERIC(30, 8) DEFAULT 0,
+            turnover_rate NUMERIC(30, 8) DEFAULT 0,
+            adjust_flag SMALLINT DEFAULT 3,
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- unique constraint for anal_kline_rise_25pre_1min
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_anal_kline_rise_25pre_1min_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE anal_kline_rise_25pre_1min ADD CONSTRAINT uk_anal_kline_rise_25pre_1min_code_time UNIQUE (ts_code, trade_date, trade_time);
+            END IF;
+        END $$;
         """
 
         with self.get_connection() as conn:
@@ -501,6 +587,55 @@ class DatabaseConnection:
             params_list.append(params)
 
         return self.execute_batch(upsert_sql, params_list)
+
+    def upsert_anal_kline(self, kline_data: List[Dict[str, Any]], table_name: str = 'anal_kline_rise_25pre') -> int:
+        """
+        批量upsert 3D K线数据
+        """
+        if not kline_data:
+            return 0
+
+        # 简单验证表名防止SQL注入
+        if table_name not in ['anal_kline_rise_25pre', 'anal_kline_rise_25pre_1min']:
+            raise ValueError(f"Invalid table name: {table_name}")
+
+        upsert_sql = f"""
+        INSERT INTO {table_name}
+        (ts_code, stock_code, stock_name,
+         trade_begin_date, trade_begin_time, trade_begin_datetime,
+         trade_date, trade_time, trade_datetime,
+         open, high, low, close, volume, amount,
+         change_rate, turnover_rate, adjust_flag, create_time, update_time)
+        VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s,
+                %(trade_begin_date)s, %(trade_begin_time)s, %(trade_begin_datetime)s,
+                %(trade_date)s, %(trade_time)s, %(trade_datetime)s,
+                %(open)s, %(high)s, %(low)s, %(close)s, %(volume)s, %(amount)s,
+                %(change_rate)s, %(turnover_rate)s, %(adjust_flag)s, %(create_time)s, NOW())
+        ON CONFLICT (ts_code, trade_date, trade_time)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            trade_begin_date = EXCLUDED.trade_begin_date,
+            trade_begin_time = EXCLUDED.trade_begin_time,
+            trade_begin_datetime = EXCLUDED.trade_begin_datetime,
+            trade_datetime = EXCLUDED.trade_datetime,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            adjust_flag = EXCLUDED.adjust_flag,
+            update_time = NOW()
+        """
+
+        for item in kline_data:
+             if 'create_time' not in item:
+                 item['create_time'] = datetime.now()
+
+        return self.execute_batch(upsert_sql, kline_data)
 
     def test_connection(self) -> bool:
         """

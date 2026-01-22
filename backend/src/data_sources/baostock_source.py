@@ -5,6 +5,7 @@ Baostock数据源实现 - 严格按照产品设计文档要求
 
 import baostock as bs
 import logging
+import time
 from typing import List, Dict, Any, Optional
 from datetime import date, datetime
 from .base import DataSourceBase
@@ -33,6 +34,49 @@ class BaostockSource(DataSourceBase):
             # 如果禁用限流，创建一个禁用的限流器实例
             self.rate_limiter = ApiRateLimiter(enabled=False)
 
+    def _execute_query_with_retry(self, query_func, error_context: str = ""):
+        """
+        执行Baostock查询并带重试机制
+
+        Args:
+            query_func: 查询函数（无参lambda）
+            error_context: 错误上下文描述
+
+        Returns:
+            查询结果对象
+
+        Raises:
+            Exception: 重试耗尽后抛出最后一次异常
+        """
+        max_retries = 3
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                # 每次尝试前确保连接
+                if not self._connected:
+                    self.connect()
+
+                return query_func()
+            except Exception as e:
+                last_error = e
+                # 检查是否是网络相关错误
+                error_str = str(e)
+
+                logger.warning(f"Baostock查询异常 (尝试 {attempt+1}/{max_retries}) {error_context}: {e}")
+
+                if attempt < max_retries - 1:
+                    # 尝试断开重连
+                    try:
+                        self.disconnect()
+                        time.sleep(1) # 简单等待
+                        self.connect()
+                    except Exception as re_e:
+                        logger.error(f"重连失败: {re_e}")
+
+        # 重试耗尽，抛出最后一次异常
+        raise last_error
+
     def connect(self) -> bool:
         """连接baostock"""
         try:
@@ -58,7 +102,7 @@ class BaostockSource(DataSourceBase):
 
         try:
             # 获取证券信息
-            rs = bs.query_stock_basic()
+            rs = self._execute_query_with_retry(lambda: bs.query_stock_basic(), "query_stock_basic")
             if rs.error_code != '0':
                 print(f"查询股票列表失败: {rs.error_msg}")
                 return []
@@ -127,7 +171,7 @@ class BaostockSource(DataSourceBase):
             股票名称
         """
         try:
-            rs = bs.query_stock_basic()
+            rs = self._execute_query_with_retry(lambda: bs.query_stock_basic(), "query_stock_basic")
             if rs.error_code != '0':
                 return None
 
@@ -152,7 +196,10 @@ class BaostockSource(DataSourceBase):
                 self.rate_limiter.wait_if_needed()
 
             # 获取财务数据 - 简化调用
-            rs = bs.query_profit_data(code=code, year=year, quarter=quarter)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_profit_data(code=code, year=year, quarter=quarter),
+                f"query_profit_data {code} {year}Q{quarter}"
+            )
             if rs.error_code != '0':
                 print(f"查询财务数据失败: {rs.error_msg}")
                 return None
@@ -302,7 +349,10 @@ class BaostockSource(DataSourceBase):
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag),
+                f"fetch_daily_k_data_raw {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None"
@@ -345,7 +395,10 @@ class BaostockSource(DataSourceBase):
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,time,open,high,low,close,volume,amount,adjustflag"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="5", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="5", adjustflag=adjustflag),
+                f"fetch_5min_k_data_raw {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None"
@@ -386,7 +439,10 @@ class BaostockSource(DataSourceBase):
                 self.rate_limiter.wait_if_needed()
 
             fields = "date,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,peTTM,pbMRQ,psTTM,pcfNcfTTM,isST"
-            rs = bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag)
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_history_k_data_plus(code, fields, start_date=start_date, end_date=end_date, frequency="d", adjustflag=adjustflag),
+                f"get_daily_k_data {code} {start_date}-{end_date}"
+            )
 
             if rs is None or rs.error_code != '0':
                 error_msg = rs.error_msg if rs else "Result is None (likely date format error)"
