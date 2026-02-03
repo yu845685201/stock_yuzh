@@ -14,7 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 from src.config import ConfigManager
 from src.sync import SyncManager
 from src.database import DatabaseConnection
-from .analysis_cli import generate_3d_kline
+from src.cli.analysis_cli import generate_3d_kline
 
 
 def setup_logging():
