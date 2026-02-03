@@ -365,6 +365,157 @@ class SyncManager:
 
         return result
 
+    def sync_kline_day(
+        self,
+        init_mode: bool = False,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        ts_codes: Optional[List[str]] = None,
+        save_to_csv: bool = True,
+        save_to_db: bool = True
+    ) -> Dict[str, Any]:
+        """
+        同步日K线数据 - 支持数据初始化/增量更新/指定日期范围
+        """
+        result = {
+            'success': False,
+            'records': 0,
+            'db_rows': 0,
+            'errors': [],
+            'report_path': None
+        }
+
+        if not self.tdx_api_source:
+            result['errors'].append('Tdx API数据源未初始化')
+            return result
+
+        api_time = 0.0
+        csv_time = 0.0
+        db_time = 0.0
+        anomalies: List[Dict[str, Any]] = []
+
+        start_ts = time.time()
+        try:
+            if not self.tdx_api_source.connect():
+                raise RuntimeError("Tdx API连接失败")
+
+            stocks = self.db_conn.fetch_stock_basic(ts_codes)
+            if not stocks:
+                result['success'] = True
+                return result
+
+            stock_ts_codes = [s['ts_code'] for s in stocks if s.get('ts_code')]
+
+            trade_dates: Optional[List[str]] = None
+            if not init_mode:
+                if start_date and end_date:
+                    trade_dates = self._get_trade_dates(start_date, end_date)
+                else:
+                    today_str = date.today().strftime('%Y-%m-%d')
+                    trade_dates = self._get_trade_dates(today_str, today_str)
+
+                if not trade_dates:
+                    result['success'] = True
+                    return result
+
+            fundamentals_map = self._build_fundamentals_map(
+                init_mode=init_mode,
+                ts_codes=stock_ts_codes,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            for stock in stocks:
+                ts_code = stock.get('ts_code')
+                stock_code = stock.get('stock_code')
+                if not ts_code or not stock_code:
+                    continue
+
+                per_stock_records: List[Dict[str, Any]] = []
+                raw_for_csv: List[Dict[str, Any]] = []
+
+                if init_mode:
+                    api_start = time.time()
+                    raw = self.tdx_api_source.get_kline_all(stock_code, 'day')
+                    api_time += time.time() - api_start
+
+                    if raw:
+                        for item in raw:
+                            if isinstance(item, dict):
+                                item_with_code = {'ts_code': ts_code}
+                                item_with_code.update(item)
+                                raw_for_csv.append(item_with_code)
+
+                        records, record_anomalies = self._normalize_kline_day_records(
+                            raw, stock, fundamentals_map
+                        )
+                        per_stock_records.extend(records)
+                        anomalies.extend(record_anomalies)
+                else:
+                    for trade_date in trade_dates:
+                        api_start = time.time()
+                        raw = self.tdx_api_source.get_kline_history(
+                            stock_code,
+                            'day',
+                            start_date=trade_date,
+                            end_date=trade_date,
+                            limit=800
+                        )
+                        api_time += time.time() - api_start
+
+                        if not raw:
+                            continue
+
+                        for item in raw:
+                            if isinstance(item, dict):
+                                item_with_code = {'ts_code': ts_code}
+                                item_with_code.update(item)
+                                raw_for_csv.append(item_with_code)
+
+                        records, record_anomalies = self._normalize_kline_day_records(
+                            raw, stock, fundamentals_map, allowed_dates={trade_date}
+                        )
+                        per_stock_records.extend(records)
+                        anomalies.extend(record_anomalies)
+
+                if not per_stock_records:
+                    continue
+
+                if save_to_csv:
+                    csv_start = time.time()
+                    if raw_for_csv:
+                        filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
+                        self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
+                    csv_time += time.time() - csv_start
+
+                if save_to_db:
+                    db_start = time.time()
+                    result['db_rows'] += self.db_conn.upsert_his_kline_day(per_stock_records)
+                    db_time += time.time() - db_start
+
+                result['records'] += len(per_stock_records)
+
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(str(e))
+            print(f"同步日K线失败: {e}")
+        finally:
+            if self.tdx_api_source:
+                self.tdx_api_source.disconnect()
+
+        end_ts = time.time()
+        timing = {
+            'api_time': round(api_time, 2),
+            'csv_time': round(csv_time, 2),
+            'db_time': round(db_time, 2),
+            'total_time': round(end_ts - start_ts, 2)
+        }
+
+        result['duration'] = timing['total_time']
+        result['report_path'] = self._write_kline_day_report(result, anomalies, timing)
+
+        return result
+
     def _save_stocks_to_db(self, stocks: List[Dict[str, Any]]) -> None:
         """保存股票数据到数据库 - 修复表名和字段映射"""
         batch_size = self.config_manager.get('sync.batch_size', 1000)  # 优化批次大小
@@ -654,6 +805,147 @@ class SyncManager:
             'amount': amount_v
         }
 
+    def _normalize_kline_day_records(
+        self,
+        raw_records: List[Any],
+        stock: Dict[str, Any],
+        fundamentals_map: Dict[str, Dict[str, Any]],
+        allowed_dates: Optional[set] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        normalized: List[Dict[str, Any]] = []
+        anomalies: List[Dict[str, Any]] = []
+
+        for raw in raw_records:
+            record = self._normalize_kline_day_record(raw, stock)
+            if record:
+                normalized.append(record)
+
+        if not normalized:
+            return [], []
+
+        if allowed_dates:
+            normalized = [item for item in normalized if item.get('trade_date') in allowed_dates]
+
+        normalized.sort(key=lambda x: x['trade_date'])
+
+        prev_close = None
+        for record in normalized:
+            last_value = record.pop('_raw_last', None)
+            if last_value is not None and last_value != 0:
+                preclose = last_value
+            else:
+                if prev_close is not None and prev_close != 0:
+                    preclose = prev_close
+                else:
+                    prev_db_close = self.db_conn.fetch_prev_his_kline_day_close(
+                        record.get('ts_code'),
+                        record.get('trade_date')
+                    )
+                    if prev_db_close is not None and prev_db_close != 0:
+                        preclose = prev_db_close
+                    else:
+                        preclose = record.get('open')
+
+            record['preclose'] = preclose
+
+            close = record.get('close')
+            if preclose and close is not None:
+                record['change_rate'] = (close - preclose) / preclose * 100
+            else:
+                record['change_rate'] = None
+
+            fundamentals = self._match_fundamentals(record['ts_code'], record['trade_date'], fundamentals_map)
+            if fundamentals:
+                record['fundamentals_disclosure_date'] = fundamentals.get('disclosure_date')
+                record['total_share'] = self._to_float(fundamentals.get('total_share'))
+                record['float_share'] = self._to_float(fundamentals.get('float_share'))
+            else:
+                record['fundamentals_disclosure_date'] = None
+                record['total_share'] = None
+                record['float_share'] = None
+
+            float_share = record.get('float_share')
+            volume = record.get('volume')
+            if float_share and volume is not None and float_share != 0:
+                record['turnover_rate'] = volume / float_share * 100
+            else:
+                record['turnover_rate'] = None
+
+            record['source'] = 'TDXAPI'
+
+            limit_rate = self._get_kline_limit_rate(record.get('stock_code'), record.get('stock_name'))
+            change_rate = record.get('change_rate')
+            if change_rate is not None and abs(change_rate) > limit_rate:
+                anomalies.append({
+                    'ts_code': record.get('ts_code'),
+                    'trade_date': record.get('trade_date'),
+                    'change_rate': round(change_rate, 6),
+                    'limit_rate': limit_rate
+                })
+
+            prev_close = close
+
+        return normalized, anomalies
+
+    def _normalize_kline_day_record(self, raw: Any, stock: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+
+        trade_date = self._normalize_date_str(
+            raw.get('trade_date') or raw.get('date') or raw.get('tradeDate') or raw.get('Time') or raw.get('time')
+        )
+
+        if not trade_date:
+            trade_datetime = raw.get('Time') or raw.get('time')
+            if trade_datetime:
+                trade_date, _ = self._split_datetime(trade_datetime)
+
+        if not trade_date:
+            return None
+
+        open_v = self._scale_price(self._to_float(raw.get('open') or raw.get('Open')))
+        high_v = self._scale_price(self._to_float(raw.get('high') or raw.get('High')))
+        low_v = self._scale_price(self._to_float(raw.get('low') or raw.get('Low')))
+        close_v = self._scale_price(self._to_float(raw.get('close') or raw.get('Close')))
+        last_v = self._scale_price(self._to_float(raw.get('last') or raw.get('Last')))
+        volume_v = self._scale_volume(self._to_float(raw.get('volume') or raw.get('Volume')))
+        amount_v = self._scale_amount(self._to_float(raw.get('amount') or raw.get('Amount')))
+
+        return {
+            'ts_code': stock.get('ts_code'),
+            'stock_code': stock.get('stock_code'),
+            'stock_name': stock.get('stock_name'),
+            'trade_date': trade_date,
+            'open': open_v,
+            'high': high_v,
+            'low': low_v,
+            'close': close_v,
+            'preclose': None,
+            '_raw_last': last_v,
+            'volume': volume_v,
+            'amount': amount_v
+        }
+
+    def _filter_raw_kline_by_dates(self, raw_data: List[Dict[str, Any]], trade_dates: Optional[List[str]]) -> List[Dict[str, Any]]:
+        if not raw_data or not trade_dates:
+            return raw_data
+
+        allowed = set(trade_dates)
+        filtered: List[Dict[str, Any]] = []
+        seen_keys = set()
+        for item in raw_data:
+            if not isinstance(item, dict):
+                continue
+            time_value = item.get('Time') or item.get('time') or item.get('trade_date') or item.get('date')
+            trade_date = self._normalize_date_str(time_value)
+            if trade_date and trade_date in allowed:
+                key = time_value or trade_date
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                filtered.append(item)
+        return filtered
+
     def _normalize_calendar_date(self, date_str: str) -> Optional[str]:
         if not date_str:
             return None
@@ -803,4 +1095,59 @@ class SyncManager:
             return report_path
         except Exception as e:
             self.logger.error(f"生成1分钟K线同步报告失败: {e}")
+            return None
+
+    def _write_kline_day_report(
+        self,
+        result: Dict[str, Any],
+        anomalies: List[Dict[str, Any]],
+        timing: Dict[str, Any]
+    ) -> Optional[str]:
+        try:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+            report_dir = os.path.join(repo_root, 'doc', 'reports')
+            os.makedirs(report_dir, exist_ok=True)
+
+            filename = f"kline_day_sync_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            report_path = os.path.join(report_dir, filename)
+
+            lines = [
+                "# 日K线数据同步报告",
+                "",
+                "## 同步概览",
+                f"- 成功: {'是' if result.get('success') else '否'}",
+                f"- 记录数: {result.get('records', 0)}",
+                f"- 写库行数: {result.get('db_rows', 0)}",
+                "",
+                "## 性能信息",
+                f"- tdx-api调用耗时: {timing.get('api_time', 0)} 秒",
+                f"- CSV生成耗时: {timing.get('csv_time', 0)} 秒",
+                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
+                f"- 总耗时: {timing.get('total_time', 0)} 秒",
+                ""
+            ]
+
+            if anomalies:
+                lines.extend([
+                    "## 异常数据",
+                    "",
+                    "| ts_code | trade_date | change_rate | limit_rate |",
+                    "| --- | --- | --- | --- |"
+                ])
+                for item in anomalies:
+                    lines.append(
+                        f"| {item.get('ts_code')} | {item.get('trade_date')} | "
+                        f"{item.get('change_rate')} | {item.get('limit_rate')} |"
+                    )
+            else:
+                lines.append("## 异常数据")
+                lines.append("")
+                lines.append("- 无异常数据")
+
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+
+            return report_path
+        except Exception as e:
+            self.logger.error(f"生成日K线同步报告失败: {e}")
             return None

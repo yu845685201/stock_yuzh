@@ -196,6 +196,62 @@ def sync_kline_1min(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
 @cli.command()
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段')
+@click.option('--start-date', help='指定开始日期(yyyyMMdd)')
+@click.option('--end-date', help='指定结束日期(yyyyMMdd)')
+@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
+@click.pass_context
+def sync_kline_day(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
+    """同步日K线数据"""
+    save_to_csv = not no_csv
+    save_to_db = not no_db
+
+    if (start_date and not end_date) or (end_date and not start_date):
+        click.echo("\n✗ 错误: --start-date和--end-date必须同时指定")
+        return
+
+    click.echo("开始同步日K线数据...")
+    click.echo(f"  - 保存到CSV: {'是' if save_to_csv else '否'}")
+    click.echo(f"  - 保存到数据库: {'是' if save_to_db else '否'}")
+
+    if init_mode:
+        click.echo("  - 采集模式: 数据初始化（全量股票全时段）")
+    elif start_date and end_date:
+        click.echo(f"  - 采集模式: 指定日期范围（{start_date} ~ {end_date}）")
+    else:
+        click.echo("  - 采集模式: 增量更新（当天）")
+
+    ts_codes = None
+    if codes:
+        ts_codes = [code.strip() for code in codes.split(',') if code.strip()]
+        click.echo(f"  - 指定股票: {len(ts_codes)}只")
+
+    sync_manager = SyncManager(ctx.obj['config_manager'])
+    result = sync_manager.sync_kline_day(
+        init_mode=init_mode,
+        start_date=start_date,
+        end_date=end_date,
+        ts_codes=ts_codes,
+        save_to_csv=save_to_csv,
+        save_to_db=save_to_db
+    )
+
+    if result['success']:
+        click.echo("\n✓ 日K线同步完成!")
+        click.echo(f"  - 记录数: {result.get('records', 0)}")
+        click.echo(f"  - 写库行数: {result.get('db_rows', 0)}")
+        click.echo(f"  - 耗时: {result.get('duration', 0):.2f} 秒")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+    else:
+        click.echo("\n✗ 日K线同步失败!")
+        for error in result['errors']:
+            click.echo(f"  错误: {error}")
+
+
+@cli.command()
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')
 @click.option('--dry-run', is_flag=True, help='试运行模式，不实际写入数据')
 @click.option('--list-status', type=click.Choice(['L', 'D', 'P']), default='L',

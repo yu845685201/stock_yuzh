@@ -339,6 +339,26 @@ class CsvWriter:
 
         self._write_csv_file(filepath, raw_data, data_type='his_kline_1min')
 
+    def write_his_kline_day_raw(self, ts_code: str, raw_data: List[Dict[str, Any]]) -> None:
+        """
+        写入日K线原始数据到CSV - ts_code + 原始字段
+
+        Args:
+            ts_code: 股票ts_code
+            raw_data: 原始数据列表（直接来自tdx-api）
+        """
+        if not raw_data:
+            return
+
+        filename = self._generate_filename(f"his_kline_day_{ts_code}", include_seconds=True)
+        subdir = 'his_kline_day'
+        dirpath = os.path.join(self.csv_path, subdir)
+
+        os.makedirs(dirpath, exist_ok=True)
+        filepath = os.path.join(dirpath, filename)
+
+        self._write_csv_file(filepath, raw_data, data_type='his_kline_day')
+
     def get_backup_info(self) -> Dict[str, Any]:
         """
         获取备份信息

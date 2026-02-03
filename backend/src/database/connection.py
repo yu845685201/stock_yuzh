@@ -299,6 +299,30 @@ class DatabaseConnection:
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- 历史日K线数据表
+        CREATE TABLE IF NOT EXISTS his_kline_day (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20),
+            stock_code VARCHAR(20),
+            stock_name VARCHAR(50),
+            trade_date VARCHAR(8),
+            open NUMERIC(30, 8),
+            high NUMERIC(30, 8),
+            low NUMERIC(30, 8),
+            close NUMERIC(30, 8),
+            preclose NUMERIC(30, 8),
+            volume NUMERIC(30, 8),
+            amount NUMERIC(30, 8),
+            change_rate NUMERIC(30, 8),
+            turnover_rate NUMERIC(30, 8),
+            fundamentals_disclosure_date VARCHAR(8),
+            total_share NUMERIC(30, 8),
+            float_share NUMERIC(30, 8),
+            source VARCHAR(20),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- 创建唯一约束 (PostgreSQL不支持IF NOT EXISTS，需要先检查约束是否存在)
         DO $$
         BEGIN
@@ -331,6 +355,13 @@ class DatabaseConnection:
             ) THEN
                 ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
             END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_his_kline_day_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
+            END IF;
         END $$;
 
         -- 创建索引
@@ -340,6 +371,8 @@ class DatabaseConnection:
         CREATE INDEX IF NOT EXISTS idx_his_kline_1min_ts_code ON his_kline_1min(ts_code);
         CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_date ON his_kline_1min(trade_date);
         CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_time ON his_kline_1min(trade_time);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_day_ts_code ON his_kline_day(ts_code);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_day_trade_date ON his_kline_day(trade_date);
 
         """
 
@@ -474,6 +507,74 @@ class DatabaseConnection:
                 'trade_date': item['trade_date'],
                 'trade_time': item['trade_time'],
                 'trade_datetime': item['trade_datetime'],
+                'open': item.get('open'),
+                'high': item.get('high'),
+                'low': item.get('low'),
+                'close': item.get('close'),
+                'preclose': item.get('preclose'),
+                'volume': item.get('volume'),
+                'amount': item.get('amount'),
+                'change_rate': item.get('change_rate'),
+                'turnover_rate': item.get('turnover_rate'),
+                'fundamentals_disclosure_date': item.get('fundamentals_disclosure_date'),
+                'total_share': item.get('total_share'),
+                'float_share': item.get('float_share'),
+                'source': item.get('source'),
+                'create_time': item.get('create_time', datetime.now())
+            })
+
+        return self.execute_batch(upsert_sql, params_list)
+
+    def upsert_his_kline_day(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert 日K线数据
+
+        Args:
+            kline_data: 日K线数据列表
+
+        Returns:
+            影响的行数
+        """
+        if not kline_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO his_kline_day
+        (ts_code, stock_code, stock_name, trade_date,
+         open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
+         fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
+        VALUES (
+            %(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s,
+            %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s, %(volume)s, %(amount)s, %(change_rate)s, %(turnover_rate)s,
+            %(fundamentals_disclosure_date)s, %(total_share)s, %(float_share)s, %(source)s, %(create_time)s, NOW()
+        )
+        ON CONFLICT (ts_code, trade_date)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            preclose = EXCLUDED.preclose,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
+            total_share = EXCLUDED.total_share,
+            float_share = EXCLUDED.float_share,
+            source = EXCLUDED.source,
+            update_time = NOW()
+        """
+
+        params_list = []
+        for item in kline_data:
+            params_list.append({
+                'ts_code': item['ts_code'],
+                'stock_code': item['stock_code'],
+                'stock_name': item['stock_name'],
+                'trade_date': item['trade_date'],
                 'open': item.get('open'),
                 'high': item.get('high'),
                 'low': item.get('low'),
@@ -684,6 +785,23 @@ class DatabaseConnection:
         LIMIT 1
         """
         result = self.fetch_one(query, (ts_code, trade_date, trade_date, trade_time))
+        if result:
+            return result.get('close')
+        return None
+
+    def fetch_prev_his_kline_day_close(self, ts_code: str, trade_date: str) -> Optional[float]:
+        """
+        获取指定股票在当前交易日之前最近一条日K线的close
+        """
+        query = """
+        SELECT close
+        FROM his_kline_day
+        WHERE ts_code = %s
+          AND trade_date < %s
+        ORDER BY trade_date DESC
+        LIMIT 1
+        """
+        result = self.fetch_one(query, (ts_code, trade_date))
         if result:
             return result.get('close')
         return None
