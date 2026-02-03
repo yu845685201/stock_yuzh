@@ -147,6 +147,57 @@ class SyncManager:
 
         return stocks_list
 
+    def sync_trade_calendar(self, start_year: int, end_year: int, save_to_db: bool = True) -> Dict[str, Any]:
+        """
+        同步交易日历数据 - 按年范围同步
+
+        Args:
+            start_year: 开始年份 (yyyy)
+            end_year: 结束年份 (yyyy)
+            save_to_db: 是否保存到数据库
+
+        Returns:
+            同步结果统计
+        """
+        result = {
+            'start_year': start_year,
+            'end_year': end_year,
+            'success': False,
+            'records': 0,
+            'db_rows': 0,
+            'errors': []
+        }
+
+        start_time = time.time()
+        try:
+            if start_year > end_year:
+                raise ValueError(f"开始年份不能大于结束年份: {start_year} > {end_year}")
+
+            if not self.baostock_source:
+                raise RuntimeError("Baostock数据源未初始化")
+
+            if not self.baostock_source.connect():
+                raise RuntimeError("Baostock连接失败")
+
+            calendar_data = self.baostock_source.get_trade_calendar(start_year, end_year)
+            result['records'] = len(calendar_data)
+
+            if save_to_db and calendar_data:
+                result['db_rows'] = self.db_conn.upsert_trade_calendar(calendar_data)
+
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(str(e))
+            print(f"同步交易日历失败: {e}")
+        finally:
+            if self.baostock_source:
+                self.baostock_source.disconnect()
+
+        end_time = time.time()
+        result['duration'] = round(end_time - start_time, 2)
+
+        return result
+
     def _save_stocks_to_db(self, stocks: List[Dict[str, Any]]) -> None:
         """保存股票数据到数据库 - 修复表名和字段映射"""
         batch_size = self.config_manager.get('sync.batch_size', 1000)  # 优化批次大小

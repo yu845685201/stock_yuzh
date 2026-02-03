@@ -159,6 +159,47 @@ class BaostockSource(DataSourceBase):
             print(f"获取股票列表异常: {e}")
             return []
 
+    def get_trade_calendar(self, start_year: int, end_year: int) -> List[Dict[str, Any]]:
+        """
+        获取交易日历数据 - 严格按照产品设计文档要求
+
+        Args:
+            start_year: 开始年份 (yyyy)
+            end_year: 结束年份 (yyyy)
+
+        Returns:
+            交易日历列表，字段：calendar_date、is_trading_day
+        """
+        if not self._connected:
+            return []
+
+        try:
+            start_date = f"{start_year}-01-01"
+            end_date = f"{end_year}-12-31"
+
+            rs = self._execute_query_with_retry(
+                lambda: bs.query_trade_dates(start_date=start_date, end_date=end_date),
+                f"query_trade_dates {start_date} ~ {end_date}"
+            )
+            if rs.error_code != '0':
+                print(f"查询交易日历失败: {rs.error_msg}")
+                return []
+
+            trade_calendar = []
+            while (rs.error_code == '0') & rs.next():
+                row = rs.get_row_data()
+                calendar_date = row[0]
+                is_trading_day = int(row[1]) if row[1] else 0
+                trade_calendar.append({
+                    'calendar_date': calendar_date,
+                    'is_trading_day': is_trading_day
+                })
+
+            return trade_calendar
+        except Exception as e:
+            print(f"获取交易日历异常: {e}")
+            return []
+
 
     def _get_stock_name(self, code: str) -> Optional[str]:
         """

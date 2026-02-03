@@ -266,6 +266,13 @@ class DatabaseConnection:
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- 交易日历表
+        CREATE TABLE IF NOT EXISTS base_trade_calendar (
+            id BIGSERIAL PRIMARY KEY,
+            calendar_date VARCHAR(10),
+            is_trading_day SMALLINT
+        );
+
         -- 创建唯一约束 (PostgreSQL不支持IF NOT EXISTS，需要先检查约束是否存在)
         DO $$
         BEGIN
@@ -284,13 +291,21 @@ class DatabaseConnection:
                 -- 按照产品设计文档要求，使用ts_code+disclosure_date组合作为唯一约束
                 ALTER TABLE base_fundamentals_info ADD CONSTRAINT uk_base_fundamentals_info_code_date UNIQUE (ts_code, disclosure_date);
             END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_base_trade_calendar_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE base_trade_calendar ADD CONSTRAINT uk_base_trade_calendar_date UNIQUE (calendar_date);
+            END IF;
         END $$;
 
         -- 创建索引
         CREATE INDEX IF NOT EXISTS idx_base_stock_info_code ON base_stock_info(stock_code);
         CREATE INDEX IF NOT EXISTS idx_base_fundamentals_info_code ON base_fundamentals_info(ts_code);
+        CREATE INDEX IF NOT EXISTS idx_base_trade_calendar_date ON base_trade_calendar(calendar_date);
 
-        
+        """
 
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -336,6 +351,37 @@ class DatabaseConnection:
                 'create_time': item.get('create_time', datetime.now())  # 确保始终有值
             }
             params_list.append(params)
+
+        return self.execute_batch(upsert_sql, params_list)
+
+    def upsert_trade_calendar(self, calendar_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert交易日历数据
+
+        Args:
+            calendar_data: 交易日历数据列表
+
+        Returns:
+            影响的行数
+        """
+        if not calendar_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO base_trade_calendar
+        (calendar_date, is_trading_day)
+        VALUES (%(calendar_date)s, %(is_trading_day)s)
+        ON CONFLICT (calendar_date)
+        DO UPDATE SET
+            is_trading_day = EXCLUDED.is_trading_day
+        """
+
+        params_list = []
+        for item in calendar_data:
+            params_list.append({
+                'calendar_date': item['calendar_date'],
+                'is_trading_day': item['is_trading_day']
+            })
 
         return self.execute_batch(upsert_sql, params_list)
 

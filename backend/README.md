@@ -109,6 +109,7 @@ python -m src.cli.main sync-all [--csv] [--db]
 python -m src.cli.main sync-stocks [--csv] [--db]
 python -m src.cli.main sync-daily [--csv] [--db] [--start-date] [--end-date] [--codes]
 python -m src.cli.main sync-financial [--csv] [--db] [--year] [--quarter] [--codes]
+python -m src.cli.main sync-trade-calendar --start-year yyyy --end-year yyyy
 ```
 
 ## 数据源说明

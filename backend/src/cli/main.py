@@ -111,6 +111,33 @@ def sync_stocks(ctx, no_csv, no_db):
 
 
 @cli.command()
+@click.option('--start-year', type=int, required=True, help='开始年份 (yyyy)')
+@click.option('--end-year', type=int, required=True, help='结束年份 (yyyy)')
+@click.pass_context
+def sync_trade_calendar(ctx, start_year, end_year):
+    """同步交易日历"""
+    if start_year > end_year:
+        click.echo(f"\n✗ 错误: 开始年份不能大于结束年份: {start_year} > {end_year}")
+        return
+
+    click.echo("开始同步交易日历数据...")
+    click.echo(f"  - 年份范围: {start_year} ~ {end_year}")
+
+    sync_manager = SyncManager(ctx.obj['config_manager'])
+    result = sync_manager.sync_trade_calendar(start_year=start_year, end_year=end_year, save_to_db=True)
+
+    if result['success']:
+        click.echo("\n✓ 交易日历同步完成!")
+        click.echo(f"  - 记录数: {result['records']}")
+        click.echo(f"  - 写库行数: {result['db_rows']}")
+        click.echo(f"  - 耗时: {result['duration']:.2f} 秒")
+    else:
+        click.echo("\n✗ 交易日历同步失败!")
+        for error in result['errors']:
+            click.echo(f"  错误: {error}")
+
+
+@cli.command()
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')
