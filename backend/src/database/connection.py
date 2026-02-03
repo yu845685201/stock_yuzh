@@ -273,6 +273,32 @@ class DatabaseConnection:
             is_trading_day SMALLINT
         );
 
+        -- 历史1分钟K线数据表
+        CREATE TABLE IF NOT EXISTS his_kline_1min (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20),
+            stock_code VARCHAR(20),
+            stock_name VARCHAR(50),
+            trade_date VARCHAR(8),
+            trade_time VARCHAR(4),
+            trade_datetime VARCHAR(12),
+            open NUMERIC(30, 8),
+            high NUMERIC(30, 8),
+            low NUMERIC(30, 8),
+            close NUMERIC(30, 8),
+            preclose NUMERIC(30, 8),
+            volume NUMERIC(30, 8),
+            amount NUMERIC(30, 8),
+            change_rate NUMERIC(30, 8),
+            turnover_rate NUMERIC(30, 8),
+            fundamentals_disclosure_date VARCHAR(8),
+            total_share NUMERIC(30, 8),
+            float_share NUMERIC(30, 8),
+            source VARCHAR(20),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- 创建唯一约束 (PostgreSQL不支持IF NOT EXISTS，需要先检查约束是否存在)
         DO $$
         BEGIN
@@ -298,12 +324,22 @@ class DatabaseConnection:
             ) THEN
                 ALTER TABLE base_trade_calendar ADD CONSTRAINT uk_base_trade_calendar_date UNIQUE (calendar_date);
             END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_his_kline_1min_code_date_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
+            END IF;
         END $$;
 
         -- 创建索引
         CREATE INDEX IF NOT EXISTS idx_base_stock_info_code ON base_stock_info(stock_code);
         CREATE INDEX IF NOT EXISTS idx_base_fundamentals_info_code ON base_fundamentals_info(ts_code);
         CREATE INDEX IF NOT EXISTS idx_base_trade_calendar_date ON base_trade_calendar(calendar_date);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_ts_code ON his_kline_1min(ts_code);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_date ON his_kline_1min(trade_date);
+        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_time ON his_kline_1min(trade_time);
 
         """
 
@@ -384,6 +420,273 @@ class DatabaseConnection:
             })
 
         return self.execute_batch(upsert_sql, params_list)
+
+    def upsert_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert 1分钟K线数据
+
+        Args:
+            kline_data: 1分钟K线数据列表
+
+        Returns:
+            影响的行数
+        """
+        if not kline_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO his_kline_1min
+        (ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+         open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
+         fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
+        VALUES (
+            %(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s, %(trade_time)s, %(trade_datetime)s,
+            %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s, %(volume)s, %(amount)s, %(change_rate)s, %(turnover_rate)s,
+            %(fundamentals_disclosure_date)s, %(total_share)s, %(float_share)s, %(source)s, %(create_time)s, NOW()
+        )
+        ON CONFLICT (ts_code, trade_date, trade_time)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            trade_datetime = EXCLUDED.trade_datetime,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            preclose = EXCLUDED.preclose,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
+            total_share = EXCLUDED.total_share,
+            float_share = EXCLUDED.float_share,
+            source = EXCLUDED.source,
+            update_time = NOW()
+        """
+
+        params_list = []
+        for item in kline_data:
+            params_list.append({
+                'ts_code': item['ts_code'],
+                'stock_code': item['stock_code'],
+                'stock_name': item['stock_name'],
+                'trade_date': item['trade_date'],
+                'trade_time': item['trade_time'],
+                'trade_datetime': item['trade_datetime'],
+                'open': item.get('open'),
+                'high': item.get('high'),
+                'low': item.get('low'),
+                'close': item.get('close'),
+                'preclose': item.get('preclose'),
+                'volume': item.get('volume'),
+                'amount': item.get('amount'),
+                'change_rate': item.get('change_rate'),
+                'turnover_rate': item.get('turnover_rate'),
+                'fundamentals_disclosure_date': item.get('fundamentals_disclosure_date'),
+                'total_share': item.get('total_share'),
+                'float_share': item.get('float_share'),
+                'source': item.get('source'),
+                'create_time': item.get('create_time', datetime.now())
+            })
+
+        return self.execute_batch(upsert_sql, params_list)
+
+    def fetch_trade_calendar(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """
+        获取交易日历区间数据
+
+        Args:
+            start_date: yyyy-mm-dd
+            end_date: yyyy-mm-dd
+        """
+        query = """
+        SELECT calendar_date
+        FROM base_trade_calendar
+        WHERE calendar_date >= %s AND calendar_date <= %s AND is_trading_day = 1
+        ORDER BY calendar_date ASC
+        """
+        return self.execute_query(query, (start_date, end_date))
+
+    def fetch_stock_basic(self, ts_codes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        获取股票基本信息（优先按type=1过滤）
+        """
+        params: List[Any] = []
+        base_query = "SELECT ts_code, stock_code, stock_name FROM base_stock_info"
+        where_clause = []
+
+        if ts_codes:
+            where_clause.append("ts_code = ANY(%s)")
+            params.append(ts_codes)
+
+        # 尝试按type=1过滤，如果字段不存在则回退
+        try:
+            query = base_query
+            if where_clause:
+                query += " WHERE " + " AND ".join(where_clause) + " AND type = '1'"
+            else:
+                query += " WHERE type = '1'"
+            return self.execute_query(query, tuple(params))
+        except Exception:
+            query = base_query
+            if where_clause:
+                query += " WHERE " + " AND ".join(where_clause)
+            return self.execute_query(query, tuple(params))
+
+    def fetch_fundamentals_all(self, ts_codes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        获取所有基本面数据
+        """
+        params: List[Any] = []
+        query = """
+        SELECT ts_code, disclosure_date, total_share, float_share
+        FROM base_fundamentals_info
+        """
+        if ts_codes:
+            query += " WHERE ts_code = ANY(%s)"
+            params.append(ts_codes)
+        return self.execute_query(query, tuple(params))
+
+    def fetch_fundamentals_latest(self, ts_codes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        获取每只股票最新基本面数据
+        """
+        params: List[Any] = []
+        query = """
+        SELECT t.ts_code, t.disclosure_date, t.total_share, t.float_share
+        FROM base_fundamentals_info t
+        INNER JOIN (
+            SELECT ts_code, MAX(disclosure_date) AS disclosure_date
+            FROM base_fundamentals_info
+            GROUP BY ts_code
+        ) m ON t.ts_code = m.ts_code AND t.disclosure_date = m.disclosure_date
+        """
+        if ts_codes:
+            query += " WHERE t.ts_code = ANY(%s)"
+            params.append(ts_codes)
+        return self.execute_query(query, tuple(params))
+
+    def fetch_fundamentals_in_range(self, ts_codes: Optional[List[str]], start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """
+        获取指定日期范围内基本面数据
+        """
+        params: List[Any] = [start_date, end_date]
+        query = """
+        SELECT ts_code, disclosure_date, total_share, float_share
+        FROM base_fundamentals_info
+        WHERE disclosure_date >= %s AND disclosure_date <= %s
+        """
+        if ts_codes:
+            query += " AND ts_code = ANY(%s)"
+            params.append(ts_codes)
+        return self.execute_query(query, tuple(params))
+
+    def fetch_fundamentals_up_to(self, ts_codes: Optional[List[str]], end_date: str) -> List[Dict[str, Any]]:
+        """
+        获取截止到指定日期的基本面数据（用于匹配交易日前最近披露）
+        """
+        params: List[Any] = [end_date]
+        query = """
+        SELECT ts_code, disclosure_date, total_share, float_share
+        FROM base_fundamentals_info
+        WHERE disclosure_date <= %s
+        """
+        if ts_codes:
+            query += " AND ts_code = ANY(%s)"
+            params.append(ts_codes)
+        return self.execute_query(query, tuple(params))
+
+    def fetch_fundamentals_range_with_prev(
+        self,
+        ts_codes: Optional[List[str]],
+        start_date: str,
+        end_date: str
+    ) -> List[Dict[str, Any]]:
+        """
+        获取指定日期范围内的基本面数据，并补充每只股票在开始日期之前最近一条数据
+        """
+        params: List[Any] = [start_date, end_date]
+        ts_filter = ""
+        if ts_codes:
+            ts_filter = " AND ts_code = ANY(%s)"
+            params.append(ts_codes)
+
+        query = f"""
+        WITH in_range AS (
+            SELECT ts_code, disclosure_date, total_share, float_share
+            FROM base_fundamentals_info
+            WHERE disclosure_date >= %s AND disclosure_date <= %s
+            {ts_filter}
+        ),
+        prev_one AS (
+            SELECT DISTINCT ON (ts_code)
+                ts_code, disclosure_date, total_share, float_share
+            FROM base_fundamentals_info
+            WHERE disclosure_date < %s
+            {ts_filter}
+            ORDER BY ts_code, disclosure_date DESC
+        )
+        SELECT * FROM in_range
+        UNION ALL
+        SELECT * FROM prev_one
+        """
+
+        # params for prev_one: start_date + optional ts_codes
+        params_prev: List[Any] = [start_date]
+        if ts_codes:
+            params_prev.append(ts_codes)
+
+        return self.execute_query(query, tuple(params + params_prev))
+
+    def fetch_last_his_kline_1min_preclose(self, ts_code: str) -> Optional[float]:
+        """
+        获取指定股票最后一条1分钟K线的preclose
+        """
+        query = """
+        SELECT preclose
+        FROM his_kline_1min
+        WHERE ts_code = %s
+        ORDER BY trade_date DESC, trade_time DESC
+        LIMIT 1
+        """
+        result = self.fetch_one(query, (ts_code,))
+        if result:
+            return result.get('preclose')
+        return None
+
+    def fetch_last_his_kline_1min_close(self, ts_code: str) -> Optional[float]:
+        """
+        获取指定股票最后一条1分钟K线的close
+        """
+        query = """
+        SELECT close
+        FROM his_kline_1min
+        WHERE ts_code = %s
+        ORDER BY trade_date DESC, trade_time DESC
+        LIMIT 1
+        """
+        result = self.fetch_one(query, (ts_code,))
+        if result:
+            return result.get('close')
+        return None
+
+    def fetch_prev_his_kline_1min_close(self, ts_code: str, trade_date: str, trade_time: str) -> Optional[float]:
+        """
+        获取指定股票在当前交易时间之前最近一条1分钟K线的close
+        """
+        query = """
+        SELECT close
+        FROM his_kline_1min
+        WHERE ts_code = %s
+          AND (trade_date < %s OR (trade_date = %s AND trade_time < %s))
+        ORDER BY trade_date DESC, trade_time DESC
+        LIMIT 1
+        """
+        result = self.fetch_one(query, (ts_code, trade_date, trade_date, trade_time))
+        if result:
+            return result.get('close')
+        return None
 
     def test_connection(self) -> bool:
         """

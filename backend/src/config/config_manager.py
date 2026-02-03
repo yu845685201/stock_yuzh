@@ -68,6 +68,16 @@ class ConfigManager:
             'data_sources': {
                 'baostock': {
                     'enabled': True
+                },
+                'tdx_api': {
+                    'enabled': True,
+                    'base_url': os.getenv('TDX_API_BASE_URL', 'http://127.0.0.1:8000'),
+                    'timeout': 30,
+                    'rate_limit': {
+                        'enabled': True,
+                        'calls_per_period': 50,
+                        'sleep_duration': 1.0
+                    }
                 }
             },
             'sync': {

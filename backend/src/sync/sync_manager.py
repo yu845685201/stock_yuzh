@@ -4,14 +4,17 @@
 
 import time
 import logging
-from typing import List, Dict, Any, Optional
+import os
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import date, datetime, timedelta
+from bisect import bisect_right
 from ..config import ConfigManager
-from ..data_sources import BaostockSource
+from ..data_sources import BaostockSource, TdxApiSource
 from ..database import DatabaseConnection, Stock
 from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
 from ..utils.log_aggregator import LogAggregator
+from ..utils.data_transformer import DataTransformer
 
 class SyncManager:
     """数据同步管理器"""
@@ -34,6 +37,7 @@ class SyncManager:
 
         # 初始化数据源
         self.baostock_source = None
+        self.tdx_api_source = None
 
         self._init_data_sources()
 
@@ -45,6 +49,11 @@ class SyncManager:
                 'data_path': self.config_manager.get_data_paths().get('csv')
             }
             self.baostock_source = BaostockSource(baostock_config)
+
+        # 初始化Tdx API数据源
+        if self.config_manager.get('data_sources.tdx_api.enabled', True):
+            tdx_api_config = self.config_manager.get('data_sources.tdx_api', {})
+            self.tdx_api_source = TdxApiSource(tdx_api_config)
 
         # 初始化基本面数据管理器
         self.fundamentals_manager = FundamentalsManager(self.config_manager)
@@ -198,6 +207,164 @@ class SyncManager:
 
         return result
 
+    def sync_kline_1min(
+        self,
+        init_mode: bool = False,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        ts_codes: Optional[List[str]] = None,
+        save_to_csv: bool = True,
+        save_to_db: bool = True
+    ) -> Dict[str, Any]:
+        """
+        同步1分钟K线数据 - 支持数据初始化/增量更新/指定日期范围
+        """
+        result = {
+            'success': False,
+            'records': 0,
+            'db_rows': 0,
+            'errors': [],
+            'report_path': None
+        }
+
+        if not self.tdx_api_source:
+            result['errors'].append('Tdx API数据源未初始化')
+            return result
+
+        api_time = 0.0
+        csv_time = 0.0
+        db_time = 0.0
+        anomalies: List[Dict[str, Any]] = []
+
+        start_ts = time.time()
+        try:
+            if not self.tdx_api_source.connect():
+                raise RuntimeError("Tdx API连接失败")
+
+            stocks = self.db_conn.fetch_stock_basic(ts_codes)
+            if not stocks:
+                result['success'] = True
+                return result
+
+            stock_ts_codes = [s['ts_code'] for s in stocks if s.get('ts_code')]
+
+            trade_dates: Optional[List[str]] = None
+            if not init_mode:
+                if start_date and end_date:
+                    trade_dates = self._get_trade_dates(start_date, end_date)
+                else:
+                    today_str = date.today().strftime('%Y-%m-%d')
+                    trade_dates = self._get_trade_dates(today_str, today_str)
+
+                if not trade_dates:
+                    result['success'] = True
+                    return result
+
+            fundamentals_map = self._build_fundamentals_map(
+                init_mode=init_mode,
+                ts_codes=stock_ts_codes,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            for stock in stocks:
+                ts_code = stock.get('ts_code')
+                stock_code = stock.get('stock_code')
+                if not ts_code or not stock_code:
+                    continue
+
+                per_stock_records: List[Dict[str, Any]] = []
+                raw_for_csv: List[Dict[str, Any]] = []
+                prev_preclose = None
+
+                if init_mode:
+                    api_start = time.time()
+                    raw = self.tdx_api_source.get_kline_all(stock_code, 'minute1')
+                    api_time += time.time() - api_start
+
+                    if raw:
+                        for item in raw:
+                            if isinstance(item, dict):
+                                item_with_code = {'ts_code': ts_code}
+                                item_with_code.update(item)
+                                raw_for_csv.append(item_with_code)
+                        prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
+                        records, record_anomalies = self._normalize_kline_1min_records(
+                            raw, stock, fundamentals_map, prev_preclose
+                        )
+                        per_stock_records.extend(records)
+                        anomalies.extend(record_anomalies)
+                else:
+                    for trade_date in trade_dates:
+                        api_start = time.time()
+                        raw = self.tdx_api_source.get_kline_history(
+                            stock_code,
+                            'minute1',
+                            start_date=trade_date,
+                            end_date=trade_date,
+                            limit=800
+                        )
+                        api_time += time.time() - api_start
+
+                        if not raw:
+                            continue
+
+                        for item in raw:
+                            if isinstance(item, dict):
+                                item_with_code = {'ts_code': ts_code}
+                                item_with_code.update(item)
+                                raw_for_csv.append(item_with_code)
+
+                        if prev_preclose is None:
+                            prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
+
+                        records, record_anomalies = self._normalize_kline_1min_records(
+                            raw, stock, fundamentals_map, prev_preclose, allowed_dates={trade_date}
+                        )
+                        if records:
+                            prev_preclose = records[-1].get('close')
+                        per_stock_records.extend(records)
+                        anomalies.extend(record_anomalies)
+
+                if not per_stock_records:
+                    continue
+
+                if save_to_csv:
+                    csv_start = time.time()
+                    if raw_for_csv:
+                        self.csv_writer.write_his_kline_1min_raw(ts_code, raw_for_csv)
+                    else:
+                        self.csv_writer.write_his_kline_1min(ts_code, per_stock_records)
+                    csv_time += time.time() - csv_start
+
+                if save_to_db:
+                    db_start = time.time()
+                    result['db_rows'] += self.db_conn.upsert_his_kline_1min(per_stock_records)
+                    db_time += time.time() - db_start
+
+                result['records'] += len(per_stock_records)
+
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(str(e))
+            print(f"同步1分钟K线失败: {e}")
+        finally:
+            if self.tdx_api_source:
+                self.tdx_api_source.disconnect()
+
+        end_ts = time.time()
+        timing = {
+            'api_time': round(api_time, 2),
+            'csv_time': round(csv_time, 2),
+            'db_time': round(db_time, 2),
+            'total_time': round(end_ts - start_ts, 2)
+        }
+
+        result['duration'] = timing['total_time']
+        result['report_path'] = self._write_kline_1min_report(result, anomalies, timing)
+
+        return result
+
     def _save_stocks_to_db(self, stocks: List[Dict[str, Any]]) -> None:
         """保存股票数据到数据库 - 修复表名和字段映射"""
         batch_size = self.config_manager.get('sync.batch_size', 1000)  # 优化批次大小
@@ -279,3 +446,361 @@ class SyncManager:
             同步统计信息
         """
         return self.fundamentals_manager.execute_sync(**options)
+
+    def _get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
+        start_date = self._normalize_calendar_date(start_date)
+        end_date = self._normalize_calendar_date(end_date)
+        if not start_date or not end_date:
+            return []
+
+        rows = self.db_conn.fetch_trade_calendar(start_date, end_date)
+        trade_dates = []
+        for row in rows:
+            calendar_date = row.get('calendar_date')
+            if calendar_date:
+                trade_dates.append(calendar_date.replace('-', ''))
+        return trade_dates
+
+    def _build_fundamentals_map(
+        self,
+        init_mode: bool,
+        ts_codes: List[str],
+        start_date: Optional[str],
+        end_date: Optional[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        if init_mode:
+            data = self.db_conn.fetch_fundamentals_all(ts_codes)
+        elif start_date and end_date:
+            end_str = self._normalize_calendar_date(end_date)
+            start_str = self._normalize_calendar_date(start_date)
+            if not end_str or not start_str:
+                data = []
+            else:
+                data = self.db_conn.fetch_fundamentals_range_with_prev(ts_codes, start_str, end_str)
+        else:
+            data = self.db_conn.fetch_fundamentals_latest(ts_codes)
+
+        fundamentals_map: Dict[str, Dict[str, Any]] = {}
+        for item in data:
+            ts_code = item.get('ts_code')
+            if not ts_code:
+                continue
+            disclosure_date = self._normalize_date_str(item.get('disclosure_date'))
+            if not disclosure_date:
+                continue
+            record = {
+                'disclosure_date': disclosure_date,
+                'total_share': item.get('total_share'),
+                'float_share': item.get('float_share')
+            }
+            entry = fundamentals_map.setdefault(ts_code, {'dates': [], 'records': []})
+            entry['dates'].append(disclosure_date)
+            entry['records'].append(record)
+
+        for ts_code, entry in fundamentals_map.items():
+            combined = sorted(zip(entry['dates'], entry['records']), key=lambda x: x[0])
+            entry['dates'] = [x[0] for x in combined]
+            entry['records'] = [x[1] for x in combined]
+
+        return fundamentals_map
+
+    def _match_fundamentals(
+        self,
+        ts_code: str,
+        trade_date: str,
+        fundamentals_map: Dict[str, Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not trade_date:
+            return None
+        entry = fundamentals_map.get(ts_code)
+        if not entry:
+            return None
+        dates = entry.get('dates', [])
+        if not dates:
+            return None
+        idx = bisect_right(dates, trade_date)
+        if idx <= 0:
+            return None
+        return entry['records'][idx - 1]
+
+    def _normalize_kline_1min_records(
+        self,
+        raw_records: List[Any],
+        stock: Dict[str, Any],
+        fundamentals_map: Dict[str, Dict[str, Any]],
+        previous_preclose: Optional[float],
+        allowed_dates: Optional[set] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        normalized: List[Dict[str, Any]] = []
+        anomalies: List[Dict[str, Any]] = []
+
+        for raw in raw_records:
+            record = self._normalize_kline_1min_record(raw, stock)
+            if record:
+                normalized.append(record)
+
+        if not normalized:
+            return [], []
+
+        if allowed_dates:
+            normalized = [item for item in normalized if item.get('trade_date') in allowed_dates]
+
+        normalized.sort(key=lambda x: (x['trade_date'], x['trade_time']))
+
+        prev_close = None
+        for idx, record in enumerate(normalized):
+            last_value = record.pop('_raw_last', None)
+            if last_value is not None and last_value != 0:
+                preclose = last_value
+            else:
+                if prev_close is not None and prev_close != 0:
+                    preclose = prev_close
+                else:
+                    prev_db_close = self.db_conn.fetch_prev_his_kline_1min_close(
+                        record.get('ts_code'),
+                        record.get('trade_date'),
+                        record.get('trade_time')
+                    )
+                    if prev_db_close is not None and prev_db_close != 0:
+                        preclose = prev_db_close
+                    else:
+                        preclose = record.get('open')
+            record['preclose'] = preclose
+
+            close = record.get('close')
+            if preclose and close is not None:
+                record['change_rate'] = (close - preclose) / preclose * 100
+            else:
+                record['change_rate'] = None
+
+            fundamentals = self._match_fundamentals(record['ts_code'], record['trade_date'], fundamentals_map)
+            if fundamentals:
+                record['fundamentals_disclosure_date'] = fundamentals.get('disclosure_date')
+                record['total_share'] = self._to_float(fundamentals.get('total_share'))
+                record['float_share'] = self._to_float(fundamentals.get('float_share'))
+            else:
+                record['fundamentals_disclosure_date'] = None
+                record['total_share'] = None
+                record['float_share'] = None
+
+            float_share = record.get('float_share')
+            volume = record.get('volume')
+            if float_share and volume is not None and float_share != 0:
+                record['turnover_rate'] = volume / float_share * 100
+            else:
+                record['turnover_rate'] = None
+
+            record['source'] = 'TDXAPI'
+
+            limit_rate = self._get_kline_limit_rate(record.get('stock_code'), record.get('stock_name'))
+            change_rate = record.get('change_rate')
+            if change_rate is not None and abs(change_rate) > limit_rate:
+                anomalies.append({
+                    'ts_code': record.get('ts_code'),
+                    'trade_date': record.get('trade_date'),
+                    'trade_time': record.get('trade_time'),
+                    'change_rate': round(change_rate, 6),
+                    'limit_rate': limit_rate
+                })
+
+            prev_close = close
+
+        return normalized, anomalies
+
+    def _normalize_kline_1min_record(self, raw: Any, stock: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+
+        trade_date = self._normalize_date_str(
+            raw.get('trade_date') or raw.get('date') or raw.get('tradeDate')
+        )
+        trade_time = self._normalize_time_str(
+            raw.get('trade_time') or raw.get('time') or raw.get('tradeTime')
+        )
+
+        trade_datetime = (
+            raw.get('trade_datetime') or raw.get('datetime') or raw.get('Time') or raw.get('time')
+        )
+        if (not trade_date or not trade_time) and trade_datetime:
+            trade_date, trade_time = self._split_datetime(trade_datetime)
+
+        if not trade_date or not trade_time:
+            return None
+
+        trade_datetime = f"{trade_date}{trade_time}"
+
+        open_v = self._scale_price(self._to_float(raw.get('open') or raw.get('Open')))
+        high_v = self._scale_price(self._to_float(raw.get('high') or raw.get('High')))
+        low_v = self._scale_price(self._to_float(raw.get('low') or raw.get('Low')))
+        close_v = self._scale_price(self._to_float(raw.get('close') or raw.get('Close')))
+        last_v = self._scale_price(self._to_float(raw.get('last') or raw.get('Last')))
+        volume_v = self._scale_volume(self._to_float(raw.get('volume') or raw.get('Volume')))
+        amount_v = self._scale_amount(self._to_float(raw.get('amount') or raw.get('Amount')))
+
+        return {
+            'ts_code': stock.get('ts_code'),
+            'stock_code': stock.get('stock_code'),
+            'stock_name': stock.get('stock_name'),
+            'trade_date': trade_date,
+            'trade_time': trade_time,
+            'trade_datetime': trade_datetime,
+            'open': open_v,
+            'high': high_v,
+            'low': low_v,
+            'close': close_v,
+            'preclose': None,
+            '_raw_last': last_v,
+            'volume': volume_v,
+            'amount': amount_v
+        }
+
+    def _normalize_calendar_date(self, date_str: str) -> Optional[str]:
+        if not date_str:
+            return None
+        date_str = str(date_str).strip()
+        if '-' in date_str and len(date_str) == 10:
+            return date_str
+        if len(date_str) == 8 and date_str.isdigit():
+            return f"{date_str[0:4]}-{date_str[4:6]}-{date_str[6:8]}"
+        try:
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            return dt.strftime('%Y-%m-%d')
+        except Exception:
+            return None
+
+    def _normalize_date_str(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.strftime('%Y%m%d')
+        if isinstance(value, date):
+            return value.strftime('%Y%m%d')
+
+        s = str(value).strip()
+        if len(s) >= 8 and s[0:8].isdigit():
+            if '-' in s and len(s) >= 10:
+                return s[0:10].replace('-', '')
+            return s[0:8]
+        if '-' in s and len(s) >= 10:
+            return s[0:10].replace('-', '')
+        return None
+
+    def _normalize_time_str(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        s = str(value).strip()
+        if ':' in s:
+            parts = s.split(':')
+            if len(parts) >= 2:
+                hh = parts[0].zfill(2)
+                mm = parts[1].zfill(2)
+                return f"{hh}{mm}"
+        if s.isdigit():
+            if len(s) == 4:
+                return s
+            if len(s) == 3:
+                return s.zfill(4)
+            if len(s) >= 5:
+                return s[0:4]
+        return None
+
+    def _split_datetime(self, value: Any) -> Tuple[Optional[str], Optional[str]]:
+        s = str(value).strip()
+        try:
+            dt = datetime.fromisoformat(s)
+            return dt.strftime('%Y%m%d'), dt.strftime('%H%M')
+        except Exception:
+            pass
+        if len(s) >= 12 and s[0:12].isdigit():
+            return s[0:8], s[8:12]
+        if ' ' in s:
+            date_part, time_part = s.split(' ', 1)
+            date_str = self._normalize_date_str(date_part)
+            time_str = self._normalize_time_str(time_part)
+            return date_str, time_str
+        return None, None
+
+    def _to_float(self, value: Any) -> Optional[float]:
+        if value is None or value == '':
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    def _scale_price(self, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return value / 1000.0
+
+    def _scale_amount(self, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return value / 1000.0
+
+    def _scale_volume(self, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return value * 100.0
+
+    def _get_kline_limit_rate(self, stock_code: Optional[str], stock_name: Optional[str]) -> float:
+        if stock_name and DataTransformer.check_is_st(stock_name):
+            return 5.1
+        if stock_code and (stock_code.startswith('300') or stock_code.startswith('688')):
+            return 20.1
+        return 10.1
+
+    def _write_kline_1min_report(
+        self,
+        result: Dict[str, Any],
+        anomalies: List[Dict[str, Any]],
+        timing: Dict[str, Any]
+    ) -> Optional[str]:
+        try:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+            report_dir = os.path.join(repo_root, 'doc', 'reports')
+            os.makedirs(report_dir, exist_ok=True)
+
+            filename = f"kline_1min_sync_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            report_path = os.path.join(report_dir, filename)
+
+            lines = [
+                "# 1分钟K线数据同步报告",
+                "",
+                "## 同步概览",
+                f"- 成功: {'是' if result.get('success') else '否'}",
+                f"- 记录数: {result.get('records', 0)}",
+                f"- 写库行数: {result.get('db_rows', 0)}",
+                "",
+                "## 性能信息",
+                f"- tdx-api调用耗时: {timing.get('api_time', 0)} 秒",
+                f"- CSV生成耗时: {timing.get('csv_time', 0)} 秒",
+                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
+                f"- 总耗时: {timing.get('total_time', 0)} 秒",
+                ""
+            ]
+
+            if anomalies:
+                lines.extend([
+                    "## 异常数据",
+                    "",
+                    "| ts_code | trade_date | trade_time | change_rate | limit_rate |",
+                    "| --- | --- | --- | --- | --- |"
+                ])
+                for item in anomalies:
+                    lines.append(
+                        f"| {item.get('ts_code')} | {item.get('trade_date')} | {item.get('trade_time')} | "
+                        f"{item.get('change_rate')} | {item.get('limit_rate')} |"
+                    )
+            else:
+                lines.append("## 异常数据")
+                lines.append("")
+                lines.append("- 无异常数据")
+
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+
+            return report_path
+        except Exception as e:
+            self.logger.error(f"生成1分钟K线同步报告失败: {e}")
+            return None

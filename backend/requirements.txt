@@ -23,3 +23,6 @@ pypinyin==0.51.0
 
 # 工具库
 tqdm==4.66.1
+
+# HTTP客户端
+requests==2.31.0

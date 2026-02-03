@@ -141,7 +141,7 @@ class CsvWriter:
         if session_id in self._write_sessions:
             self._write_sessions[session_id].add(filepath)
 
-    def _generate_filename(self, data_type: str, include_time: bool = False) -> str:
+    def _generate_filename(self, data_type: str, include_time: bool = False, include_seconds: bool = False) -> str:
         """
         生成符合产品设计文档要求的CSV文件名
 
@@ -150,13 +150,18 @@ class CsvWriter:
             include_time: 是否包含时分信息，默认False
                          False: yyyyMMdd格式 (如: 20241219)
                          True: yyyyMMddhhmm格式 (如: 202412191430)
+            include_seconds: 是否包含秒，默认False
+                            True: yyyyMMddhhmmss格式 (如: 20241219143059)
 
         Returns:
             符合格式的文件名
             - 不含时分: base_stock_info_20241219.csv
             - 含时分: base_fundamentals_info_202501051430.csv
+            - 含秒: his_kline_1min_sz.000001_20250105143059.csv
         """
-        if include_time:
+        if include_seconds:
+            date_str = datetime.now().strftime('%Y%m%d%H%M%S')
+        elif include_time:
             date_str = datetime.now().strftime('%Y%m%d%H%M')
         else:
             date_str = datetime.now().strftime('%Y%m%d')
@@ -293,6 +298,46 @@ class CsvWriter:
 
         self._write_csv_file(filepath, mapped_data, unique_keys=['ts_code'], data_type='base_fundamentals_info')
         self.logger.info(f"基本面信息CSV文件已生成: {filename} ({len(mapped_data)} 条记录)")
+
+    def write_his_kline_1min(self, ts_code: str, kline_data: List[Dict[str, Any]]) -> None:
+        """
+        写入1分钟K线数据到CSV - 严格按照产品设计文档要求
+
+        Args:
+            ts_code: 股票ts_code
+            kline_data: 1分钟K线数据列表
+        """
+        if not kline_data:
+            return
+
+        filename = self._generate_filename(f"his_kline_1min_{ts_code}", include_seconds=True)
+        subdir = 'his_kline_1min'
+        dirpath = os.path.join(self.csv_path, subdir)
+
+        os.makedirs(dirpath, exist_ok=True)
+        filepath = os.path.join(dirpath, filename)
+
+        self._write_csv_file(filepath, kline_data, data_type='his_kline_1min')
+
+    def write_his_kline_1min_raw(self, ts_code: str, raw_data: List[Dict[str, Any]]) -> None:
+        """
+        写入1分钟K线原始数据到CSV - ts_code + 原始字段
+
+        Args:
+            ts_code: 股票ts_code
+            raw_data: 原始数据列表（直接来自tdx-api）
+        """
+        if not raw_data:
+            return
+
+        filename = self._generate_filename(f"his_kline_1min_{ts_code}", include_seconds=True)
+        subdir = 'his_kline_1min'
+        dirpath = os.path.join(self.csv_path, subdir)
+
+        os.makedirs(dirpath, exist_ok=True)
+        filepath = os.path.join(dirpath, filename)
+
+        self._write_csv_file(filepath, raw_data, data_type='his_kline_1min')
 
     def get_backup_info(self) -> Dict[str, Any]:
         """

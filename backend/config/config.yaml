@@ -36,6 +36,14 @@ data_paths:
 data_sources:
   baostock:
     enabled: true
+  tdx_api:
+    enabled: true
+    base_url: http://127.0.0.1:8080
+    timeout: 30
+    rate_limit:
+      enabled: true
+      calls_per_period: 50
+      sleep_duration: 1.0
 
 # API限流配置
 rate_limit:
