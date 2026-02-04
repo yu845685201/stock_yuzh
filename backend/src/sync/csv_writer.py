@@ -4,7 +4,6 @@ CSV文件写入器 - 严格按照产品设计文档要求，支持智能删除+A
 
 import os
 import csv
-import pandas as pd
 import logging
 import uuid
 from typing import List, Dict, Any, Optional, Set
@@ -192,12 +191,13 @@ class CsvWriter:
             except Exception as e:
                 self.logger.error(f"删除旧文件失败: {e}")
 
-        # 准备数据
-        df = pd.DataFrame(data)
-
-        # 写入模式：总是创建新文件（删除重建模式）
         try:
-            df.to_csv(filepath, mode='w', index=False, encoding='utf-8-sig', header=True)
+            # 使用标准库流式写入，避免pandas开销
+            fieldnames = list(data[0].keys())
+            with open(filepath, mode='w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                writer.writeheader()
+                writer.writerows(data)
 
             # 标记文件已写入
             self._mark_file_written(filepath)

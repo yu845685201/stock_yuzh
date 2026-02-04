@@ -227,6 +227,26 @@ class DatabaseConnection:
                 conn.commit()
                 return cursor.rowcount
 
+    def execute_values(self, query: str, params_list: List[tuple], page_size: int = 1000) -> int:
+        """
+        批量执行语句（使用execute_values，适合大批量插入）
+
+        Args:
+            query: SQL语句（包含VALUES %s）
+            params_list: 参数列表
+            page_size: 每批次大小
+
+        Returns:
+            影响的行数
+        """
+        if not params_list:
+            return 0
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                psycopg2.extras.execute_values(cursor, query, params_list, page_size=page_size)
+                conn.commit()
+                return cursor.rowcount
+
     def initialize_tables(self) -> None:
         """初始化数据库表 - 严格按照文档要求"""
         create_tables_sql = """
@@ -472,11 +492,7 @@ class DatabaseConnection:
         (ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
          open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
          fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
-        VALUES (
-            %(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s, %(trade_time)s, %(trade_datetime)s,
-            %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s, %(volume)s, %(amount)s, %(change_rate)s, %(turnover_rate)s,
-            %(fundamentals_disclosure_date)s, %(total_share)s, %(float_share)s, %(source)s, %(create_time)s, NOW()
-        )
+        VALUES %s
         ON CONFLICT (ts_code, trade_date, trade_time)
         DO UPDATE SET
             stock_code = EXCLUDED.stock_code,
@@ -499,31 +515,33 @@ class DatabaseConnection:
         """
 
         params_list = []
+        now = datetime.now()
         for item in kline_data:
-            params_list.append({
-                'ts_code': item['ts_code'],
-                'stock_code': item['stock_code'],
-                'stock_name': item['stock_name'],
-                'trade_date': item['trade_date'],
-                'trade_time': item['trade_time'],
-                'trade_datetime': item['trade_datetime'],
-                'open': item.get('open'),
-                'high': item.get('high'),
-                'low': item.get('low'),
-                'close': item.get('close'),
-                'preclose': item.get('preclose'),
-                'volume': item.get('volume'),
-                'amount': item.get('amount'),
-                'change_rate': item.get('change_rate'),
-                'turnover_rate': item.get('turnover_rate'),
-                'fundamentals_disclosure_date': item.get('fundamentals_disclosure_date'),
-                'total_share': item.get('total_share'),
-                'float_share': item.get('float_share'),
-                'source': item.get('source'),
-                'create_time': item.get('create_time', datetime.now())
-            })
+            params_list.append((
+                item['ts_code'],
+                item['stock_code'],
+                item['stock_name'],
+                item['trade_date'],
+                item['trade_time'],
+                item['trade_datetime'],
+                item.get('open'),
+                item.get('high'),
+                item.get('low'),
+                item.get('close'),
+                item.get('preclose'),
+                item.get('volume'),
+                item.get('amount'),
+                item.get('change_rate'),
+                item.get('turnover_rate'),
+                item.get('fundamentals_disclosure_date'),
+                item.get('total_share'),
+                item.get('float_share'),
+                item.get('source'),
+                item.get('create_time', now),
+                now
+            ))
 
-        return self.execute_batch(upsert_sql, params_list)
+        return self.execute_values(upsert_sql, params_list, page_size=2000)
 
     def upsert_his_kline_day(self, kline_data: List[Dict[str, Any]]) -> int:
         """
@@ -543,11 +561,7 @@ class DatabaseConnection:
         (ts_code, stock_code, stock_name, trade_date,
          open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
          fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
-        VALUES (
-            %(ts_code)s, %(stock_code)s, %(stock_name)s, %(trade_date)s,
-            %(open)s, %(high)s, %(low)s, %(close)s, %(preclose)s, %(volume)s, %(amount)s, %(change_rate)s, %(turnover_rate)s,
-            %(fundamentals_disclosure_date)s, %(total_share)s, %(float_share)s, %(source)s, %(create_time)s, NOW()
-        )
+        VALUES %s
         ON CONFLICT (ts_code, trade_date)
         DO UPDATE SET
             stock_code = EXCLUDED.stock_code,
@@ -569,29 +583,31 @@ class DatabaseConnection:
         """
 
         params_list = []
+        now = datetime.now()
         for item in kline_data:
-            params_list.append({
-                'ts_code': item['ts_code'],
-                'stock_code': item['stock_code'],
-                'stock_name': item['stock_name'],
-                'trade_date': item['trade_date'],
-                'open': item.get('open'),
-                'high': item.get('high'),
-                'low': item.get('low'),
-                'close': item.get('close'),
-                'preclose': item.get('preclose'),
-                'volume': item.get('volume'),
-                'amount': item.get('amount'),
-                'change_rate': item.get('change_rate'),
-                'turnover_rate': item.get('turnover_rate'),
-                'fundamentals_disclosure_date': item.get('fundamentals_disclosure_date'),
-                'total_share': item.get('total_share'),
-                'float_share': item.get('float_share'),
-                'source': item.get('source'),
-                'create_time': item.get('create_time', datetime.now())
-            })
+            params_list.append((
+                item['ts_code'],
+                item['stock_code'],
+                item['stock_name'],
+                item['trade_date'],
+                item.get('open'),
+                item.get('high'),
+                item.get('low'),
+                item.get('close'),
+                item.get('preclose'),
+                item.get('volume'),
+                item.get('amount'),
+                item.get('change_rate'),
+                item.get('turnover_rate'),
+                item.get('fundamentals_disclosure_date'),
+                item.get('total_share'),
+                item.get('float_share'),
+                item.get('source'),
+                item.get('create_time', now),
+                now
+            ))
 
-        return self.execute_batch(upsert_sql, params_list)
+        return self.execute_values(upsert_sql, params_list, page_size=2000)
 
     def fetch_trade_calendar(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
         """

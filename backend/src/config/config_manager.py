@@ -83,7 +83,8 @@ class ConfigManager:
             'sync': {
                 'batch_size': 1000,
                 'max_retries': 3,
-                'timeout': 30
+                'timeout': 30,
+                'kline_max_workers': 4
             },
             'rate_limit': {
                 'enabled': True,

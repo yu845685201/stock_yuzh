@@ -8,6 +8,7 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import date, datetime, timedelta
 from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..config import ConfigManager
 from ..data_sources import BaostockSource, TdxApiSource
 from ..database import DatabaseConnection, Stock
@@ -234,6 +235,9 @@ class SyncManager:
         api_time = 0.0
         csv_time = 0.0
         db_time = 0.0
+        api_span: Optional[Tuple[float, float]] = None
+        csv_span: Optional[Tuple[float, float]] = None
+        db_span: Optional[Tuple[float, float]] = None
         anomalies: List[Dict[str, Any]] = []
 
         start_ts = time.time()
@@ -267,20 +271,47 @@ class SyncManager:
                 end_date=end_date
             )
 
-            for stock in stocks:
-                ts_code = stock.get('ts_code')
-                stock_code = stock.get('stock_code')
+            total_stocks = len(stocks)
+
+            def process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
+                ts_code = stock_item.get('ts_code')
+                stock_code = stock_item.get('stock_code')
+                stock_name = stock_item.get('stock_name') or ''
                 if not ts_code or not stock_code:
-                    continue
+                    return {
+                        'records': 0,
+                        'db_rows': 0,
+                        'api_time': 0.0,
+                        'csv_time': 0.0,
+                        'db_time': 0.0,
+                        'api_span': None,
+                        'csv_span': None,
+                        'db_span': None,
+                        'anomalies': []
+                    }
 
                 per_stock_records: List[Dict[str, Any]] = []
                 raw_for_csv: List[Dict[str, Any]] = []
+                local_api_time = 0.0
+                local_csv_time = 0.0
+                local_db_time = 0.0
+                local_anomalies: List[Dict[str, Any]] = []
+                api_start_wall = None
+                api_end_wall = None
+                csv_start_wall = None
+                csv_end_wall = None
+                db_start_wall = None
+                db_end_wall = None
                 prev_preclose = None
 
                 if init_mode:
                     api_start = time.time()
+                    if api_start_wall is None:
+                        api_start_wall = api_start
                     raw = self.tdx_api_source.get_kline_all(stock_code, 'minute1')
-                    api_time += time.time() - api_start
+                    api_end_wall = time.time()
+                    local_api_time += api_end_wall - api_start
+                    self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
 
                     if raw:
                         for item in raw:
@@ -290,21 +321,27 @@ class SyncManager:
                                 raw_for_csv.append(item_with_code)
                         prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
                         records, record_anomalies = self._normalize_kline_1min_records(
-                            raw, stock, fundamentals_map, prev_preclose
+                            raw, stock_item, fundamentals_map, prev_preclose
                         )
                         per_stock_records.extend(records)
-                        anomalies.extend(record_anomalies)
+                        local_anomalies.extend(record_anomalies)
                 else:
-                    for trade_date in trade_dates:
+                    for trade_date_chunk in self._chunk_list(trade_dates, 3):
+                        start_trade_date = trade_date_chunk[0]
+                        end_trade_date = trade_date_chunk[-1]
                         api_start = time.time()
+                        if api_start_wall is None:
+                            api_start_wall = api_start
                         raw = self.tdx_api_source.get_kline_history(
                             stock_code,
                             'minute1',
-                            start_date=trade_date,
-                            end_date=trade_date,
+                            start_date=start_trade_date,
+                            end_date=end_trade_date,
                             limit=800
                         )
-                        api_time += time.time() - api_start
+                        api_end_wall = time.time()
+                        local_api_time += api_end_wall - api_start
+                        self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
 
                         if not raw:
                             continue
@@ -318,31 +355,87 @@ class SyncManager:
                         if prev_preclose is None:
                             prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
 
+                        allowed_dates = set(trade_date_chunk)
                         records, record_anomalies = self._normalize_kline_1min_records(
-                            raw, stock, fundamentals_map, prev_preclose, allowed_dates={trade_date}
+                            raw, stock_item, fundamentals_map, prev_preclose, allowed_dates=allowed_dates
                         )
                         if records:
                             prev_preclose = records[-1].get('close')
                         per_stock_records.extend(records)
-                        anomalies.extend(record_anomalies)
+                        local_anomalies.extend(record_anomalies)
 
-                if not per_stock_records:
-                    continue
-
-                if save_to_csv:
+                if per_stock_records and save_to_csv and raw_for_csv:
                     csv_start = time.time()
-                    if raw_for_csv:
-                        self.csv_writer.write_his_kline_1min_raw(ts_code, raw_for_csv)
-                    else:
-                        self.csv_writer.write_his_kline_1min(ts_code, per_stock_records)
-                    csv_time += time.time() - csv_start
+                    if csv_start_wall is None:
+                        csv_start_wall = csv_start
+                    filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
+                    self.csv_writer.write_his_kline_1min_raw(ts_code, filtered_raw)
+                    csv_end_wall = time.time()
+                    local_csv_time += csv_end_wall - csv_start
+                    self._log_progress('csv 生成', stock_index, total_stocks, stock_code, stock_name, csv_end_wall - csv_start)
 
-                if save_to_db:
+                if per_stock_records and save_to_db:
                     db_start = time.time()
-                    result['db_rows'] += self.db_conn.upsert_his_kline_1min(per_stock_records)
-                    db_time += time.time() - db_start
+                    if db_start_wall is None:
+                        db_start_wall = db_start
+                    db_rows = self.db_conn.upsert_his_kline_1min(per_stock_records)
+                    db_end_wall = time.time()
+                    local_db_time += db_end_wall - db_start
+                    self._log_progress('数据入库', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
+                else:
+                    db_rows = 0
 
-                result['records'] += len(per_stock_records)
+                return {
+                    'records': len(per_stock_records),
+                    'db_rows': db_rows,
+                    'api_time': local_api_time,
+                    'csv_time': local_csv_time,
+                    'db_time': local_db_time,
+                    'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
+                    'csv_span': (csv_start_wall, csv_end_wall) if csv_start_wall and csv_end_wall else None,
+                    'db_span': (db_start_wall, db_end_wall) if db_start_wall and db_end_wall else None,
+                    'anomalies': local_anomalies
+                }
+
+            max_workers = self.config_manager.get('sync.kline_max_workers', 1)
+            if max_workers and max_workers > 1 and len(stocks) > 1:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(process_stock, s, i + 1) for i, s in enumerate(stocks)]
+                    for future in as_completed(futures):
+                        res = future.result()
+                        result['records'] += res['records']
+                        result['db_rows'] += res['db_rows']
+                        api_time += res['api_time']
+                        csv_time += res['csv_time']
+                        db_time += res['db_time']
+                        anomalies.extend(res['anomalies'])
+                        if res['api_span']:
+                            api_span = (min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
+                                        max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1])
+                        if res['csv_span']:
+                            csv_span = (min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
+                                        max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1])
+                        if res['db_span']:
+                            db_span = (min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
+                                       max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1])
+            else:
+                for i, stock in enumerate(stocks, start=1):
+                    res = process_stock(stock, i)
+                    result['records'] += res['records']
+                    result['db_rows'] += res['db_rows']
+                    api_time += res['api_time']
+                    csv_time += res['csv_time']
+                    db_time += res['db_time']
+                    anomalies.extend(res['anomalies'])
+                    if res['api_span']:
+                        api_span = (min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
+                                    max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1])
+                    if res['csv_span']:
+                        csv_span = (min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
+                                    max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1])
+                    if res['db_span']:
+                        db_span = (min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
+                                   max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1])
 
             result['success'] = True
         except Exception as e:
@@ -357,7 +450,11 @@ class SyncManager:
             'api_time': round(api_time, 2),
             'csv_time': round(csv_time, 2),
             'db_time': round(db_time, 2),
-            'total_time': round(end_ts - start_ts, 2)
+            'total_time': round(end_ts - start_ts, 2),
+            'parallel': self.config_manager.get('sync.kline_max_workers', 1),
+            'api_wall': round(api_span[1] - api_span[0], 2) if api_span else 0,
+            'csv_wall': round(csv_span[1] - csv_span[0], 2) if csv_span else 0,
+            'db_wall': round(db_span[1] - db_span[0], 2) if db_span else 0
         }
 
         result['duration'] = timing['total_time']
@@ -392,6 +489,9 @@ class SyncManager:
         api_time = 0.0
         csv_time = 0.0
         db_time = 0.0
+        api_span: Optional[Tuple[float, float]] = None
+        csv_span: Optional[Tuple[float, float]] = None
+        db_span: Optional[Tuple[float, float]] = None
         anomalies: List[Dict[str, Any]] = []
 
         start_ts = time.time()
@@ -425,19 +525,46 @@ class SyncManager:
                 end_date=end_date
             )
 
-            for stock in stocks:
-                ts_code = stock.get('ts_code')
-                stock_code = stock.get('stock_code')
+            total_stocks = len(stocks)
+
+            def process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
+                ts_code = stock_item.get('ts_code')
+                stock_code = stock_item.get('stock_code')
+                stock_name = stock_item.get('stock_name') or ''
                 if not ts_code or not stock_code:
-                    continue
+                    return {
+                        'records': 0,
+                        'db_rows': 0,
+                        'api_time': 0.0,
+                        'csv_time': 0.0,
+                        'db_time': 0.0,
+                        'api_span': None,
+                        'csv_span': None,
+                        'db_span': None,
+                        'anomalies': []
+                    }
 
                 per_stock_records: List[Dict[str, Any]] = []
                 raw_for_csv: List[Dict[str, Any]] = []
+                local_api_time = 0.0
+                local_csv_time = 0.0
+                local_db_time = 0.0
+                local_anomalies: List[Dict[str, Any]] = []
+                api_start_wall = None
+                api_end_wall = None
+                csv_start_wall = None
+                csv_end_wall = None
+                db_start_wall = None
+                db_end_wall = None
 
                 if init_mode:
                     api_start = time.time()
+                    if api_start_wall is None:
+                        api_start_wall = api_start
                     raw = self.tdx_api_source.get_kline_all(stock_code, 'day')
-                    api_time += time.time() - api_start
+                    api_end_wall = time.time()
+                    local_api_time += api_end_wall - api_start
+                    self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
 
                     if raw:
                         for item in raw:
@@ -447,21 +574,27 @@ class SyncManager:
                                 raw_for_csv.append(item_with_code)
 
                         records, record_anomalies = self._normalize_kline_day_records(
-                            raw, stock, fundamentals_map
+                            raw, stock_item, fundamentals_map
                         )
                         per_stock_records.extend(records)
-                        anomalies.extend(record_anomalies)
+                        local_anomalies.extend(record_anomalies)
                 else:
-                    for trade_date in trade_dates:
+                    for trade_date_chunk in self._chunk_list(trade_dates, 700):
+                        start_trade_date = trade_date_chunk[0]
+                        end_trade_date = trade_date_chunk[-1]
                         api_start = time.time()
+                        if api_start_wall is None:
+                            api_start_wall = api_start
                         raw = self.tdx_api_source.get_kline_history(
                             stock_code,
                             'day',
-                            start_date=trade_date,
-                            end_date=trade_date,
+                            start_date=start_trade_date,
+                            end_date=end_trade_date,
                             limit=800
                         )
-                        api_time += time.time() - api_start
+                        api_end_wall = time.time()
+                        local_api_time += api_end_wall - api_start
+                        self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
 
                         if not raw:
                             continue
@@ -472,28 +605,85 @@ class SyncManager:
                                 item_with_code.update(item)
                                 raw_for_csv.append(item_with_code)
 
+                        allowed_dates = set(trade_date_chunk)
                         records, record_anomalies = self._normalize_kline_day_records(
-                            raw, stock, fundamentals_map, allowed_dates={trade_date}
+                            raw, stock_item, fundamentals_map, allowed_dates=allowed_dates
                         )
                         per_stock_records.extend(records)
-                        anomalies.extend(record_anomalies)
+                        local_anomalies.extend(record_anomalies)
 
-                if not per_stock_records:
-                    continue
-
-                if save_to_csv:
+                if per_stock_records and save_to_csv and raw_for_csv:
                     csv_start = time.time()
-                    if raw_for_csv:
-                        filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
-                        self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
-                    csv_time += time.time() - csv_start
+                    if csv_start_wall is None:
+                        csv_start_wall = csv_start
+                    filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
+                    self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
+                    csv_end_wall = time.time()
+                    local_csv_time += csv_end_wall - csv_start
+                    self._log_progress('csv 生成', stock_index, total_stocks, stock_code, stock_name, csv_end_wall - csv_start)
 
-                if save_to_db:
+                if per_stock_records and save_to_db:
                     db_start = time.time()
-                    result['db_rows'] += self.db_conn.upsert_his_kline_day(per_stock_records)
-                    db_time += time.time() - db_start
+                    if db_start_wall is None:
+                        db_start_wall = db_start
+                    db_rows = self.db_conn.upsert_his_kline_day(per_stock_records)
+                    db_end_wall = time.time()
+                    local_db_time += db_end_wall - db_start
+                    self._log_progress('数据入库', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
+                else:
+                    db_rows = 0
 
-                result['records'] += len(per_stock_records)
+                return {
+                    'records': len(per_stock_records),
+                    'db_rows': db_rows,
+                    'api_time': local_api_time,
+                    'csv_time': local_csv_time,
+                    'db_time': local_db_time,
+                    'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
+                    'csv_span': (csv_start_wall, csv_end_wall) if csv_start_wall and csv_end_wall else None,
+                    'db_span': (db_start_wall, db_end_wall) if db_start_wall and db_end_wall else None,
+                    'anomalies': local_anomalies
+                }
+
+            max_workers = self.config_manager.get('sync.kline_max_workers', 1)
+            if max_workers and max_workers > 1 and len(stocks) > 1:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = [executor.submit(process_stock, s, i + 1) for i, s in enumerate(stocks)]
+                    for future in as_completed(futures):
+                        res = future.result()
+                        result['records'] += res['records']
+                        result['db_rows'] += res['db_rows']
+                        api_time += res['api_time']
+                        csv_time += res['csv_time']
+                        db_time += res['db_time']
+                        anomalies.extend(res['anomalies'])
+                        if res['api_span']:
+                            api_span = (min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
+                                        max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1])
+                        if res['csv_span']:
+                            csv_span = (min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
+                                        max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1])
+                        if res['db_span']:
+                            db_span = (min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
+                                       max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1])
+            else:
+                for i, stock in enumerate(stocks, start=1):
+                    res = process_stock(stock, i)
+                    result['records'] += res['records']
+                    result['db_rows'] += res['db_rows']
+                    api_time += res['api_time']
+                    csv_time += res['csv_time']
+                    db_time += res['db_time']
+                    anomalies.extend(res['anomalies'])
+                    if res['api_span']:
+                        api_span = (min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
+                                    max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1])
+                    if res['csv_span']:
+                        csv_span = (min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
+                                    max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1])
+                    if res['db_span']:
+                        db_span = (min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
+                                   max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1])
 
             result['success'] = True
         except Exception as e:
@@ -508,7 +698,11 @@ class SyncManager:
             'api_time': round(api_time, 2),
             'csv_time': round(csv_time, 2),
             'db_time': round(db_time, 2),
-            'total_time': round(end_ts - start_ts, 2)
+            'total_time': round(end_ts - start_ts, 2),
+            'parallel': self.config_manager.get('sync.kline_max_workers', 1),
+            'api_wall': round(api_span[1] - api_span[0], 2) if api_span else 0,
+            'csv_wall': round(csv_span[1] - csv_span[0], 2) if csv_span else 0,
+            'db_wall': round(db_span[1] - db_span[0], 2) if db_span else 0
         }
 
         result['duration'] = timing['total_time']
@@ -946,6 +1140,31 @@ class SyncManager:
                 filtered.append(item)
         return filtered
 
+    def _chunk_list(self, items: List[str], size: int) -> List[List[str]]:
+        if not items or size <= 0:
+            return []
+        return [items[i:i + size] for i in range(0, len(items), size)]
+
+    def _log_progress(
+        self,
+        stage: str,
+        current: int,
+        total: int,
+        stock_code: str,
+        stock_name: str,
+        elapsed: float
+    ) -> None:
+        if total <= 0:
+            return
+        percent = (current / total) * 100
+        message = (
+            f"{stage}-[{current}/{total}]"
+            f"{stock_code}-{stock_name}，"
+            f"进度{percent:.2f}%，"
+            f"本次调用接口耗时 {elapsed:.2f} s"
+        )
+        self.logger.info(message)
+
     def _normalize_calendar_date(self, date_str: str) -> Optional[str]:
         if not date_str:
             return None
@@ -1065,10 +1284,14 @@ class SyncManager:
                 f"- 写库行数: {result.get('db_rows', 0)}",
                 "",
                 "## 性能信息",
-                f"- tdx-api调用耗时: {timing.get('api_time', 0)} 秒",
-                f"- CSV生成耗时: {timing.get('csv_time', 0)} 秒",
-                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
-                f"- 总耗时: {timing.get('total_time', 0)} 秒",
+                f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
+                f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
+                f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
+                f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
+                f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
+                f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
+                f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
+                f"- 并发线程数: {timing.get('parallel', 1)}",
                 ""
             ]
 
@@ -1120,10 +1343,14 @@ class SyncManager:
                 f"- 写库行数: {result.get('db_rows', 0)}",
                 "",
                 "## 性能信息",
-                f"- tdx-api调用耗时: {timing.get('api_time', 0)} 秒",
-                f"- CSV生成耗时: {timing.get('csv_time', 0)} 秒",
-                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
-                f"- 总耗时: {timing.get('total_time', 0)} 秒",
+                f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
+                f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
+                f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
+                f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
+                f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
+                f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
+                f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
+                f"- 并发线程数: {timing.get('parallel', 1)}",
                 ""
             ]
 

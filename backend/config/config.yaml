@@ -103,6 +103,7 @@ sync:
   batch_size: 1000
   max_retries: 3
   timeout: 30
+  kline_max_workers: 8
   # 动态批次大小配置
   batch_sizes:
     stock_info: 2000      # 股票信息字段多
