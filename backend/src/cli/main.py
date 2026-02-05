@@ -250,6 +250,40 @@ def sync_kline_day(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
 
 
 @cli.command()
+@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段')
+@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
+@click.pass_context
+def sync_anal_kline_rise_25pre(ctx, init_mode, codes):
+    """生成立体K线数据"""
+    if init_mode:
+        click.echo("开始生成立体K线数据（初始化模式）...")
+    else:
+        click.echo("开始生成立体K线数据（日常更新）...")
+
+    ts_codes = None
+    if codes:
+        ts_codes = [code.strip() for code in codes.split(',') if code.strip()]
+        click.echo(f"  - 指定股票: {len(ts_codes)}只")
+
+    sync_manager = SyncManager(ctx.obj['config_manager'])
+    result = sync_manager.sync_anal_kline_rise_25pre(
+        init_mode=init_mode,
+        ts_codes=ts_codes
+    )
+
+    if result['success']:
+        click.echo("\n✓ 立体K线生成完成!")
+        click.echo(f"  - 记录数: {result.get('records', 0)}")
+        click.echo(f"  - 写库行数: {result.get('db_rows', 0)}")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+    else:
+        click.echo("\n✗ 立体K线生成失败!")
+        for error in result['errors']:
+            click.echo(f"  错误: {error}")
+
+
+@cli.command()
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')

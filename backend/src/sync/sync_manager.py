@@ -381,7 +381,7 @@ class SyncManager:
                     db_rows = self.db_conn.upsert_his_kline_1min(per_stock_records)
                     db_end_wall = time.time()
                     local_db_time += db_end_wall - db_start
-                    self._log_progress('数据入库', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
+                    self._log_progress('数据入库-', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
                 else:
                     db_rows = 0
 
@@ -629,7 +629,7 @@ class SyncManager:
                     db_rows = self.db_conn.upsert_his_kline_day(per_stock_records)
                     db_end_wall = time.time()
                     local_db_time += db_end_wall - db_start
-                    self._log_progress('数据入库', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
+                    self._log_progress('数据入库-', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
                 else:
                     db_rows = 0
 
@@ -709,6 +709,89 @@ class SyncManager:
         result['report_path'] = self._write_kline_day_report(result, anomalies, timing)
 
         return result
+
+    def sync_anal_kline_rise_25pre(
+        self,
+        init_mode: bool = False,
+        ts_codes: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        生成立体K线数据（基于1分钟K线）
+        """
+        result = {
+            'success': False,
+            'records': 0,
+            'db_rows': 0,
+            'errors': [],
+            'report_path': None
+        }
+
+        query_time = 0.0
+        gen_time = 0.0
+        db_time = 0.0
+
+        start_ts = time.time()
+        try:
+            self.db_conn.ensure_anal_kline_rise_25pre_constraints()
+            stocks = self.db_conn.fetch_stock_basic(ts_codes)
+            if not stocks:
+                result['success'] = True
+                return result
+
+            total_stocks = len(stocks)
+            for idx, stock in enumerate(stocks, start=1):
+                ts_code = stock.get('ts_code')
+                stock_code = stock.get('stock_code') or ''
+                stock_name = stock.get('stock_name') or ''
+                if not ts_code:
+                    continue
+
+                query_start = time.time()
+                if init_mode:
+                    kline_rows = self.db_conn.fetch_his_kline_1min_by_ts_code(ts_code)
+                else:
+                    last_end = self.db_conn.fetch_last_anal_kline_rise_25pre_end_time(ts_code)
+                    if last_end:
+                        kline_rows = self.db_conn.fetch_his_kline_1min_after(ts_code, last_end)
+                    else:
+                        kline_rows = self.db_conn.fetch_his_kline_1min_by_ts_code(ts_code)
+                query_time += time.time() - query_start
+
+                if not kline_rows:
+                    continue
+
+                gen_start = time.time()
+                anal_rows = self._generate_kline_rise_25pre(kline_rows)
+                gen_elapsed = time.time() - gen_start
+                gen_time += gen_elapsed
+
+                self._log_progress('立体 k 线', idx, total_stocks, stock_code, stock_name, gen_elapsed)
+
+                if not anal_rows:
+                    continue
+
+                db_start = time.time()
+                result['db_rows'] += self.db_conn.upsert_anal_kline_rise_25pre(anal_rows)
+                db_time += time.time() - db_start
+
+                result['records'] += len(anal_rows)
+
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(str(e))
+            print(f"生成立体K线失败: {e}")
+
+        end_ts = time.time()
+        timing = {
+            'query_time': round(query_time, 2),
+            'gen_time': round(gen_time, 2),
+            'db_time': round(db_time, 2),
+            'total_time': round(end_ts - start_ts, 2)
+        }
+
+        result['report_path'] = self._write_anal_kline_report(result, timing)
+        return result
+
 
     def _save_stocks_to_db(self, stocks: List[Dict[str, Any]]) -> None:
         """保存股票数据到数据库 - 修复表名和字段映射"""
@@ -1139,6 +1222,105 @@ class SyncManager:
                 seen_keys.add(key)
                 filtered.append(item)
         return filtered
+
+    def _generate_kline_rise_25pre(self, kline_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not kline_rows:
+            return []
+
+        rows = sorted(kline_rows, key=lambda x: x.get('trade_datetime'))
+        results: List[Dict[str, Any]] = []
+
+        current = None
+        reference_price = None
+
+        for row in rows:
+            open_price = row.get('open')
+            high_price = row.get('high')
+            low_price = row.get('low')
+            close_price = row.get('close')
+            volume = row.get('volume') or 0
+            amount = row.get('amount') or 0
+            turnover_rate = row.get('turnover_rate') or 0
+
+            if current is None:
+                current = {
+                    'ts_code': row.get('ts_code'),
+                    'stock_code': row.get('stock_code'),
+                    'stock_name': row.get('stock_name'),
+                    'trade_begin_date': row.get('trade_date'),
+                    'trade_begin_time': row.get('trade_time'),
+                    'trade_begin_datetime': row.get('trade_datetime'),
+                    'trade_date': row.get('trade_date'),
+                    'trade_time': row.get('trade_time'),
+                    'trade_datetime': row.get('trade_datetime'),
+                    'open': open_price,
+                    'high': high_price,
+                    'low': low_price,
+                    'close': close_price,
+                    'volume': volume,
+                    'amount': amount,
+                    'change_rate': None,
+                    'turnover_rate': turnover_rate
+                }
+                reference_price = open_price
+                continue
+
+            # 累积更新
+            current['high'] = max(current['high'], high_price) if current['high'] is not None else high_price
+            current['low'] = min(current['low'], low_price) if current['low'] is not None else low_price
+            current['close'] = close_price
+            current['trade_date'] = row.get('trade_date')
+            current['trade_time'] = row.get('trade_time')
+            current['trade_datetime'] = row.get('trade_datetime')
+            current['volume'] += volume
+            current['amount'] += amount
+            current['turnover_rate'] += turnover_rate
+
+            if reference_price and close_price is not None:
+                change_rate = (close_price - reference_price) / reference_price * 100
+            else:
+                change_rate = None
+
+            if change_rate is not None and change_rate >= 2.5:
+                current['change_rate'] = change_rate
+                results.append(current)
+                current = None
+                reference_price = close_price
+
+        return results
+
+    def _write_anal_kline_report(self, result: Dict[str, Any], timing: Dict[str, Any]) -> Optional[str]:
+        try:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+            report_dir = os.path.join(repo_root, 'doc', 'reports')
+            os.makedirs(report_dir, exist_ok=True)
+
+            filename = f"anal_kline_rise_25pre_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+            report_path = os.path.join(report_dir, filename)
+
+            lines = [
+                "# 立体K线数据生成报告",
+                "",
+                "## 同步概览",
+                f"- 成功: {'是' if result.get('success') else '否'}",
+                f"- 记录数: {result.get('records', 0)}",
+                f"- 写库行数: {result.get('db_rows', 0)}",
+                "",
+                "## 性能信息",
+                f"- K线数据查询耗时: {timing.get('query_time', 0)} 秒",
+                f"- 立体K线生成耗时: {timing.get('gen_time', 0)} 秒",
+                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
+                f"- 总耗时: {timing.get('total_time', 0)} 秒",
+                ""
+            ]
+
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+
+            return report_path
+        except Exception as e:
+            self.logger.error(f"生成立体K线报告失败: {e}")
+            return None
 
     def _chunk_list(self, items: List[str], size: int) -> List[List[str]]:
         if not items or size <= 0:

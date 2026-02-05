@@ -343,6 +343,30 @@ class DatabaseConnection:
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- 立体K线数据表
+        CREATE TABLE IF NOT EXISTS anal_kline_rise_25pre (
+            id BIGSERIAL PRIMARY KEY,
+            ts_code VARCHAR(20),
+            stock_code VARCHAR(20),
+            stock_name VARCHAR(50),
+            trade_begin_date VARCHAR(8),
+            trade_begin_time VARCHAR(4),
+            trade_begin_datetime VARCHAR(12),
+            trade_date VARCHAR(8),
+            trade_time VARCHAR(4),
+            trade_datetime VARCHAR(12),
+            open NUMERIC(30, 8),
+            high NUMERIC(30, 8),
+            low NUMERIC(30, 8),
+            close NUMERIC(30, 8),
+            volume NUMERIC(30, 8),
+            amount NUMERIC(30, 8),
+            change_rate NUMERIC(30, 8),
+            turnover_rate NUMERIC(30, 8),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- 创建唯一约束 (PostgreSQL不支持IF NOT EXISTS，需要先检查约束是否存在)
         DO $$
         BEGIN
@@ -382,6 +406,13 @@ class DatabaseConnection:
             ) THEN
                 ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
             END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_anal_kline_rise_25pre_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE anal_kline_rise_25pre ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time UNIQUE (ts_code, trade_datetime);
+            END IF;
         END $$;
 
         -- 创建索引
@@ -393,6 +424,8 @@ class DatabaseConnection:
         CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_time ON his_kline_1min(trade_time);
         CREATE INDEX IF NOT EXISTS idx_his_kline_day_ts_code ON his_kline_day(ts_code);
         CREATE INDEX IF NOT EXISTS idx_his_kline_day_trade_date ON his_kline_day(trade_date);
+        CREATE INDEX IF NOT EXISTS idx_anal_kline_rise_25pre_ts_code ON anal_kline_rise_25pre(ts_code);
+        CREATE INDEX IF NOT EXISTS idx_anal_kline_rise_25pre_trade_datetime ON anal_kline_rise_25pre(trade_datetime);
 
         """
 
@@ -609,6 +642,87 @@ class DatabaseConnection:
 
         return self.execute_values(upsert_sql, params_list, page_size=2000)
 
+    def upsert_anal_kline_rise_25pre(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量upsert 立体K线数据
+        """
+        if not kline_data:
+            return 0
+
+        upsert_sql = """
+        INSERT INTO anal_kline_rise_25pre
+        (ts_code, stock_code, stock_name,
+         trade_begin_date, trade_begin_time, trade_begin_datetime,
+         trade_date, trade_time, trade_datetime,
+         open, high, low, close, volume, amount, change_rate, turnover_rate,
+         create_time, update_time)
+        VALUES %s
+        ON CONFLICT (ts_code, trade_date, trade_time)
+        DO UPDATE SET
+            stock_code = EXCLUDED.stock_code,
+            stock_name = EXCLUDED.stock_name,
+            trade_begin_date = EXCLUDED.trade_begin_date,
+            trade_begin_time = EXCLUDED.trade_begin_time,
+            trade_begin_datetime = EXCLUDED.trade_begin_datetime,
+            trade_date = EXCLUDED.trade_date,
+            trade_time = EXCLUDED.trade_time,
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            change_rate = EXCLUDED.change_rate,
+            turnover_rate = EXCLUDED.turnover_rate,
+            update_time = NOW()
+        """
+
+        params_list = []
+        now = datetime.now()
+        for item in kline_data:
+            params_list.append((
+                item['ts_code'],
+                item['stock_code'],
+                item['stock_name'],
+                item['trade_begin_date'],
+                item['trade_begin_time'],
+                item['trade_begin_datetime'],
+                item['trade_date'],
+                item['trade_time'],
+                item['trade_datetime'],
+                item.get('open'),
+                item.get('high'),
+                item.get('low'),
+                item.get('close'),
+                item.get('volume'),
+                item.get('amount'),
+                item.get('change_rate'),
+                item.get('turnover_rate'),
+                item.get('create_time', now),
+                now
+            ))
+
+        return self.execute_values(upsert_sql, params_list, page_size=2000)
+
+    def ensure_anal_kline_rise_25pre_constraints(self) -> None:
+        """
+        确保立体K线表存在唯一约束
+        """
+        ddl = """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_anal_kline_rise_25pre_code_time'
+                  AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE anal_kline_rise_25pre
+                ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time UNIQUE (ts_code, trade_date, trade_time);
+            END IF;
+        END $$;
+        """
+        self.execute_update(ddl)
+
     def fetch_trade_calendar(self, start_date: str, end_date: str) -> List[Dict[str, Any]]:
         """
         获取交易日历区间数据
@@ -821,6 +935,48 @@ class DatabaseConnection:
         if result:
             return result.get('close')
         return None
+
+    def fetch_last_anal_kline_rise_25pre_end_time(self, ts_code: str) -> Optional[str]:
+        """
+        获取指定股票最后一根立体K线的结束时间trade_datetime
+        """
+        query = """
+        SELECT trade_datetime
+        FROM anal_kline_rise_25pre
+        WHERE ts_code = %s
+        ORDER BY trade_datetime DESC
+        LIMIT 1
+        """
+        result = self.fetch_one(query, (ts_code,))
+        if result:
+            return result.get('trade_datetime')
+        return None
+
+    def fetch_his_kline_1min_by_ts_code(self, ts_code: str) -> List[Dict[str, Any]]:
+        """
+        获取指定股票全量1分钟K线数据
+        """
+        query = """
+        SELECT ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+               open, high, low, close, preclose, volume, amount, change_rate, turnover_rate
+        FROM his_kline_1min
+        WHERE ts_code = %s
+        ORDER BY trade_datetime ASC
+        """
+        return self.execute_query(query, (ts_code,))
+
+    def fetch_his_kline_1min_after(self, ts_code: str, trade_datetime: str) -> List[Dict[str, Any]]:
+        """
+        获取指定股票在某时间点之后的1分钟K线数据
+        """
+        query = """
+        SELECT ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+               open, high, low, close, preclose, volume, amount, change_rate, turnover_rate
+        FROM his_kline_1min
+        WHERE ts_code = %s AND trade_datetime > %s
+        ORDER BY trade_datetime ASC
+        """
+        return self.execute_query(query, (ts_code, trade_datetime))
 
     def test_connection(self) -> bool:
         """

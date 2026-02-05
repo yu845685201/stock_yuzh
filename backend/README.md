@@ -112,6 +112,7 @@ python -m src.cli.main sync-financial [--csv] [--db] [--year] [--quarter] [--cod
 python -m src.cli.main sync-trade-calendar --start-year yyyy --end-year yyyy
 python -m src.cli.main sync-kline-1min [--no-csv] [--no-db] [--init] [--start-date] [--end-date] [--codes]
 python -m src.cli.main sync-kline-day [--no-csv] [--no-db] [--init] [--start-date] [--end-date] [--codes]
+python -m src.cli.main sync-anal-kline-rise-25pre [--init] [--codes]
 ```
 
 ## 数据源说明
