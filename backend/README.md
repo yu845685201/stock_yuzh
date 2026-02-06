@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- 多数据源支持（Pytdx、Baostock）
+- 多数据源支持（Tdx API、Baostock）
 - 双重存储（CSV文件 + PostgreSQL数据库）
 - 命令行工具接口
 - 模块化设计，易于扩展
@@ -117,9 +117,9 @@ python -m src.cli.main sync-anal-kline-rise-25pre [--init] [--codes]
 
 ## 数据源说明
 
-### Pytdx数据源
-- 用于读取通达信数据文件（.day, .lc1, .lc5等）
-- 无需网络连接，直接读取本地文件
+### Tdx API数据源
+- 用于获取K线相关数据
+- 通过HTTP接口访问tdx-api服务
 
 ### Baostock数据源
 - 提供免费、纯净的证券数据
