@@ -47,7 +47,7 @@ class PerformanceReporter:
             性能报告
         """
         try:
-            from ..performance_monitor import performance_monitor
+            from .performance_monitor import performance_monitor
 
             # 获取性能指标
             metrics_list = performance_monitor.get_metrics_history(operation, hours)

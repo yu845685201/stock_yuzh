@@ -5,6 +5,7 @@ psycopg2-binary==2.9.9
 
 # 数据源
 baostock==0.8.9
+pytdx==1.72
 
 # 配置管理
 PyYAML==6.0.1
@@ -23,6 +24,7 @@ pypinyin==0.51.0
 
 # 工具库
 tqdm==4.66.1
+psutil==5.9.8
 
 # HTTP客户端
 requests==2.31.0
