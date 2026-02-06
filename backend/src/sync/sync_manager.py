@@ -1439,8 +1439,12 @@ class SyncManager:
     def _get_kline_limit_rate(self, stock_code: Optional[str], stock_name: Optional[str]) -> float:
         if stock_name and DataTransformer.check_is_st(stock_name):
             return 5.1
-        if stock_code and (stock_code.startswith('300') or stock_code.startswith('688')):
-            return 20.1
+        if stock_code:
+            # 创业板（300/301开头）和科创板（68开头）涨跌幅20.1%
+            if stock_code.startswith(('300', '301')):
+                return 20.1
+            if stock_code.startswith('68'):
+                return 20.1
         return 10.1
 
     def _write_kline_1min_report(
