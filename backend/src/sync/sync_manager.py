@@ -1281,7 +1281,7 @@ class SyncManager:
             else:
                 change_rate = None
 
-            if change_rate is not None and change_rate >= 2.5:
+            if change_rate is not None and abs(change_rate) >= 2.5:
                 current['change_rate'] = change_rate
                 results.append(current)
                 current = None
