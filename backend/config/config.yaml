@@ -104,6 +104,9 @@ sync:
   max_retries: 3
   timeout: 30
   kline_max_workers: 8
+  kline_stock_batch_size: 1000
+  kline_1min_upsert_batch_size: 2000
+  kline_1min_db_max_writers: 4
   # 动态批次大小配置
   batch_sizes:
     stock_info: 2000      # 股票信息字段多

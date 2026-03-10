@@ -84,7 +84,10 @@ class ConfigManager:
                 'batch_size': 1000,
                 'max_retries': 3,
                 'timeout': 30,
-                'kline_max_workers': 4
+                'kline_max_workers': 4,
+                'kline_stock_batch_size': 1000,
+                'kline_1min_upsert_batch_size': 5000,
+                'kline_1min_db_max_writers': 2
             },
             'rate_limit': {
                 'enabled': True,

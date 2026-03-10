@@ -551,6 +551,9 @@ CREATE TABLE his_kline_1min (
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 创建唯一约束，确保同一股票同一分钟仅一条记录
+ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
+
 -- 创建索引以提高查询性能
 -- TS代码索引
 CREATE INDEX idx_his_kline_1min_ts_code ON his_kline_1min (ts_code);
@@ -560,8 +563,6 @@ CREATE INDEX idx_his_kline_1min_stock_code ON his_kline_1min (stock_code);
 CREATE INDEX idx_his_kline_1min_trade_date ON his_kline_1min (trade_date);
 -- 交易时间索引
 CREATE INDEX idx_his_kline_1min_trade_time ON his_kline_1min (trade_time);
--- 组合索引：TS代码+交易日+交易时间，用于按股票和时间范围查询
-CREATE INDEX idx_his_kline_1min_ts_code_trade_date_trade_time ON his_kline_1min (ts_code, trade_date, trade_time);
 -- 组合索引：股票编码+交易日+交易时间
 CREATE INDEX idx_his_kline_1min_stock_code_trade_date_trade_time ON his_kline_1min (stock_code, trade_date, trade_time);
 -- 复权状态索引

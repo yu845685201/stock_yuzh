@@ -545,36 +545,185 @@ class DatabaseConnection:
             float_share = EXCLUDED.float_share,
             source = EXCLUDED.source,
             update_time = NOW()
+        WHERE (
+            his_kline_1min.stock_code,
+            his_kline_1min.stock_name,
+            his_kline_1min.trade_datetime,
+            his_kline_1min.open,
+            his_kline_1min.high,
+            his_kline_1min.low,
+            his_kline_1min.close,
+            his_kline_1min.preclose,
+            his_kline_1min.volume,
+            his_kline_1min.amount,
+            his_kline_1min.change_rate,
+            his_kline_1min.turnover_rate,
+            his_kline_1min.fundamentals_disclosure_date,
+            his_kline_1min.total_share,
+            his_kline_1min.float_share,
+            his_kline_1min.source
+        ) IS DISTINCT FROM (
+            EXCLUDED.stock_code,
+            EXCLUDED.stock_name,
+            EXCLUDED.trade_datetime,
+            EXCLUDED.open,
+            EXCLUDED.high,
+            EXCLUDED.low,
+            EXCLUDED.close,
+            EXCLUDED.preclose,
+            EXCLUDED.volume,
+            EXCLUDED.amount,
+            EXCLUDED.change_rate,
+            EXCLUDED.turnover_rate,
+            EXCLUDED.fundamentals_disclosure_date,
+            EXCLUDED.total_share,
+            EXCLUDED.float_share,
+            EXCLUDED.source
+        )
         """
 
-        params_list = []
-        now = datetime.now()
-        for item in kline_data:
-            params_list.append((
-                item['ts_code'],
-                item['stock_code'],
-                item['stock_name'],
-                item['trade_date'],
-                item['trade_time'],
-                item['trade_datetime'],
-                item.get('open'),
-                item.get('high'),
-                item.get('low'),
-                item.get('close'),
-                item.get('preclose'),
-                item.get('volume'),
-                item.get('amount'),
-                item.get('change_rate'),
-                item.get('turnover_rate'),
-                item.get('fundamentals_disclosure_date'),
-                item.get('total_share'),
-                item.get('float_share'),
-                item.get('source'),
-                item.get('create_time', now),
-                now
-            ))
+        raw_batch_size = self.config_manager.get('sync.kline_1min_upsert_batch_size', 5000)
+        try:
+            batch_size = max(500, int(raw_batch_size or 5000))
+        except (TypeError, ValueError):
+            batch_size = 5000
 
-        return self.execute_values(upsert_sql, params_list, page_size=2000)
+        total_rows = 0
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                now = datetime.now()
+                for i in range(0, len(kline_data), batch_size):
+                    batch = kline_data[i:i + batch_size]
+                    dedup_map: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+                    for item in batch:
+                        key = (
+                            str(item.get('ts_code', '')),
+                            str(item.get('trade_date', '')),
+                            str(item.get('trade_time', ''))
+                        )
+                        dedup_map[key] = item
+                    dedup_batch = list(dedup_map.values())
+                    dedup_dropped = len(batch) - len(dedup_batch)
+
+                    params_list = []
+                    for item in dedup_batch:
+                        params_list.append((
+                            item['ts_code'],
+                            item['stock_code'],
+                            item['stock_name'],
+                            item['trade_date'],
+                            item['trade_time'],
+                            item['trade_datetime'],
+                            item.get('open'),
+                            item.get('high'),
+                            item.get('low'),
+                            item.get('close'),
+                            item.get('preclose'),
+                            item.get('volume'),
+                            item.get('amount'),
+                            item.get('change_rate'),
+                            item.get('turnover_rate'),
+                            item.get('fundamentals_disclosure_date'),
+                            item.get('total_share'),
+                            item.get('float_share'),
+                            item.get('source'),
+                            item.get('create_time', now),
+                            now
+                        ))
+
+                    batch_start = datetime.now()
+                    psycopg2.extras.execute_values(cursor, upsert_sql, params_list, page_size=batch_size)
+                    batch_elapsed = (datetime.now() - batch_start).total_seconds()
+
+                    if cursor.rowcount and cursor.rowcount > 0:
+                        total_rows += cursor.rowcount
+
+                    self.logger.debug(
+                        "1分钟K线upsert批次完成: batch_rows=%s, dedup_rows=%s, dedup_dropped=%s, batch_elapsed=%.4fs, total_rows=%s",
+                        len(batch),
+                        len(dedup_batch),
+                        dedup_dropped,
+                        batch_elapsed,
+                        total_rows
+                    )
+
+                conn.commit()
+
+        return total_rows
+
+    def insert_ignore_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        批量插入1分钟K线数据（冲突忽略）
+
+        适用于目标股票在表中无历史数据的场景，可减少冲突更新开销。
+        """
+        if not kline_data:
+            return 0
+
+        insert_sql = """
+        INSERT INTO his_kline_1min
+        (ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+         open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
+         fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
+        VALUES %s
+        ON CONFLICT (ts_code, trade_date, trade_time) DO NOTHING
+        """
+
+        raw_batch_size = self.config_manager.get('sync.kline_1min_upsert_batch_size', 5000)
+        try:
+            batch_size = max(500, int(raw_batch_size or 5000))
+        except (TypeError, ValueError):
+            batch_size = 5000
+
+        total_rows = 0
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                now = datetime.now()
+                for i in range(0, len(kline_data), batch_size):
+                    batch = kline_data[i:i + batch_size]
+                    params_list = []
+                    for item in batch:
+                        params_list.append((
+                            item['ts_code'],
+                            item['stock_code'],
+                            item['stock_name'],
+                            item['trade_date'],
+                            item['trade_time'],
+                            item['trade_datetime'],
+                            item.get('open'),
+                            item.get('high'),
+                            item.get('low'),
+                            item.get('close'),
+                            item.get('preclose'),
+                            item.get('volume'),
+                            item.get('amount'),
+                            item.get('change_rate'),
+                            item.get('turnover_rate'),
+                            item.get('fundamentals_disclosure_date'),
+                            item.get('total_share'),
+                            item.get('float_share'),
+                            item.get('source'),
+                            item.get('create_time', now),
+                            now
+                        ))
+
+                    batch_start = datetime.now()
+                    psycopg2.extras.execute_values(cursor, insert_sql, params_list, page_size=batch_size)
+                    batch_elapsed = (datetime.now() - batch_start).total_seconds()
+
+                    if cursor.rowcount and cursor.rowcount > 0:
+                        total_rows += cursor.rowcount
+
+                    self.logger.debug(
+                        "1分钟K线insert-ignore批次完成: batch_rows=%s, batch_elapsed=%.4fs, total_rows=%s",
+                        len(batch),
+                        batch_elapsed,
+                        total_rows
+                    )
+
+                conn.commit()
+
+        return total_rows
 
     def upsert_his_kline_day(self, kline_data: List[Dict[str, Any]]) -> int:
         """
@@ -883,7 +1032,8 @@ class DatabaseConnection:
         """
         result = self.fetch_one(query, (ts_code,))
         if result:
-            return result.get('preclose')
+            value = result.get('preclose')
+            return float(value) if value is not None else None
         return None
 
     def fetch_last_his_kline_1min_close(self, ts_code: str) -> Optional[float]:
@@ -899,7 +1049,8 @@ class DatabaseConnection:
         """
         result = self.fetch_one(query, (ts_code,))
         if result:
-            return result.get('close')
+            value = result.get('close')
+            return float(value) if value is not None else None
         return None
 
     def fetch_prev_his_kline_1min_close(self, ts_code: str, trade_date: str, trade_time: str) -> Optional[float]:
@@ -916,7 +1067,8 @@ class DatabaseConnection:
         """
         result = self.fetch_one(query, (ts_code, trade_date, trade_date, trade_time))
         if result:
-            return result.get('close')
+            value = result.get('close')
+            return float(value) if value is not None else None
         return None
 
     def fetch_prev_his_kline_day_close(self, ts_code: str, trade_date: str) -> Optional[float]:
@@ -933,7 +1085,8 @@ class DatabaseConnection:
         """
         result = self.fetch_one(query, (ts_code, trade_date))
         if result:
-            return result.get('close')
+            value = result.get('close')
+            return float(value) if value is not None else None
         return None
 
     def fetch_last_anal_kline_rise_25pre_end_time(self, ts_code: str) -> Optional[str]:
