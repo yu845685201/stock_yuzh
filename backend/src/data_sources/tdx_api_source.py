@@ -114,3 +114,16 @@ class TdxApiSource(DataSourceBase):
 
         data = self._request('/api/kline-history', params)
         return data if isinstance(data, list) else []
+
+    def fetch_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
+        return self.get_kline_all(code, kline_type)
+
+    def fetch_kline_range(
+        self,
+        code: str,
+        kline_type: str = 'minute1',
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 800
+    ) -> List[Dict[str, Any]]:
+        return self.get_kline_history(code, kline_type, start_date=start_date, end_date=end_date, limit=limit)

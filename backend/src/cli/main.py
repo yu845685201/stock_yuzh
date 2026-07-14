@@ -284,6 +284,34 @@ def sync_anal_kline_rise_25pre(ctx, init_mode, codes):
 
 
 @cli.command()
+@click.pass_context
+def sync_kline_1min_migrate(ctx):
+    """迁移1分钟K线为按天分区表"""
+    click.echo("开始迁移1分钟K线分区表...")
+    db_conn = DatabaseConnection(ctx.obj['config_manager'])
+    try:
+        db_conn.migrate_his_kline_1min_partitions()
+        click.echo("✓ 迁移完成")
+    except Exception as e:
+        click.echo(f"✗ 迁移失败: {e}")
+        sys.exit(1)
+
+
+@cli.command()
+@click.pass_context
+def sync_kline_1min_rollback(ctx):
+    """回滚1分钟K线分区表"""
+    click.echo("开始回滚1分钟K线分区表...")
+    db_conn = DatabaseConnection(ctx.obj['config_manager'])
+    try:
+        db_conn.rollback_his_kline_1min_partitions()
+        click.echo("✓ 回滚完成")
+    except Exception as e:
+        click.echo(f"✗ 回滚失败: {e}")
+        sys.exit(1)
+
+
+@cli.command()
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')

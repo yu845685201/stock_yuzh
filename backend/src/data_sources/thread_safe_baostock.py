@@ -7,6 +7,7 @@ import time
 import threading
 import logging
 from typing import List, Dict, Any, Optional
+from .base import DataSourceBase
 from datetime import date, datetime
 
 import baostock as bs
@@ -16,7 +17,7 @@ from ..utils.api_rate_limiter import ApiRateLimiter
 logger = logging.getLogger(__name__)
 
 
-class ThreadSafeBaostockSource:
+class ThreadSafeBaostockSource(DataSourceBase):
     """线程安全的Baostock数据源，使用全局连接状态确保只login一次"""
 
     # 类级别的全局连接状态和锁
@@ -30,8 +31,8 @@ class ThreadSafeBaostockSource:
         Args:
             config: 配置字典
         """
-        self.config = config
-        self.data_path = config.get('data_path', 'uat/data')
+        super().__init__(config)
+        self.data_path = config.get('data_path')
 
         # 初始化API限流器（线程安全）
         financial_rate_limit_config = config.get('financial_data_rate_limit', {})
@@ -47,7 +48,7 @@ class ThreadSafeBaostockSource:
     def connect(self) -> bool:
         """
         连接baostock - 使用全局锁确保只执行一次login
-        
+
         Returns:
             bool: 连接是否成功
         """
@@ -56,6 +57,7 @@ class ThreadSafeBaostockSource:
                 try:
                     lg = bs.login()
                     ThreadSafeBaostockSource._is_connected = lg.error_code == '0'
+                    self._connected = ThreadSafeBaostockSource._is_connected
                     if not ThreadSafeBaostockSource._is_connected:
                         logger.error(f"Baostock登录失败: {lg.error_msg}")
                         return False
@@ -64,6 +66,7 @@ class ThreadSafeBaostockSource:
                 except Exception as e:
                     logger.error(f"Baostock连接异常: {e}")
                     return False
+            self._connected = ThreadSafeBaostockSource._is_connected
             return True
 
     def disconnect(self) -> None:
@@ -75,6 +78,7 @@ class ThreadSafeBaostockSource:
                 try:
                     bs.logout()
                     ThreadSafeBaostockSource._is_connected = False
+                    self._connected = False
                     logger.debug("Baostock全局连接已断开")
                 except Exception as e:
                     logger.error(f"Baostock断开异常: {e}")
@@ -256,6 +260,21 @@ class ThreadSafeBaostockSource:
             logger.debug(f"获取财务数据异常: {e}")
             return None
 
+    def fetch_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
+        """Baostock不提供K线数据"""
+        return []
+
+    def fetch_kline_range(
+        self,
+        code: str,
+        kline_type: str = 'minute1',
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 800
+    ) -> List[Dict[str, Any]]:
+        """Baostock不提供K线数据"""
+        return []
+
     def get_stock_fundamentals(self, ts_code: str, year: int = None, quarter: int = None) -> Optional[Dict[str, Any]]:
         """
         获取股票基本面数据 - 线程安全版本
@@ -354,7 +373,7 @@ class ThreadSafeBaostockSource:
 
         return quarter_end_dates.get(quarter, f'{year}1231')
 
-    
+    def __enter__(self):
         """上下文管理器入口"""
         self._ensure_connection()
         return self

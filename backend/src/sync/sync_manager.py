@@ -8,6 +8,7 @@ import os
 import threading
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..config import ConfigManager
@@ -17,6 +18,17 @@ from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
 from ..utils.log_aggregator import LogAggregator
 from ..utils.data_transformer import DataTransformer
+from ..kline_1min.adapters import (
+    CsvAsyncWriter,
+    DatabaseKline1MinPartitionAdapter,
+    DatabaseKline1MinRepository,
+    FundamentalsPortAdapter,
+    ReportPortAdapter,
+    StockPortAdapter,
+    TdxSourceAdapter,
+    TradeCalendarPortAdapter
+)
+from ..kline_1min.usecase import Kline1MinSyncUseCase
 
 class SyncManager:
     """数据同步管理器"""
@@ -221,315 +233,49 @@ class SyncManager:
         """
         同步1分钟K线数据 - 支持数据初始化/增量更新/指定日期范围
         """
-        result = {
-            'success': False,
-            'records': 0,
-            'db_rows': 0,
-            'errors': [],
-            'report_path': None
-        }
-
         if not self.tdx_api_source:
-            result['errors'].append('Tdx API数据源未初始化')
-            return result
+            return {
+                'success': False,
+                'records': 0,
+                'db_rows': 0,
+                'errors': ['Tdx API数据源未初始化'],
+                'report_path': None
+            }
 
-        api_time = 0.0
-        csv_time = 0.0
-        db_time = 0.0
-        api_span: Optional[Tuple[float, float]] = None
-        csv_span: Optional[Tuple[float, float]] = None
-        db_span: Optional[Tuple[float, float]] = None
-        anomalies: List[Dict[str, Any]] = []
-        anomaly_limit = max(0, int(self.config_manager.get('sync.kline_anomaly_report_limit', 5000) or 0))
-        anomaly_omitted = 0
-
-        start_ts = time.time()
+        raw_csv_workers = self.config_manager.get('sync.kline_1min_csv_max_workers', 2)
+        raw_csv_queue = self.config_manager.get('sync.kline_1min_csv_max_queue', 20000)
         try:
-            if not self.tdx_api_source.connect():
-                raise RuntimeError("Tdx API连接失败")
+            csv_workers = max(1, int(raw_csv_workers or 2))
+        except (TypeError, ValueError):
+            self.logger.warning(f"kline_1min_csv_max_workers配置无效({raw_csv_workers})，已回退为2")
+            csv_workers = 2
+        try:
+            csv_queue = max(1000, int(raw_csv_queue or 20000))
+        except (TypeError, ValueError):
+            self.logger.warning(f"kline_1min_csv_max_queue配置无效({raw_csv_queue})，已回退为20000")
+            csv_queue = 20000
 
-            stocks = self.db_conn.fetch_stock_basic(ts_codes)
-            if not stocks:
-                result['success'] = True
-                return result
+        usecase = Kline1MinSyncUseCase(
+            source=TdxSourceAdapter(self.tdx_api_source),
+            repository=DatabaseKline1MinRepository(self.db_conn),
+            partition_port=DatabaseKline1MinPartitionAdapter(self.db_conn),
+            csv_writer=CsvAsyncWriter(self.csv_writer, max_workers=csv_workers, max_queue=csv_queue),
+            report=ReportPortAdapter(self),
+            fundamentals=FundamentalsPortAdapter(self),
+            trade_calendar=TradeCalendarPortAdapter(self),
+            stock_port=StockPortAdapter(self),
+            config=self.config_manager.load_config(),
+            logger=self.logger
+        )
 
-            stock_ts_codes = [s['ts_code'] for s in stocks if s.get('ts_code')]
-
-            trade_dates: Optional[List[str]] = None
-            if not init_mode:
-                if start_date and end_date:
-                    trade_dates = self._get_trade_dates(start_date, end_date)
-                else:
-                    today_str = date.today().strftime('%Y-%m-%d')
-                    trade_dates = self._get_trade_dates(today_str, today_str)
-
-                if not trade_dates:
-                    result['success'] = True
-                    return result
-
-            fundamentals_map = self._build_fundamentals_map(
-                init_mode=init_mode,
-                ts_codes=stock_ts_codes,
-                start_date=start_date,
-                end_date=end_date
-            )
-
-            total_stocks = len(stocks)
-            raw_db_writers = self.config_manager.get('sync.kline_1min_db_max_writers', 2)
-            try:
-                db_max_writers = max(1, int(raw_db_writers or 2))
-            except (TypeError, ValueError):
-                self.logger.warning(f"kline_1min_db_max_writers配置无效({raw_db_writers})，已回退为2")
-                db_max_writers = 2
-            db_write_semaphore = threading.BoundedSemaphore(db_max_writers)
-
-            def process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
-                ts_code = stock_item.get('ts_code')
-                stock_code = stock_item.get('stock_code')
-                stock_name = stock_item.get('stock_name') or ''
-                if not ts_code or not stock_code:
-                    return {
-                        'records': 0,
-                        'db_rows': 0,
-                        'api_time': 0.0,
-                        'csv_time': 0.0,
-                        'db_time': 0.0,
-                        'api_span': None,
-                        'csv_span': None,
-                        'db_span': None,
-                        'anomalies': []
-                    }
-
-                record_count = 0
-                raw_for_csv: List[Dict[str, Any]] = []
-                local_api_time = 0.0
-                local_csv_time = 0.0
-                local_db_time = 0.0
-                local_anomalies: List[Dict[str, Any]] = []
-                api_start_wall = None
-                api_end_wall = None
-                csv_start_wall = None
-                csv_end_wall = None
-                db_start_wall = None
-                db_end_wall = None
-                prev_preclose = None
-                db_rows = 0
-                use_insert_ignore = False
-
-                def write_records_to_db(records: List[Dict[str, Any]]) -> None:
-                    nonlocal db_rows, local_db_time, db_start_wall, db_end_wall
-                    if not records or not save_to_db:
-                        return
-
-                    with db_write_semaphore:
-                        db_start = time.time()
-                        if db_start_wall is None:
-                            db_start_wall = db_start
-
-                        if use_insert_ignore:
-                            db_rows += self.db_conn.insert_ignore_his_kline_1min(records)
-                        else:
-                            db_rows += self.db_conn.upsert_his_kline_1min(records)
-
-                        db_end = time.time()
-
-                    local_db_time += db_end - db_start
-                    db_end_wall = db_end
-
-                if init_mode:
-                    api_start = time.time()
-                    if api_start_wall is None:
-                        api_start_wall = api_start
-                    raw = self.tdx_api_source.get_kline_all(stock_code, 'minute1')
-                    api_end_wall = time.time()
-                    local_api_time += api_end_wall - api_start
-                    self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
-
-                    if raw:
-                        if save_to_csv:
-                            for item in raw:
-                                if isinstance(item, dict):
-                                    item['ts_code'] = ts_code
-                                    raw_for_csv.append(item)
-                        prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
-                        use_insert_ignore = prev_preclose is None
-                        records, record_anomalies = self._normalize_kline_1min_records(
-                            raw, stock_item, fundamentals_map, prev_preclose
-                        )
-                        record_count += len(records)
-                        write_records_to_db(records)
-                        local_anomalies.extend(record_anomalies)
-                else:
-                    for trade_date_chunk in self._chunk_list(trade_dates, 3):
-                        start_trade_date = trade_date_chunk[0]
-                        end_trade_date = trade_date_chunk[-1]
-                        api_start = time.time()
-                        if api_start_wall is None:
-                            api_start_wall = api_start
-                        raw = self.tdx_api_source.get_kline_history(
-                            stock_code,
-                            'minute1',
-                            start_date=start_trade_date,
-                            end_date=end_trade_date,
-                            limit=800
-                        )
-                        api_end_wall = time.time()
-                        local_api_time += api_end_wall - api_start
-                        self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
-
-                        if not raw:
-                            continue
-
-                        if save_to_csv:
-                            for item in raw:
-                                if isinstance(item, dict):
-                                    item['ts_code'] = ts_code
-                                    raw_for_csv.append(item)
-
-                        if prev_preclose is None:
-                            prev_preclose = self.db_conn.fetch_last_his_kline_1min_close(ts_code)
-                            use_insert_ignore = prev_preclose is None
-
-                        allowed_dates = set(trade_date_chunk)
-                        records, record_anomalies = self._normalize_kline_1min_records(
-                            raw, stock_item, fundamentals_map, prev_preclose, allowed_dates=allowed_dates
-                        )
-                        if records:
-                            prev_preclose = records[-1].get('close')
-                            record_count += len(records)
-                            write_records_to_db(records)
-                        local_anomalies.extend(record_anomalies)
-
-                if record_count and save_to_csv and raw_for_csv:
-                    csv_start = time.time()
-                    if csv_start_wall is None:
-                        csv_start_wall = csv_start
-                    filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
-                    self.csv_writer.write_his_kline_1min_raw(ts_code, filtered_raw)
-                    csv_end_wall = time.time()
-                    local_csv_time += csv_end_wall - csv_start
-                    self._log_progress('csv 生成', stock_index, total_stocks, stock_code, stock_name, csv_end_wall - csv_start)
-
-                if db_rows:
-                    self._log_progress('数据入库-', stock_index, total_stocks, stock_code, stock_name, local_db_time)
-
-                return {
-                    'records': record_count,
-                    'db_rows': db_rows,
-                    'api_time': local_api_time,
-                    'csv_time': local_csv_time,
-                    'db_time': local_db_time,
-                    'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
-                    'csv_span': (csv_start_wall, csv_end_wall) if csv_start_wall and csv_end_wall else None,
-                    'db_span': (db_start_wall, db_end_wall) if db_start_wall and db_end_wall else None,
-                    'anomalies': local_anomalies
-                }
-
-            def merge_stock_result(res: Dict[str, Any]) -> None:
-                nonlocal api_time, csv_time, db_time, api_span, csv_span, db_span, anomaly_omitted
-
-                result['records'] += res['records']
-                result['db_rows'] += res['db_rows']
-                api_time += res['api_time']
-                csv_time += res['csv_time']
-                db_time += res['db_time']
-
-                if anomaly_limit > 0:
-                    remain = anomaly_limit - len(anomalies)
-                    if remain > 0:
-                        anomalies.extend(res['anomalies'][:remain])
-                    omitted = len(res['anomalies']) - max(remain, 0)
-                    if omitted > 0:
-                        anomaly_omitted += omitted
-                else:
-                    anomalies.extend(res['anomalies'])
-
-                if res['api_span']:
-                    api_span = (
-                        min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
-                        max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1]
-                    )
-                if res['csv_span']:
-                    csv_span = (
-                        min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
-                        max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1]
-                    )
-                if res['db_span']:
-                    db_span = (
-                        min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
-                        max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1]
-                    )
-
-            max_workers = self.config_manager.get('sync.kline_max_workers', 1)
-            raw_batch_size = self.config_manager.get('sync.kline_stock_batch_size', 1000)
-            try:
-                stock_batch_size = max(1, int(raw_batch_size or 1000))
-            except (TypeError, ValueError):
-                self.logger.warning(f"kline_stock_batch_size配置无效({raw_batch_size})，已回退为1000")
-                stock_batch_size = 1000
-            total_batches = (total_stocks + stock_batch_size - 1) // stock_batch_size
-
-            for batch_no, batch_start in enumerate(range(0, total_stocks, stock_batch_size), start=1):
-                stock_batch = stocks[batch_start:batch_start + stock_batch_size]
-                batch_end = batch_start + len(stock_batch)
-                self.logger.info(
-                    f"1分钟K线批次开始: 第{batch_no}/{total_batches}批, 股票[{batch_start + 1}-{batch_end}]"
-                )
-
-                if max_workers and max_workers > 1 and len(stock_batch) > 1:
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = [
-                            executor.submit(process_stock, s, batch_start + i + 1)
-                            for i, s in enumerate(stock_batch)
-                        ]
-                        for future in as_completed(futures):
-                            merge_stock_result(future.result())
-                else:
-                    for i, stock in enumerate(stock_batch):
-                        merge_stock_result(process_stock(stock, batch_start + i + 1))
-
-                self.logger.info(
-                    f"1分钟K线批次完成: 第{batch_no}/{total_batches}批, 累计记录{result['records']}条, 累计写库{result['db_rows']}条"
-                )
-
-            result['success'] = True
-        except Exception as e:
-            result['errors'].append(str(e))
-            print(f"同步1分钟K线失败: {e}")
-        finally:
-            if self.tdx_api_source:
-                self.tdx_api_source.disconnect()
-
-        end_ts = time.time()
-        api_time_val = round(api_time, 2)
-        csv_time_val = round(csv_time, 2)
-        db_time_val = round(db_time, 2)
-        total_time_val = round(end_ts - start_ts, 2)
-        db_wall_val = round(db_span[1] - db_span[0], 2) if db_span else 0
-        db_time_per_record = round(db_time_val / result['records'], 6) if result.get('records', 0) > 0 else 0
-        db_wall_ratio = round(db_wall_val / total_time_val, 6) if total_time_val > 0 else 0
-
-        timing = {
-            'api_time': api_time_val,
-            'csv_time': csv_time_val,
-            'db_time': db_time_val,
-            'total_time': total_time_val,
-            'parallel': max_workers if 'max_workers' in locals() else self.config_manager.get('sync.kline_max_workers', 1),
-            'stock_batch_size': stock_batch_size if 'stock_batch_size' in locals() else self.config_manager.get('sync.kline_stock_batch_size', 1000),
-            'db_max_writers': db_max_writers if 'db_max_writers' in locals() else self.config_manager.get('sync.kline_1min_db_max_writers', 2),
-            'api_wall': round(api_span[1] - api_span[0], 2) if api_span else 0,
-            'csv_wall': round(csv_span[1] - csv_span[0], 2) if csv_span else 0,
-            'db_wall': db_wall_val,
-            'db_time_per_record': db_time_per_record,
-            'db_wall_ratio': db_wall_ratio,
-            'anomaly_limit': anomaly_limit,
-            'anomaly_omitted': anomaly_omitted
-        }
-
-        result['duration'] = timing['total_time']
-        result['report_path'] = self._write_kline_1min_report(result, anomalies, timing)
-
-        return result
+        return usecase.execute(
+            init_mode=init_mode,
+            start_date=start_date,
+            end_date=end_date,
+            ts_codes=ts_codes,
+            save_to_csv=save_to_csv,
+            save_to_db=save_to_db
+        )
 
     def sync_kline_day(
         self,
@@ -1320,62 +1066,150 @@ class SyncManager:
         rows = sorted(kline_rows, key=lambda x: x.get('trade_datetime'))
         results: List[Dict[str, Any]] = []
 
-        current = None
-        reference_price = None
+        threshold_rate = Decimal('0.025')
+        current: Optional[Dict[str, Any]] = None
+        reference_price: Optional[Decimal] = None
+        segment_sequence: Dict[Tuple[Optional[str], Any, Any], int] = {}
+
+        def _to_decimal(value: Any) -> Optional[Decimal]:
+            if value is None:
+                return None
+            if isinstance(value, Decimal):
+                return value
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, ValueError, TypeError):
+                return None
+
+        def _sign(value: Decimal) -> int:
+            if value > 0:
+                return 1
+            if value < 0:
+                return -1
+            return 0
+
+        def start_segment(
+            row: Dict[str, Any],
+            open_price: Decimal
+        ) -> Dict[str, Any]:
+            return {
+                'ts_code': row.get('ts_code'),
+                'stock_code': row.get('stock_code'),
+                'stock_name': row.get('stock_name'),
+                'trade_begin_date': row.get('trade_date'),
+                'trade_begin_time': row.get('trade_time'),
+                'trade_begin_datetime': row.get('trade_datetime'),
+                'trade_date': row.get('trade_date'),
+                'trade_time': row.get('trade_time'),
+                'trade_datetime': row.get('trade_datetime'),
+                'segment_index': None,
+                'open': open_price,
+                'high': open_price,
+                'low': open_price,
+                'close': open_price,
+                'volume': Decimal('0'),
+                'amount': Decimal('0'),
+                'change_rate': None,
+                'turnover_rate': Decimal('0')
+            }
+
+        def apply_slice(
+            segment: Dict[str, Any],
+            slice_open: Decimal,
+            slice_close: Decimal,
+            slice_fraction: Decimal,
+            row: Dict[str, Any],
+            volume_value: Decimal,
+            amount_value: Decimal,
+            turnover_value: Decimal
+        ) -> None:
+            if slice_fraction > 0:
+                segment['volume'] += volume_value * slice_fraction
+                segment['amount'] += amount_value * slice_fraction
+                segment['turnover_rate'] += turnover_value * slice_fraction
+
+            slice_high = max(slice_open, slice_close)
+            slice_low = min(slice_open, slice_close)
+            segment['high'] = slice_high if segment['high'] is None else max(segment['high'], slice_high)
+            segment['low'] = slice_low if segment['low'] is None else min(segment['low'], slice_low)
+            segment['close'] = slice_close
+            segment['trade_date'] = row.get('trade_date')
+            segment['trade_time'] = row.get('trade_time')
+            segment['trade_datetime'] = row.get('trade_datetime')
+
+        def get_threshold_ratio(
+            open_price_value: Decimal,
+            close_price_value: Decimal,
+            threshold_price_value: Decimal
+        ) -> Optional[Decimal]:
+            if close_price_value == open_price_value:
+                return Decimal('1') if threshold_price_value == open_price_value else None
+            ratio = (threshold_price_value - open_price_value) / (close_price_value - open_price_value)
+            if ratio <= 0 or ratio > 1:
+                return None
+            return ratio
 
         for row in rows:
-            open_price = row.get('open')
-            high_price = row.get('high')
-            low_price = row.get('low')
-            close_price = row.get('close')
-            volume = row.get('volume') or 0
-            amount = row.get('amount') or 0
-            turnover_rate = row.get('turnover_rate') or 0
-
-            if current is None:
-                current = {
-                    'ts_code': row.get('ts_code'),
-                    'stock_code': row.get('stock_code'),
-                    'stock_name': row.get('stock_name'),
-                    'trade_begin_date': row.get('trade_date'),
-                    'trade_begin_time': row.get('trade_time'),
-                    'trade_begin_datetime': row.get('trade_datetime'),
-                    'trade_date': row.get('trade_date'),
-                    'trade_time': row.get('trade_time'),
-                    'trade_datetime': row.get('trade_datetime'),
-                    'open': open_price,
-                    'high': high_price,
-                    'low': low_price,
-                    'close': close_price,
-                    'volume': volume,
-                    'amount': amount,
-                    'change_rate': None,
-                    'turnover_rate': turnover_rate
-                }
-                reference_price = open_price
+            open_price = _to_decimal(row.get('open'))
+            close_price = _to_decimal(row.get('close'))
+            if open_price is None or close_price is None:
                 continue
 
-            # 累积更新
-            current['high'] = max(current['high'], high_price) if current['high'] is not None else high_price
-            current['low'] = min(current['low'], low_price) if current['low'] is not None else low_price
-            current['close'] = close_price
-            current['trade_date'] = row.get('trade_date')
-            current['trade_time'] = row.get('trade_time')
-            current['trade_datetime'] = row.get('trade_datetime')
-            current['volume'] += volume
-            current['amount'] += amount
-            current['turnover_rate'] += turnover_rate
+            volume = _to_decimal(row.get('volume')) or Decimal('0')
+            amount = _to_decimal(row.get('amount')) or Decimal('0')
+            turnover_rate = _to_decimal(row.get('turnover_rate')) or Decimal('0')
 
-            if reference_price and close_price is not None:
-                change_rate = (close_price - reference_price) / reference_price * 100
-            else:
-                change_rate = None
+            if current is None:
+                current = start_segment(row, open_price)
+                reference_price = open_price
 
-            if change_rate is not None and abs(change_rate) >= 2.5:
-                current['change_rate'] = change_rate
+            if reference_price is None:
+                continue
+
+            remaining_fraction = Decimal('1')
+            consumed_ratio = Decimal('0')
+
+            while True:
+                direction = _sign(close_price - reference_price)
+                if direction == 0:
+                    break
+
+                threshold_price = reference_price * (1 + direction * threshold_rate)
+                ratio = get_threshold_ratio(open_price, close_price, threshold_price)
+                if ratio is None:
+                    break
+
+                if ratio < consumed_ratio:
+                    break
+
+                slice_fraction = ratio - consumed_ratio
+                if slice_fraction < 0:
+                    break
+
+                slice_start_price = open_price + (close_price - open_price) * consumed_ratio
+                slice_open = slice_start_price if slice_fraction > 0 else threshold_price
+                apply_slice(current, slice_open, threshold_price, slice_fraction, row, volume, amount, turnover_rate)
+                current['change_rate'] = Decimal(direction) * Decimal('2.5')
+                segment_key = (
+                    current.get('ts_code'),
+                    current.get('trade_date'),
+                    current.get('trade_time')
+                )
+                current['segment_index'] = segment_sequence.get(segment_key, 0)
+                segment_sequence[segment_key] = current['segment_index'] + 1
                 results.append(current)
-                current = None
-                reference_price = close_price
+
+                reference_price = threshold_price
+                current = start_segment(row, open_price)
+
+                consumed_ratio = ratio
+                remaining_fraction = Decimal('1') - consumed_ratio
+                if remaining_fraction <= 0:
+                    break
+
+            if remaining_fraction > 0 and current is not None:
+                remaining_open = open_price + (close_price - open_price) * consumed_ratio
+                apply_slice(current, remaining_open, close_price, remaining_fraction, row, volume, amount, turnover_rate)
 
         return results
 
@@ -1566,7 +1400,16 @@ class SyncManager:
                 f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
                 f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
                 f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
+                f"- 流水线墙钟耗时: {timing.get('pipeline_wall', 0)} 秒",
                 f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
+                f"- COPY耗时: {timing.get('copy_time', 0)} 秒",
+                f"- COPY写入行数: {timing.get('copy_rows', 0)}",
+                f"- COPY是否启用: {'是' if timing.get('copy_used') else '否'}",
+                f"- 分区清理模式: {timing.get('partition_cleanup_mode', '')}",
+                f"- 流水线是否启用: {'是' if timing.get('pipeline_enabled') else '否'}",
+                f"- 流水线采集线程数: {timing.get('pipeline_fetch_workers', 0)}",
+                f"- 流水线归一化线程数: {timing.get('pipeline_normalize_workers', 0)}",
+                f"- 流水线写入线程数: {timing.get('pipeline_write_workers', 0)}",
                 f"- db_time/records(秒/条): {timing.get('db_time_per_record', 0)}",
                 f"- db_wall/total_time: {timing.get('db_wall_ratio', 0)}",
                 f"- 并发线程数: {timing.get('parallel', 1)}",
@@ -1576,6 +1419,21 @@ class SyncManager:
                 f"- 异常样本省略数: {timing.get('anomaly_omitted', 0)}",
                 ""
             ]
+
+            failed_dates = result.get('failed_dates') or []
+            if failed_dates:
+                lines.extend([
+                    "## 失败日期",
+                    "",
+                    "| trade_date |",
+                    "| --- |"
+                ])
+                for item in failed_dates:
+                    lines.append(f"| {item} |")
+            else:
+                lines.append("## 失败日期")
+                lines.append("")
+                lines.append("- 无失败日期")
 
             if anomalies:
                 lines.extend([

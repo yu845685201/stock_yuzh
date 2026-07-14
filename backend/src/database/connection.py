@@ -7,10 +7,11 @@ import psycopg2.extras
 import psycopg2.pool
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from ..config import ConfigManager
 import logging
 import threading
+import os
 
 class DatabaseConnectionPool:
     """数据库连接池管理类 - 提供高性能的连接复用"""
@@ -147,6 +148,452 @@ class DatabaseConnection:
                 if conn:
                     conn.close()
 
+    def _parse_date_value(self, value: Any) -> Optional[date]:
+        if value is None or value == '':
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        s = str(value).strip()
+        if not s:
+            return None
+        if '-' in s and len(s) >= 10:
+            try:
+                return datetime.strptime(s[0:10], '%Y-%m-%d').date()
+            except ValueError:
+                return None
+        if len(s) >= 8 and s[0:8].isdigit():
+            try:
+                return datetime.strptime(s[0:8], '%Y%m%d').date()
+            except ValueError:
+                return None
+        return None
+
+    def _parse_time_value(self, value: Any) -> Optional[time]:
+        if value is None or value == '':
+            return None
+        if isinstance(value, time) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.time()
+        s = str(value).strip()
+        if not s:
+            return None
+        if ':' in s:
+            parts = s.split(':')
+            if len(parts) >= 2:
+                hh = parts[0].zfill(2)
+                mm = parts[1].zfill(2)
+                try:
+                    return datetime.strptime(f"{hh}{mm}", '%H%M').time()
+                except ValueError:
+                    return None
+        if s.isdigit() and len(s) >= 4:
+            try:
+                return datetime.strptime(s[0:4], '%H%M').time()
+            except ValueError:
+                return None
+        return None
+
+    def _parse_datetime_value(self, value: Any) -> Optional[datetime]:
+        if value is None or value == '':
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            pass
+        if len(s) >= 12 and s[0:12].isdigit():
+            try:
+                return datetime.strptime(s[0:12], '%Y%m%d%H%M')
+            except ValueError:
+                return None
+        if ' ' in s:
+            date_part, time_part = s.split(' ', 1)
+            date_value = self._parse_date_value(date_part)
+            time_value = self._parse_time_value(time_part)
+            if date_value and time_value:
+                return datetime.combine(date_value, time_value)
+        return None
+
+    def _get_column_data_type(self, cursor, table: str, column: str) -> Optional[str]:
+        query = """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+        """
+        cursor.execute(query, (table, column))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _build_date_convert_expr(self, column: str) -> str:
+        text_col = f"{column}::text"
+        return (
+            "CASE "
+            f"WHEN {column} IS NULL THEN NULL "
+            f"WHEN {text_col} ~ '^\\d{{8}}$' THEN to_date({text_col}, 'YYYYMMDD') "
+            f"WHEN {text_col} ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$' THEN {text_col}::date "
+            "ELSE NULL END"
+        )
+
+    def _build_time_convert_expr(self, column: str) -> str:
+        text_col = f"{column}::text"
+        return (
+            "CASE "
+            f"WHEN {column} IS NULL THEN NULL "
+            f"WHEN {text_col} ~ '^\\d{{3,4}}$' THEN to_timestamp(lpad({text_col}, 4, '0'), 'HH24MI')::time "
+            f"WHEN {text_col} ~ '^\\d{{2}}:\\d{{2}}(:\\d{{2}})?$' THEN {text_col}::time "
+            "ELSE NULL END"
+        )
+
+    def _build_datetime_convert_expr(self, column: str, date_column: Optional[str] = None, time_column: Optional[str] = None) -> str:
+        text_col = f"{column}::text"
+        parts = [
+            f"WHEN {column} IS NULL THEN NULL",
+            f"WHEN {text_col} ~ '^\\d{{12}}$' THEN to_timestamp({text_col}, 'YYYYMMDDHH24MI')",
+            f"WHEN {text_col} ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}' THEN {text_col}::timestamp",
+        ]
+        if date_column and time_column:
+            date_text = f"{date_column}::text"
+            time_text = f"{time_column}::text"
+            parts.append(
+                f"WHEN {date_text} ~ '^\\d{{8}}$' AND {time_text} ~ '^\\d{{3,4}}$' "
+                f"THEN to_timestamp(lpad({date_text}, 8, '0') || lpad({time_text}, 4, '0'), 'YYYYMMDDHH24MI')"
+            )
+            parts.append(
+                f"WHEN {date_text} ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$' AND {time_text} ~ '^\\d{{2}}:\\d{{2}}(:\\d{{2}})?$' "
+                f"THEN ({date_text} || ' ' || {time_text})::timestamp"
+            )
+        parts.append("ELSE NULL")
+        return "CASE " + " ".join(parts) + " END"
+
+    def _upgrade_anal_kline_rise_25pre_types(self, cursor) -> None:
+        table_name = 'anal_kline_rise_25pre'
+        alter_clauses = []
+
+        for column in ('trade_begin_date', 'trade_date'):
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type in ('character varying', 'text'):
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE DATE USING {self._build_date_convert_expr(column)}"
+                )
+
+        for column in ('trade_begin_time', 'trade_time'):
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type in ('character varying', 'text'):
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE TIME USING {self._build_time_convert_expr(column)}"
+                )
+
+        datetime_columns = (
+            ('trade_begin_datetime', 'trade_begin_date', 'trade_begin_time'),
+            ('trade_datetime', 'trade_date', 'trade_time'),
+        )
+        for column, date_column, time_column in datetime_columns:
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type in ('character varying', 'text'):
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE TIMESTAMP USING "
+                    f"{self._build_datetime_convert_expr(column, date_column, time_column)}"
+                )
+
+        if alter_clauses:
+            cursor.execute(f"ALTER TABLE {table_name} " + ", ".join(alter_clauses))
+
+    def _rollback_anal_kline_rise_25pre_types(self, cursor) -> None:
+        table_name = 'anal_kline_rise_25pre'
+        alter_clauses = []
+
+        for column in ('trade_begin_date', 'trade_date'):
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type == 'date':
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE VARCHAR(8) USING to_char({column}, 'YYYYMMDD')"
+                )
+
+        for column in ('trade_begin_time', 'trade_time'):
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type == 'time without time zone':
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE VARCHAR(4) USING to_char({column}, 'HH24MI')"
+                )
+
+        datetime_columns = (
+            'trade_begin_datetime',
+            'trade_datetime',
+        )
+        for column in datetime_columns:
+            data_type = self._get_column_data_type(cursor, table_name, column)
+            if data_type == 'timestamp without time zone':
+                alter_clauses.append(
+                    f"ALTER COLUMN {column} TYPE VARCHAR(12) USING to_char({column}, 'YYYYMMDDHH24MI')"
+                )
+
+        if alter_clauses:
+            cursor.execute(f"ALTER TABLE {table_name} " + ", ".join(alter_clauses))
+
+    def _table_exists(self, cursor, table_name: str) -> bool:
+        cursor.execute("SELECT to_regclass(%s)", (f"public.{table_name}",))
+        return cursor.fetchone()[0] is not None
+
+    def _get_table_relkind(self, cursor, table_name: str) -> Optional[str]:
+        cursor.execute(
+            """
+            SELECT c.relkind
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relname = %s
+            """,
+            (table_name,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def _rename_table_constraints(self, cursor, table_name: str, suffix: str, remove_suffix: bool = False) -> None:
+        cursor.execute(
+            """
+            SELECT conname
+            FROM pg_constraint
+            WHERE conrelid = %s::regclass
+            """,
+            (table_name,)
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            conname = row[0]
+            if remove_suffix:
+                if not conname.endswith(suffix):
+                    continue
+                new_name = conname[: -len(suffix)]
+            else:
+                if conname.endswith(suffix):
+                    continue
+                new_name = f"{conname}{suffix}"
+            if len(new_name) > 63:
+                new_name = new_name[:63]
+            cursor.execute(f"ALTER TABLE {table_name} RENAME CONSTRAINT {conname} TO {new_name}")
+
+    def _get_table_indexes(self, cursor, table_name: str) -> List[str]:
+        cursor.execute(
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = 'public' AND tablename = %s
+            """,
+            (table_name,)
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+    def _rename_table_indexes(self, cursor, table_name: str, suffix: str, remove_suffix: bool = False) -> None:
+        rows = self._get_table_indexes(cursor, table_name)
+        for index_name in rows:
+            if remove_suffix:
+                if not index_name.endswith(suffix):
+                    continue
+                new_name = index_name[: -len(suffix)]
+            else:
+                if index_name.endswith(suffix):
+                    continue
+                new_name = f"{index_name}{suffix}"
+            if len(new_name) > 63:
+                new_name = new_name[:63]
+            cursor.execute(f"ALTER INDEX {index_name} RENAME TO {new_name}")
+
+    def _rename_sequence_for_table(self, cursor, table_name: str, column: str, new_sequence_name: str) -> None:
+        cursor.execute("SELECT pg_get_serial_sequence(%s, %s)", (table_name, column))
+        row = cursor.fetchone()
+        if not row or not row[0]:
+            return
+        sequence_full = row[0]
+        sequence_name = sequence_full.split('.')[-1]
+        if sequence_name != new_sequence_name:
+            cursor.execute(f"ALTER SEQUENCE {sequence_name} RENAME TO {new_sequence_name}")
+        cursor.execute(f"ALTER SEQUENCE {new_sequence_name} OWNED BY {table_name}.{column}")
+        cursor.execute(
+            f"ALTER TABLE {table_name} ALTER COLUMN {column} SET DEFAULT nextval('{new_sequence_name}'::regclass)"
+        )
+
+    def _ensure_update_modified_function(self, cursor) -> None:
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION update_modified_column()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                NEW.update_time = CURRENT_TIMESTAMP;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+        )
+
+    def migrate_his_kline_1min_partitions(self) -> None:
+        """迁移1分钟K线为按天分区表"""
+        self.logger.info("开始迁移1分钟K线分区表")
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                relkind = self._get_table_relkind(cursor, 'his_kline_1min')
+                if relkind is None:
+                    raise RuntimeError("未找到his_kline_1min表")
+                if relkind == 'p':
+                    raise RuntimeError("his_kline_1min已是分区表，无需迁移")
+                if self._table_exists(cursor, 'his_kline_1min_bak'):
+                    raise RuntimeError("检测到his_kline_1min_bak已存在，请先清理或回滚")
+
+                cursor.execute("ALTER TABLE his_kline_1min RENAME TO his_kline_1min_bak")
+                self._rename_table_constraints(cursor, 'his_kline_1min_bak', '_bak')
+                self._rename_table_indexes(cursor, 'his_kline_1min_bak', '_bak')
+                self._rename_sequence_for_table(cursor, 'his_kline_1min_bak', 'id', 'his_kline_1min_bak_id_seq')
+                conn.commit()
+
+                create_table_sql = """
+                CREATE TABLE his_kline_1min (
+                    id BIGSERIAL,
+                    ts_code VARCHAR(20),
+                    stock_code VARCHAR(20),
+                    stock_name VARCHAR(20),
+                    trade_date DATE,
+                    trade_time TIME,
+                    trade_datetime TIMESTAMP,
+                    open NUMERIC(20, 4),
+                    high NUMERIC(20, 4),
+                    low NUMERIC(20, 4),
+                    close NUMERIC(20, 4),
+                    preclose NUMERIC(20, 4),
+                    volume NUMERIC(20, 0),
+                    amount NUMERIC(20, 4),
+                    adjust_flag SMALLINT,
+                    change_rate NUMERIC(10, 6),
+                    turnover_rate NUMERIC(10, 6),
+                    fundamentals_disclosure_date VARCHAR(8),
+                    total_share NUMERIC(20, 4),
+                    float_share NUMERIC(20, 4),
+                    source VARCHAR(20),
+                    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                ) PARTITION BY RANGE (trade_date)
+                """
+                cursor.execute(create_table_sql)
+                cursor.execute(
+                    "ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time "
+                    "UNIQUE (ts_code, trade_date, trade_time)"
+                )
+                cursor.execute(
+                    "CREATE INDEX idx_his_kline_1min_ts_code_trade_date ON his_kline_1min (ts_code, trade_date)"
+                )
+                self._ensure_update_modified_function(cursor)
+                cursor.execute(
+                    "CREATE TRIGGER update_his_kline_1min_modtime "
+                    "BEFORE UPDATE ON his_kline_1min FOR EACH ROW EXECUTE FUNCTION update_modified_column()"
+                )
+                conn.commit()
+
+                cursor.execute("DROP TABLE IF EXISTS his_kline_1min_staging")
+                conn.commit()
+
+                self._upgrade_anal_kline_rise_25pre_types(cursor)
+                conn.commit()
+
+                cursor.execute("SELECT DISTINCT trade_date FROM his_kline_1min_bak ORDER BY trade_date")
+                rows = cursor.fetchall()
+
+                date_expr = self._build_date_convert_expr('trade_date')
+                time_expr = self._build_time_convert_expr('trade_time')
+                datetime_expr = self._build_datetime_convert_expr('trade_datetime', 'trade_date', 'trade_time')
+
+                for row in rows:
+                    trade_date_value = self._parse_date_value(row[0])
+                    if not trade_date_value:
+                        continue
+                    partition_name = f"his_kline_1min_p{trade_date_value.strftime('%Y%m%d')}"
+                    cursor.execute(
+                        "CREATE TABLE IF NOT EXISTS {partition} "
+                        "PARTITION OF his_kline_1min FOR VALUES FROM (%s) TO (%s)".format(
+                            partition=partition_name
+                        ),
+                        (trade_date_value, trade_date_value + timedelta(days=1))
+                    )
+
+                    insert_sql = f"""
+                    WITH src AS (
+                        SELECT
+                            ts_code,
+                            stock_code,
+                            stock_name,
+                            {date_expr} AS trade_date,
+                            {time_expr} AS trade_time,
+                            {datetime_expr} AS trade_datetime,
+                            open,
+                            high,
+                            low,
+                            close,
+                            preclose,
+                            volume,
+                            amount,
+                            adjust_flag,
+                            change_rate,
+                            turnover_rate,
+                            fundamentals_disclosure_date,
+                            total_share,
+                            float_share,
+                            source,
+                            create_time,
+                            update_time
+                        FROM his_kline_1min_bak
+                    )
+                    INSERT INTO his_kline_1min (
+                        ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+                        open, high, low, close, preclose, volume, amount, adjust_flag,
+                        change_rate, turnover_rate, fundamentals_disclosure_date, total_share,
+                        float_share, source, create_time, update_time
+                    )
+                    SELECT
+                        ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+                        open, high, low, close, preclose, volume, amount, adjust_flag,
+                        change_rate, turnover_rate, fundamentals_disclosure_date, total_share,
+                        float_share, source, create_time, update_time
+                    FROM (
+                        SELECT DISTINCT ON (ts_code, trade_date, trade_time)
+                            ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
+                            open, high, low, close, preclose, volume, amount, adjust_flag,
+                            change_rate, turnover_rate, fundamentals_disclosure_date, total_share,
+                            float_share, source, create_time, update_time
+                        FROM src
+                        WHERE trade_date = %s
+                        ORDER BY ts_code, trade_date, trade_time, update_time DESC NULLS LAST
+                    ) deduped
+                    """
+                    cursor.execute(insert_sql, (trade_date_value,))
+                    conn.commit()
+
+        self.logger.info("1分钟K线分区表迁移完成")
+
+    def rollback_his_kline_1min_partitions(self) -> None:
+        """回滚1分钟K线分区表"""
+        self.logger.info("开始回滚1分钟K线分区表")
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                if not self._table_exists(cursor, 'his_kline_1min_bak'):
+                    raise RuntimeError("未找到his_kline_1min_bak，无法回滚")
+
+                if self._table_exists(cursor, 'his_kline_1min'):
+                    cursor.execute("DROP TABLE IF EXISTS his_kline_1min CASCADE")
+                cursor.execute("ALTER TABLE his_kline_1min_bak RENAME TO his_kline_1min")
+                self._rename_table_constraints(cursor, 'his_kline_1min', '_bak', remove_suffix=True)
+                self._rename_table_indexes(cursor, 'his_kline_1min', '_bak', remove_suffix=True)
+                self._rename_sequence_for_table(cursor, 'his_kline_1min', 'id', 'his_kline_1min_id_seq')
+
+                self._rollback_anal_kline_rise_25pre_types(cursor)
+                conn.commit()
+
+        self.logger.info("1分钟K线分区表回滚完成")
+
     def execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
         """
         执行查询语句
@@ -248,190 +695,19 @@ class DatabaseConnection:
                 return cursor.rowcount
 
     def initialize_tables(self) -> None:
-        """初始化数据库表 - 严格按照文档要求"""
-        create_tables_sql = """
-        -- 股票基本信息表
-        CREATE TABLE IF NOT EXISTS base_stock_info (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            cnspell VARCHAR(10),
-            market_code VARCHAR(5),
-            market_name VARCHAR(20),
-            exchange_code VARCHAR(10),
-            sector_code VARCHAR(20),
-            sector_name VARCHAR(20),
-            industry_code VARCHAR(20),
-            industry_name VARCHAR(20),
-            list_status VARCHAR(2),
-            list_date DATE,
-            delist_date DATE,
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        
-
-        -- 基本面信息数据表
-        CREATE TABLE IF NOT EXISTS base_fundamentals_info (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            disclosure_date TIMESTAMP,
-            total_share NUMERIC(20, 4),
-            float_share NUMERIC(20, 4),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 交易日历表
-        CREATE TABLE IF NOT EXISTS base_trade_calendar (
-            id BIGSERIAL PRIMARY KEY,
-            calendar_date VARCHAR(10),
-            is_trading_day SMALLINT
-        );
-
-        -- 历史1分钟K线数据表
-        CREATE TABLE IF NOT EXISTS his_kline_1min (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date VARCHAR(8),
-            trade_time VARCHAR(4),
-            trade_datetime VARCHAR(12),
-            open NUMERIC(30, 8),
-            high NUMERIC(30, 8),
-            low NUMERIC(30, 8),
-            close NUMERIC(30, 8),
-            preclose NUMERIC(30, 8),
-            volume NUMERIC(30, 8),
-            amount NUMERIC(30, 8),
-            change_rate NUMERIC(30, 8),
-            turnover_rate NUMERIC(30, 8),
-            fundamentals_disclosure_date VARCHAR(8),
-            total_share NUMERIC(30, 8),
-            float_share NUMERIC(30, 8),
-            source VARCHAR(20),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 历史日K线数据表
-        CREATE TABLE IF NOT EXISTS his_kline_day (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_date VARCHAR(8),
-            open NUMERIC(30, 8),
-            high NUMERIC(30, 8),
-            low NUMERIC(30, 8),
-            close NUMERIC(30, 8),
-            preclose NUMERIC(30, 8),
-            volume NUMERIC(30, 8),
-            amount NUMERIC(30, 8),
-            change_rate NUMERIC(30, 8),
-            turnover_rate NUMERIC(30, 8),
-            fundamentals_disclosure_date VARCHAR(8),
-            total_share NUMERIC(30, 8),
-            float_share NUMERIC(30, 8),
-            source VARCHAR(20),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 立体K线数据表
-        CREATE TABLE IF NOT EXISTS anal_kline_rise_25pre (
-            id BIGSERIAL PRIMARY KEY,
-            ts_code VARCHAR(20),
-            stock_code VARCHAR(20),
-            stock_name VARCHAR(50),
-            trade_begin_date VARCHAR(8),
-            trade_begin_time VARCHAR(4),
-            trade_begin_datetime VARCHAR(12),
-            trade_date VARCHAR(8),
-            trade_time VARCHAR(4),
-            trade_datetime VARCHAR(12),
-            open NUMERIC(30, 8),
-            high NUMERIC(30, 8),
-            low NUMERIC(30, 8),
-            close NUMERIC(30, 8),
-            volume NUMERIC(30, 8),
-            amount NUMERIC(30, 8),
-            change_rate NUMERIC(30, 8),
-            turnover_rate NUMERIC(30, 8),
-            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- 创建唯一约束 (PostgreSQL不支持IF NOT EXISTS，需要先检查约束是否存在)
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_base_stock_info_code' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE base_stock_info ADD CONSTRAINT uk_base_stock_info_code UNIQUE (ts_code);
-            END IF;
-
-            
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_base_fundamentals_info_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                -- 按照产品设计文档要求，使用ts_code+disclosure_date组合作为唯一约束
-                ALTER TABLE base_fundamentals_info ADD CONSTRAINT uk_base_fundamentals_info_code_date UNIQUE (ts_code, disclosure_date);
-            END IF;
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_base_trade_calendar_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE base_trade_calendar ADD CONSTRAINT uk_base_trade_calendar_date UNIQUE (calendar_date);
-            END IF;
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_his_kline_1min_code_date_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
-            END IF;
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_his_kline_day_code_date' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
-            END IF;
-
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'uk_anal_kline_rise_25pre_code_time' AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-            ) THEN
-                ALTER TABLE anal_kline_rise_25pre ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time UNIQUE (ts_code, trade_datetime);
-            END IF;
-        END $$;
-
-        -- 创建索引
-        CREATE INDEX IF NOT EXISTS idx_base_stock_info_code ON base_stock_info(stock_code);
-        CREATE INDEX IF NOT EXISTS idx_base_fundamentals_info_code ON base_fundamentals_info(ts_code);
-        CREATE INDEX IF NOT EXISTS idx_base_trade_calendar_date ON base_trade_calendar(calendar_date);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_ts_code ON his_kline_1min(ts_code);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_date ON his_kline_1min(trade_date);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_1min_trade_time ON his_kline_1min(trade_time);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_day_ts_code ON his_kline_day(ts_code);
-        CREATE INDEX IF NOT EXISTS idx_his_kline_day_trade_date ON his_kline_day(trade_date);
-        CREATE INDEX IF NOT EXISTS idx_anal_kline_rise_25pre_ts_code ON anal_kline_rise_25pre(ts_code);
-        CREATE INDEX IF NOT EXISTS idx_anal_kline_rise_25pre_trade_datetime ON anal_kline_rise_25pre(trade_datetime);
-
-        """
+        """初始化数据库表 - 读取doc/init.sql"""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+        sql_path = os.path.join(repo_root, 'doc', 'init.sql')
+        with open(sql_path, 'r', encoding='utf-8') as f:
+            create_tables_sql = f.read()
 
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(create_tables_sql)
+                for statement in create_tables_sql.split(';'):
+                    stmt = statement.strip()
+                    if not stmt:
+                        continue
+                    cursor.execute(stmt + ';')
                 conn.commit()
 
     def upsert_fundamentals_data(self, fundamentals_data: List[Dict[str, Any]]) -> int:
@@ -507,156 +783,52 @@ class DatabaseConnection:
 
         return self.execute_batch(upsert_sql, params_list)
 
-    def upsert_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
-        """
-        批量upsert 1分钟K线数据
-
-        Args:
-            kline_data: 1分钟K线数据列表
-
-        Returns:
-            影响的行数
-        """
-        if not kline_data:
-            return 0
-
-        upsert_sql = """
-        INSERT INTO his_kline_1min
-        (ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
-         open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
-         fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
-        VALUES %s
-        ON CONFLICT (ts_code, trade_date, trade_time)
-        DO UPDATE SET
-            stock_code = EXCLUDED.stock_code,
-            stock_name = EXCLUDED.stock_name,
-            trade_datetime = EXCLUDED.trade_datetime,
-            open = EXCLUDED.open,
-            high = EXCLUDED.high,
-            low = EXCLUDED.low,
-            close = EXCLUDED.close,
-            preclose = EXCLUDED.preclose,
-            volume = EXCLUDED.volume,
-            amount = EXCLUDED.amount,
-            change_rate = EXCLUDED.change_rate,
-            turnover_rate = EXCLUDED.turnover_rate,
-            fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
-            total_share = EXCLUDED.total_share,
-            float_share = EXCLUDED.float_share,
-            source = EXCLUDED.source,
-            update_time = NOW()
-        WHERE (
-            his_kline_1min.stock_code,
-            his_kline_1min.stock_name,
-            his_kline_1min.trade_datetime,
-            his_kline_1min.open,
-            his_kline_1min.high,
-            his_kline_1min.low,
-            his_kline_1min.close,
-            his_kline_1min.preclose,
-            his_kline_1min.volume,
-            his_kline_1min.amount,
-            his_kline_1min.change_rate,
-            his_kline_1min.turnover_rate,
-            his_kline_1min.fundamentals_disclosure_date,
-            his_kline_1min.total_share,
-            his_kline_1min.float_share,
-            his_kline_1min.source
-        ) IS DISTINCT FROM (
-            EXCLUDED.stock_code,
-            EXCLUDED.stock_name,
-            EXCLUDED.trade_datetime,
-            EXCLUDED.open,
-            EXCLUDED.high,
-            EXCLUDED.low,
-            EXCLUDED.close,
-            EXCLUDED.preclose,
-            EXCLUDED.volume,
-            EXCLUDED.amount,
-            EXCLUDED.change_rate,
-            EXCLUDED.turnover_rate,
-            EXCLUDED.fundamentals_disclosure_date,
-            EXCLUDED.total_share,
-            EXCLUDED.float_share,
-            EXCLUDED.source
-        )
-        """
-
-        raw_batch_size = self.config_manager.get('sync.kline_1min_upsert_batch_size', 5000)
-        try:
-            batch_size = max(500, int(raw_batch_size or 5000))
-        except (TypeError, ValueError):
-            batch_size = 5000
-
-        total_rows = 0
+    def ensure_his_kline_1min_partition(self, trade_date_value: Any) -> None:
+        """按交易日创建1分钟K线分区（按需）"""
+        trade_date = self._parse_date_value(trade_date_value)
+        if not trade_date:
+            return
+        partition_name = f"his_kline_1min_p{trade_date.strftime('%Y%m%d')}"
+        start_date = trade_date
+        end_date = trade_date + timedelta(days=1)
+        sql = (
+            "CREATE TABLE IF NOT EXISTS {partition} "
+            "PARTITION OF his_kline_1min FOR VALUES FROM (%s) TO (%s)"
+        ).format(partition=partition_name)
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
-                now = datetime.now()
-                for i in range(0, len(kline_data), batch_size):
-                    batch = kline_data[i:i + batch_size]
-                    dedup_map: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-                    for item in batch:
-                        key = (
-                            str(item.get('ts_code', '')),
-                            str(item.get('trade_date', '')),
-                            str(item.get('trade_time', ''))
-                        )
-                        dedup_map[key] = item
-                    dedup_batch = list(dedup_map.values())
-                    dedup_dropped = len(batch) - len(dedup_batch)
-
-                    params_list = []
-                    for item in dedup_batch:
-                        params_list.append((
-                            item['ts_code'],
-                            item['stock_code'],
-                            item['stock_name'],
-                            item['trade_date'],
-                            item['trade_time'],
-                            item['trade_datetime'],
-                            item.get('open'),
-                            item.get('high'),
-                            item.get('low'),
-                            item.get('close'),
-                            item.get('preclose'),
-                            item.get('volume'),
-                            item.get('amount'),
-                            item.get('change_rate'),
-                            item.get('turnover_rate'),
-                            item.get('fundamentals_disclosure_date'),
-                            item.get('total_share'),
-                            item.get('float_share'),
-                            item.get('source'),
-                            item.get('create_time', now),
-                            now
-                        ))
-
-                    batch_start = datetime.now()
-                    psycopg2.extras.execute_values(cursor, upsert_sql, params_list, page_size=batch_size)
-                    batch_elapsed = (datetime.now() - batch_start).total_seconds()
-
-                    if cursor.rowcount and cursor.rowcount > 0:
-                        total_rows += cursor.rowcount
-
-                    self.logger.debug(
-                        "1分钟K线upsert批次完成: batch_rows=%s, dedup_rows=%s, dedup_dropped=%s, batch_elapsed=%.4fs, total_rows=%s",
-                        len(batch),
-                        len(dedup_batch),
-                        dedup_dropped,
-                        batch_elapsed,
-                        total_rows
-                    )
-
+                cursor.execute(sql, (start_date, end_date))
                 conn.commit()
 
-        return total_rows
+    def cleanup_his_kline_1min_partition(self, trade_date_value: Any, mode: str) -> None:
+        """按交易日清理1分钟K线分区"""
+        trade_date = self._parse_date_value(trade_date_value)
+        if not trade_date:
+            return
+        partition_name = f"his_kline_1min_p{trade_date.strftime('%Y%m%d')}"
+        cleanup_mode = (mode or 'truncate').strip()
+        if cleanup_mode not in ('truncate', 'drop_create'):
+            cleanup_mode = 'truncate'
 
-    def insert_ignore_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
-        """
-        批量插入1分钟K线数据（冲突忽略）
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                if cleanup_mode == 'drop_create':
+                    cursor.execute(f"DROP TABLE IF EXISTS {partition_name}")
+                    cursor.execute(
+                        "CREATE TABLE {partition} PARTITION OF his_kline_1min FOR VALUES FROM (%s) TO (%s)".format(
+                            partition=partition_name
+                        ),
+                        (trade_date, trade_date + timedelta(days=1))
+                    )
+                else:
+                    cursor.execute("SELECT to_regclass(%s)", (f"public.{partition_name}",))
+                    exists_row = cursor.fetchone()
+                    if exists_row and exists_row[0]:
+                        cursor.execute(f"TRUNCATE TABLE {partition_name}")
+                conn.commit()
 
-        适用于目标股票在表中无历史数据的场景，可减少冲突更新开销。
-        """
+    def insert_his_kline_1min_partition(self, kline_data: List[Dict[str, Any]]) -> int:
+        """批量写入1分钟K线分区表（路由到父表）"""
         if not kline_data:
             return 0
 
@@ -669,7 +841,7 @@ class DatabaseConnection:
         ON CONFLICT (ts_code, trade_date, trade_time) DO NOTHING
         """
 
-        raw_batch_size = self.config_manager.get('sync.kline_1min_upsert_batch_size', 5000)
+        raw_batch_size = self.config_manager.get('sync.kline_1min_partition_batch_size', 5000)
         try:
             batch_size = max(500, int(raw_batch_size or 5000))
         except (TypeError, ValueError):
@@ -683,13 +855,20 @@ class DatabaseConnection:
                     batch = kline_data[i:i + batch_size]
                     params_list = []
                     for item in batch:
+                        trade_date_value = self._parse_date_value(item.get('trade_date'))
+                        trade_time_value = self._parse_time_value(item.get('trade_time'))
+                        trade_datetime_value = self._parse_datetime_value(item.get('trade_datetime'))
+                        if not trade_datetime_value and trade_date_value and trade_time_value:
+                            trade_datetime_value = datetime.combine(trade_date_value, trade_time_value)
+                        if not trade_date_value or not trade_time_value or not trade_datetime_value:
+                            continue
                         params_list.append((
                             item['ts_code'],
                             item['stock_code'],
                             item['stock_name'],
-                            item['trade_date'],
-                            item['trade_time'],
-                            item['trade_datetime'],
+                            trade_date_value,
+                            trade_time_value,
+                            trade_datetime_value,
                             item.get('open'),
                             item.get('high'),
                             item.get('low'),
@@ -707,23 +886,70 @@ class DatabaseConnection:
                             now
                         ))
 
-                    batch_start = datetime.now()
+                    if not params_list:
+                        continue
                     psycopg2.extras.execute_values(cursor, insert_sql, params_list, page_size=batch_size)
-                    batch_elapsed = (datetime.now() - batch_start).total_seconds()
-
                     if cursor.rowcount and cursor.rowcount > 0:
                         total_rows += cursor.rowcount
-
-                    self.logger.debug(
-                        "1分钟K线insert-ignore批次完成: batch_rows=%s, batch_elapsed=%.4fs, total_rows=%s",
-                        len(batch),
-                        batch_elapsed,
-                        total_rows
-                    )
-
                 conn.commit()
 
         return total_rows
+
+    def upsert_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def truncate_his_kline_1min_staging(self) -> None:
+        """保留旧接口占位（已弃用）"""
+        return None
+
+    def set_his_kline_1min_staging_unlogged(self, enable: bool) -> None:
+        """保留旧接口占位（已弃用）"""
+        return None
+
+    def copy_his_kline_1min_staging(self, kline_data: List[Dict[str, Any]]):
+        """保留旧接口占位（已弃用）"""
+        return 0, False
+
+    def insert_his_kline_1min_staging(self, kline_data: List[Dict[str, Any]]) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def merge_his_kline_1min_from_staging(self) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def _merge_his_kline_1min_from_staging_legacy(self) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def _merge_his_kline_1min_from_staging_optimized(self) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def _get_kline_1min_merge_batch_size(self) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def _ensure_his_kline_1min_staging_index(self, cursor) -> None:
+        """保留旧接口占位（已弃用）"""
+        return None
+
+    def _materialize_his_kline_1min_dedup(self, cursor) -> None:
+        """保留旧接口占位（已弃用）"""
+        return None
+
+    def _fetch_his_kline_1min_dedup_ts_codes(self, cursor) -> List[str]:
+        """保留旧接口占位（已弃用）"""
+        return []
+
+    def _merge_his_kline_1min_batch_update(self, cursor, ts_codes: List[str]) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
+
+    def _merge_his_kline_1min_batch_insert(self, cursor, ts_codes: List[str]) -> int:
+        """保留旧接口占位（已弃用）"""
+        return 0
 
     def upsert_his_kline_day(self, kline_data: List[Dict[str, Any]]) -> int:
         """
@@ -802,11 +1028,11 @@ class DatabaseConnection:
         INSERT INTO anal_kline_rise_25pre
         (ts_code, stock_code, stock_name,
          trade_begin_date, trade_begin_time, trade_begin_datetime,
-         trade_date, trade_time, trade_datetime,
+         trade_date, trade_time, segment_index, trade_datetime,
          open, high, low, close, volume, amount, change_rate, turnover_rate,
          create_time, update_time)
         VALUES %s
-        ON CONFLICT (ts_code, trade_date, trade_time)
+        ON CONFLICT (ts_code, trade_date, trade_time, segment_index)
         DO UPDATE SET
             stock_code = EXCLUDED.stock_code,
             stock_name = EXCLUDED.stock_name,
@@ -815,6 +1041,7 @@ class DatabaseConnection:
             trade_begin_datetime = EXCLUDED.trade_begin_datetime,
             trade_date = EXCLUDED.trade_date,
             trade_time = EXCLUDED.trade_time,
+            segment_index = EXCLUDED.segment_index,
             open = EXCLUDED.open,
             high = EXCLUDED.high,
             low = EXCLUDED.low,
@@ -833,12 +1060,13 @@ class DatabaseConnection:
                 item['ts_code'],
                 item['stock_code'],
                 item['stock_name'],
-                item['trade_begin_date'],
-                item['trade_begin_time'],
-                item['trade_begin_datetime'],
-                item['trade_date'],
-                item['trade_time'],
-                item['trade_datetime'],
+                self._parse_date_value(item.get('trade_begin_date')),
+                self._parse_time_value(item.get('trade_begin_time')),
+                self._parse_datetime_value(item.get('trade_begin_datetime')),
+                self._parse_date_value(item.get('trade_date')),
+                self._parse_time_value(item.get('trade_time')),
+                item.get('segment_index', 0),
+                self._parse_datetime_value(item.get('trade_datetime')),
                 item.get('open'),
                 item.get('high'),
                 item.get('low'),
@@ -860,13 +1088,21 @@ class DatabaseConnection:
         ddl = """
         DO $$
         BEGIN
-            IF NOT EXISTS (
+            IF EXISTS (
                 SELECT 1 FROM pg_constraint
                 WHERE conname = 'uk_anal_kline_rise_25pre_code_time'
                   AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
             ) THEN
                 ALTER TABLE anal_kline_rise_25pre
-                ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time UNIQUE (ts_code, trade_date, trade_time);
+                DROP CONSTRAINT uk_anal_kline_rise_25pre_code_time;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'uk_anal_kline_rise_25pre_code_time_segment'
+                  AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
+            ) THEN
+                ALTER TABLE anal_kline_rise_25pre
+                ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time_segment UNIQUE (ts_code, trade_date, trade_time, segment_index);
             END IF;
         END $$;
         """
@@ -1057,6 +1293,10 @@ class DatabaseConnection:
         """
         获取指定股票在当前交易时间之前最近一条1分钟K线的close
         """
+        parsed_date = self._parse_date_value(trade_date)
+        parsed_time = self._parse_time_value(trade_time)
+        if not parsed_date or not parsed_time:
+            return None
         query = """
         SELECT close
         FROM his_kline_1min
@@ -1065,7 +1305,7 @@ class DatabaseConnection:
         ORDER BY trade_date DESC, trade_time DESC
         LIMIT 1
         """
-        result = self.fetch_one(query, (ts_code, trade_date, trade_date, trade_time))
+        result = self.fetch_one(query, (ts_code, parsed_date, parsed_date, parsed_time))
         if result:
             value = result.get('close')
             return float(value) if value is not None else None
@@ -1102,7 +1342,12 @@ class DatabaseConnection:
         """
         result = self.fetch_one(query, (ts_code,))
         if result:
-            return result.get('trade_datetime')
+            value = result.get('trade_datetime')
+            if isinstance(value, datetime):
+                return value.strftime('%Y%m%d%H%M')
+            if value is None:
+                return None
+            return str(value)
         return None
 
     def fetch_his_kline_1min_by_ts_code(self, ts_code: str) -> List[Dict[str, Any]]:
@@ -1122,6 +1367,9 @@ class DatabaseConnection:
         """
         获取指定股票在某时间点之后的1分钟K线数据
         """
+        parsed_dt = self._parse_datetime_value(trade_datetime)
+        if not parsed_dt:
+            return []
         query = """
         SELECT ts_code, stock_code, stock_name, trade_date, trade_time, trade_datetime,
                open, high, low, close, preclose, volume, amount, change_rate, turnover_rate
@@ -1129,7 +1377,7 @@ class DatabaseConnection:
         WHERE ts_code = %s AND trade_datetime > %s
         ORDER BY trade_datetime ASC
         """
-        return self.execute_query(query, (ts_code, trade_datetime))
+        return self.execute_query(query, (ts_code, parsed_dt))
 
     def test_connection(self) -> bool:
         """

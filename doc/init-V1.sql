@@ -41,27 +41,15 @@ CREATE TABLE base_stock_info (
     list_date VARCHAR(8),
     -- 退市日期
     delist_date VARCHAR(8),
-    -- 股票类型（与数据源保持一致）
-    type VARCHAR(20),
     -- 数据创建时间，插入记录时自动设置当前时间
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- 数据修改时间，更新记录时自动更新为当前时间
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 创建唯一约束，确保TS代码唯一
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uk_base_stock_info_code'
-          AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-    ) THEN
-        ALTER TABLE base_stock_info ADD CONSTRAINT uk_base_stock_info_code UNIQUE (ts_code);
-    END IF;
-END $$;
-
 -- 创建索引以提高查询性能
+-- TS代码索引，常用于股票查询
+CREATE INDEX idx_base_stock_info_ts_code ON base_stock_info (ts_code);
 -- 股票编码索引，常用于按股票代码查询
 CREATE INDEX idx_base_stock_info_stock_code ON base_stock_info (stock_code);
 -- 市场编码索引，常用于按市场筛选
@@ -90,7 +78,6 @@ COMMENT ON COLUMN base_stock_info.industry_name IS '行业分类名称';
 COMMENT ON COLUMN base_stock_info.list_status IS '上市状态：L-上市，D-退市，P-暂停上市';
 COMMENT ON COLUMN base_stock_info.list_date IS '上市日期，格式为yyyyMMdd的字符串';
 COMMENT ON COLUMN base_stock_info.delist_date IS '退市日期，格式为yyyyMMdd的字符串';
-COMMENT ON COLUMN base_stock_info.type IS '股票类型，来源于数据源定义';
 COMMENT ON COLUMN base_stock_info.create_time IS '数据创建时间，记录插入时间';
 COMMENT ON COLUMN base_stock_info.update_time IS '数据修改时间，记录最后更新时间';
 
@@ -122,18 +109,6 @@ CREATE TABLE base_fundamentals_info (
     -- 数据修改时间，更新时自动更新
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
--- 创建唯一约束，确保TS代码+披露日期唯一
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uk_base_fundamentals_info_code_date'
-          AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-    ) THEN
-        ALTER TABLE base_fundamentals_info ADD CONSTRAINT uk_base_fundamentals_info_code_date UNIQUE (ts_code, disclosure_date);
-    END IF;
-END $$;
 
 -- 创建索引以提高查询性能
 -- TS代码索引
@@ -307,35 +282,31 @@ CREATE TABLE his_kline_day (
     ps_ttm NUMERIC(20, 6),
     -- 滚动市现率，TTM算法
     pcf_ttm NUMERIC(20, 6),
-    -- 基本面披露日期，格式：yyyyMMdd
-    fundamentals_disclosure_date VARCHAR(8),
-    -- 总股本，单位：股
-    total_share NUMERIC(20, 4),
-    -- 流通股本，单位：股
-    float_share NUMERIC(20, 4),
-    -- 数据来源
-    source VARCHAR(20),
     -- 数据创建时间，插入记录时自动设置当前时间
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- 数据修改时间，更新记录时自动更新为当前时间
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 创建唯一约束，确保同一股票同一交易日仅一条记录
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uk_his_kline_day_code_date'
-          AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-    ) THEN
-        ALTER TABLE his_kline_day ADD CONSTRAINT uk_his_kline_day_code_date UNIQUE (ts_code, trade_date);
-    END IF;
-END $$;
-
 -- 创建索引以提高查询性能
--- 组合索引：TS代码+交易日（保留）
+-- TS代码索引
+CREATE INDEX idx_his_kline_day_ts_code ON his_kline_day (ts_code);
+-- 股票编码索引
+CREATE INDEX idx_his_kline_day_stock_code ON his_kline_day (stock_code);
+-- 交易日索引
+CREATE INDEX idx_his_kline_day_trade_date ON his_kline_day (trade_date);
+-- 组合索引：TS代码+交易日
 CREATE INDEX idx_his_kline_day_ts_code_trade_date ON his_kline_day (ts_code, trade_date);
+-- 组合索引：股票编码+交易日
+CREATE INDEX idx_his_kline_day_stock_code_trade_date ON his_kline_day (stock_code, trade_date);
+-- 组合索引：TS代码+复权状态
+CREATE INDEX idx_his_kline_day_ts_code_adjust_flag ON his_kline_day (ts_code, adjust_flag);
+-- 交易状态索引
+CREATE INDEX idx_his_kline_day_trade_status ON his_kline_day (trade_status);
+-- 是否ST股索引
+CREATE INDEX idx_his_kline_day_is_st ON his_kline_day (is_st);
+-- 复权状态索引
+CREATE INDEX idx_his_kline_day_adjust_flag ON his_kline_day (adjust_flag);
 
 -- 表注释
 COMMENT ON TABLE his_kline_day IS '历史日K线数据表';
@@ -362,10 +333,6 @@ COMMENT ON COLUMN his_kline_day.pe_ttm IS '滚动市盈率，TTM算法。计算�
 COMMENT ON COLUMN his_kline_day.pb_rate IS '市净率。计算方式：(指定交易日的股票收盘价/指定交易日的每股净资产)=总市值/(最近披露的归属母公司股东的权益-其他权益工具)';
 COMMENT ON COLUMN his_kline_day.ps_ttm IS '滚动市销率，TTM算法。计算方式：(指定交易日的股票收盘价/指定交易日的每股销售额)=(指定交易日的股票收盘价*截至当日公司总股本)/营业总收入TTM';
 COMMENT ON COLUMN his_kline_day.pcf_ttm IS '滚动市现率，TTM算法。计算方式：(指定交易日的股票收盘价/指定交易日的每股现金流TTM)=(指定交易日的股票收盘价*截至当日公司总股本)/现金以及现金等价物净增加额TTM';
-COMMENT ON COLUMN his_kline_day.fundamentals_disclosure_date IS '基本面披露日期，格式为yyyyMMdd的字符串';
-COMMENT ON COLUMN his_kline_day.total_share IS '总股本，单位：股，精确到4位小数';
-COMMENT ON COLUMN his_kline_day.float_share IS '流通股本，单位：股，精确到4位小数';
-COMMENT ON COLUMN his_kline_day.source IS '数据来源';
 COMMENT ON COLUMN his_kline_day.create_time IS '数据创建时间，记录插入时间';
 COMMENT ON COLUMN his_kline_day.update_time IS '数据修改时间，记录最后更新时间';
 
@@ -545,19 +512,19 @@ EXECUTE FUNCTION update_modified_column();
 -- 历史1分钟K线数据表
 CREATE TABLE his_kline_1min (
     -- 主键，自增
-    id BIGSERIAL,
+    id BIGSERIAL PRIMARY KEY,
     -- TS代码，Tushare系统中的唯一标识
     ts_code VARCHAR(20),
     -- 股票编码
     stock_code VARCHAR(20),
     -- 股票名称
     stock_name VARCHAR(20),
-    -- 交易日
-    trade_date DATE,
-    -- 交易时间，表示该分钟的开始时间
-    trade_time TIME,
-    -- 交易时间，表示该分钟的开始时间
-    trade_datetime TIMESTAMP,
+    -- 交易日，格式：yyyyMMdd
+    trade_date VARCHAR(8),
+    -- 交易时间，格式：hhmm，表示该分钟的开始时间
+    trade_time VARCHAR(4),
+    -- 交易时间，格式：yyyyMMddhhmm，表示该分钟的开始时间
+    trade_datetime VARCHAR(12),
     -- 该分钟开盘价，精度：小数点后4位；单位：人民币元
     open NUMERIC(20, 4),
     -- 该分钟最高价，精度：小数点后4位；单位：人民币元
@@ -578,25 +545,28 @@ CREATE TABLE his_kline_1min (
     change_rate NUMERIC(10, 6),
     -- 该分钟换手率，百分比
     turnover_rate NUMERIC(10, 6),
-    -- 基本面披露日期，格式：yyyyMMdd
-    fundamentals_disclosure_date VARCHAR(8),
-    -- 总股本，单位：股
-    total_share NUMERIC(20, 4),
-    -- 流通股本，单位：股
-    float_share NUMERIC(20, 4),
-    -- 数据来源
-    source VARCHAR(20),
     -- 数据创建时间，插入记录时自动设置当前时间
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- 数据修改时间，更新记录时自动更新为当前时间
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) PARTITION BY RANGE (trade_date);
+);
 
 -- 创建唯一约束，确保同一股票同一分钟仅一条记录
 ALTER TABLE his_kline_1min ADD CONSTRAINT uk_his_kline_1min_code_date_time UNIQUE (ts_code, trade_date, trade_time);
 
 -- 创建索引以提高查询性能
-CREATE INDEX idx_his_kline_1min_ts_code_trade_date ON his_kline_1min (ts_code, trade_date);
+-- TS代码索引
+CREATE INDEX idx_his_kline_1min_ts_code ON his_kline_1min (ts_code);
+-- 股票编码索引
+CREATE INDEX idx_his_kline_1min_stock_code ON his_kline_1min (stock_code);
+-- 交易日索引
+CREATE INDEX idx_his_kline_1min_trade_date ON his_kline_1min (trade_date);
+-- 交易时间索引
+CREATE INDEX idx_his_kline_1min_trade_time ON his_kline_1min (trade_time);
+-- 组合索引：股票编码+交易日+交易时间
+CREATE INDEX idx_his_kline_1min_stock_code_trade_date_trade_time ON his_kline_1min (stock_code, trade_date, trade_time);
+-- 复权状态索引
+CREATE INDEX idx_his_kline_1min_adjust_flag ON his_kline_1min (adjust_flag);
 
 -- 表注释
 COMMENT ON TABLE his_kline_1min IS '历史1分钟K线数据表';
@@ -606,9 +576,9 @@ COMMENT ON COLUMN his_kline_1min.id IS '主键，自增ID';
 COMMENT ON COLUMN his_kline_1min.ts_code IS 'TS代码，Tushare系统中的唯一标识';
 COMMENT ON COLUMN his_kline_1min.stock_code IS '股票编码，交易所公布的股票代码';
 COMMENT ON COLUMN his_kline_1min.stock_name IS '股票名称';
-COMMENT ON COLUMN his_kline_1min.trade_date IS '交易日，类型为DATE';
-COMMENT ON COLUMN his_kline_1min.trade_time IS '交易时间，类型为TIME，表示该分钟的开始时间';
-COMMENT ON COLUMN his_kline_1min.trade_datetime IS '交易时间，类型为TIMESTAMP，表示该分钟的开始时间';
+COMMENT ON COLUMN his_kline_1min.trade_date IS '交易日，格式为yyyyMMdd的字符串';
+COMMENT ON COLUMN his_kline_1min.trade_time IS '交易时间，格式为hhmm的字符串，表示该分钟的开始时间';
+COMMENT ON COLUMN his_kline_1min.trade_datetime IS '交易时间，格式为yyyyMMddhhmm的字符串，表示该分钟的开始时间';
 COMMENT ON COLUMN his_kline_1min.open IS '该分钟开盘价，单位：元，精确到4位小数';
 COMMENT ON COLUMN his_kline_1min.high IS '该分钟最高价，单位：元，精确到4位小数';
 COMMENT ON COLUMN his_kline_1min.low IS '该分钟最低价，单位：元，精确到4位小数';
@@ -619,18 +589,15 @@ COMMENT ON COLUMN his_kline_1min.amount IS '该分钟成交额，单位：元，
 COMMENT ON COLUMN his_kline_1min.adjust_flag IS '复权状态：1-后复权，2-前复权，3-不复权';
 COMMENT ON COLUMN his_kline_1min.change_rate IS '该分钟涨跌幅，百分比，精确到6位小数。计算方式：[(该分钟收盘价-前一分钟收盘价)/前一分钟收盘价]*100%';
 COMMENT ON COLUMN his_kline_1min.turnover_rate IS '该分钟换手率，百分比。计算方式：[该分钟成交量(股)/股票的流通股总股数(股)]*100%';
-COMMENT ON COLUMN his_kline_1min.fundamentals_disclosure_date IS '基本面披露日期，格式为yyyyMMdd的字符串';
-COMMENT ON COLUMN his_kline_1min.total_share IS '总股本，单位：股，精确到4位小数';
-COMMENT ON COLUMN his_kline_1min.float_share IS '流通股本，单位：股，精确到4位小数';
-COMMENT ON COLUMN his_kline_1min.source IS '数据来源';
 COMMENT ON COLUMN his_kline_1min.create_time IS '数据创建时间，记录插入时间';
 COMMENT ON COLUMN his_kline_1min.update_time IS '数据修改时间，记录最后更新时间';
 
 -- 创建触发器：在his_kline_1min表更新时自动调用上面的函数
-CREATE TRIGGER update_his_kline_1min_modtime
-BEFORE UPDATE ON his_kline_1min
-FOR EACH ROW
+CREATE TRIGGER update_his_kline_1min_modtime 
+BEFORE UPDATE ON his_kline_1min 
+FOR EACH ROW 
 EXECUTE FUNCTION update_modified_column();
+
 
 -- 历史5分钟K线数据表
 CREATE TABLE his_kline_5min (
@@ -998,20 +965,12 @@ CREATE TABLE anal_kline_rise_25pre (
     stock_code VARCHAR(20),
     -- 股票名称
     stock_name VARCHAR(20),
-    -- 交易开始日
-    trade_begin_date DATE,
-    -- 交易开始时间
-    trade_begin_time TIME,
-    -- 交易开始时间
-    trade_begin_datetime TIMESTAMP,
-    -- 交易日
-    trade_date DATE,
-    -- 交易时间，表示该交易时段的开始时间
-    trade_time TIME,
-    -- 分段序号（同一分钟内拆分段）
-    segment_index INTEGER DEFAULT 0,
-    -- 交易时间，表示该交易时段的开始时间
-    trade_datetime TIMESTAMP,
+    -- 交易日，格式：yyyyMMdd
+    trade_date VARCHAR(8),
+    -- 交易时间，格式：hhmm，表示该交易时段的开始时间
+    trade_time VARCHAR(4),
+    -- 交易时间，格式：yyyyMMddhhmm，表示该交易时段的开始时间
+    trade_datetime VARCHAR(12),
     -- 该周期开盘价，精度：小数点后4位；单位：人民币元
     open NUMERIC(20, 4),
     -- 该周期最高价，精度：小数点后4位；单位：人民币元
@@ -1020,10 +979,14 @@ CREATE TABLE anal_kline_rise_25pre (
     low NUMERIC(20, 4),
     -- 该周期收盘价，精度：小数点后4位；单位：人民币元
     close NUMERIC(20, 4),
+    -- 前一周期收盘价，精度：小数点后4位；单位：人民币元
+    preclose NUMERIC(20, 4),
     -- 成交量，单位：股
     volume NUMERIC(20, 0),
     -- 成交额，精度：小数点后4位；单位：人民币元
     amount NUMERIC(20, 4),
+    -- 复权状态：1-后复权，2-前复权，3-不复权
+    adjust_flag SMALLINT,
     -- 涨跌幅，精度：小数点后6位
     change_rate NUMERIC(10, 6),
     -- 换手率，百分比
@@ -1034,21 +997,21 @@ CREATE TABLE anal_kline_rise_25pre (
     update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 创建唯一约束，确保同一股票同一时段同一分段仅一条记录
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'uk_anal_kline_rise_25pre_code_time_segment'
-          AND connamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')
-    ) THEN
-        ALTER TABLE anal_kline_rise_25pre ADD CONSTRAINT uk_anal_kline_rise_25pre_code_time_segment UNIQUE (ts_code, trade_date, trade_time, segment_index);
-    END IF;
-END $$;
-
 -- 创建索引以提高查询性能
--- 组合索引：TS代码+交易日+交易时间+分段
-CREATE INDEX idx_anal_kline_rise_25pre_ts_code_trade_date_trade_time_segment ON anal_kline_rise_25pre (ts_code, trade_date, trade_time, segment_index);
+-- TS代码索引
+CREATE INDEX idx_anal_kline_rise_25pre_ts_code ON anal_kline_rise_25pre (ts_code);
+-- 股票编码索引
+CREATE INDEX idx_anal_kline_rise_25pre_stock_code ON anal_kline_rise_25pre (stock_code);
+-- 交易日索引
+CREATE INDEX idx_anal_kline_rise_25pre_trade_date ON anal_kline_rise_25pre (trade_date);
+-- 交易时间索引
+CREATE INDEX idx_anal_kline_rise_25pre_trade_time ON anal_kline_rise_25pre (trade_time);
+-- 组合索引：TS代码+交易日+交易时间，用于按股票和时间范围查询
+CREATE INDEX idx_anal_kline_rise_25pre_ts_code_trade_date_trade_time ON anal_kline_rise_25pre (ts_code, trade_date, trade_time);
+-- 组合索引：股票编码+交易日+交易时间
+CREATE INDEX idx_anal_kline_rise_25pre_stock_code_trade_date_trade_time ON anal_kline_rise_25pre (stock_code, trade_date, trade_time);
+-- 复权状态索引
+CREATE INDEX idx_anal_kline_rise_25pre_adjust_flag ON anal_kline_rise_25pre (adjust_flag);
 
 -- 表注释
 COMMENT ON TABLE anal_kline_rise_25pre IS '立体K线数据表（25%涨跌幅预处理）';
@@ -1058,19 +1021,17 @@ COMMENT ON COLUMN anal_kline_rise_25pre.id IS '主键，自增ID';
 COMMENT ON COLUMN anal_kline_rise_25pre.ts_code IS 'TS代码，Tushare系统中的唯一标识';
 COMMENT ON COLUMN anal_kline_rise_25pre.stock_code IS '股票编码，交易所公布的股票代码';
 COMMENT ON COLUMN anal_kline_rise_25pre.stock_name IS '股票名称';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_begin_date IS '交易开始日，类型为DATE';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_begin_time IS '交易开始时间，类型为TIME';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_begin_datetime IS '交易开始时间，类型为TIMESTAMP';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_date IS '交易日，类型为DATE';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_time IS '交易时间，类型为TIME，表示该交易时段的开始时间';
-COMMENT ON COLUMN anal_kline_rise_25pre.segment_index IS '分段序号（同一分钟内拆分段）';
-COMMENT ON COLUMN anal_kline_rise_25pre.trade_datetime IS '交易时间，类型为TIMESTAMP，表示该交易时段的开始时间';
+COMMENT ON COLUMN anal_kline_rise_25pre.trade_date IS '交易日，格式为yyyyMMdd的字符串';
+COMMENT ON COLUMN anal_kline_rise_25pre.trade_time IS '交易时间，格式为hhmm的字符串，表示该交易时段的开始时间';
+COMMENT ON COLUMN anal_kline_rise_25pre.trade_datetime IS '交易时间，格式为yyyyMMddhhmm的字符串，表示该交易时段的开始时间';
 COMMENT ON COLUMN anal_kline_rise_25pre.open IS '该周期开盘价，单位：元，精确到4位小数';
 COMMENT ON COLUMN anal_kline_rise_25pre.high IS '该周期最高价，单位：元，精确到4位小数';
 COMMENT ON COLUMN anal_kline_rise_25pre.low IS '该周期最低价，单位：元，精确到4位小数';
 COMMENT ON COLUMN anal_kline_rise_25pre.close IS '该周期收盘价，单位：元，精确到4位小数';
+COMMENT ON COLUMN anal_kline_rise_25pre.preclose IS '前一周期收盘价，单位：元，精确到4位小数';
 COMMENT ON COLUMN anal_kline_rise_25pre.volume IS '成交量，单位：股，整数';
 COMMENT ON COLUMN anal_kline_rise_25pre.amount IS '成交额，单位：元，精确到4位小数';
+COMMENT ON COLUMN anal_kline_rise_25pre.adjust_flag IS '复权状态：1-后复权，2-前复权，3-不复权';
 COMMENT ON COLUMN anal_kline_rise_25pre.change_rate IS '涨跌幅，百分比，精确到6位小数。计算方式：[(指定交易日的收盘价-指定交易日前收盘价)/指定交易日前收盘价]*100%';
 COMMENT ON COLUMN anal_kline_rise_25pre.turnover_rate IS '换手率，百分比。计算方式：[指定交易日的成交量(股)/指定交易日的股票的流通股总股数(股)]*100%';
 COMMENT ON COLUMN anal_kline_rise_25pre.create_time IS '数据创建时间，记录插入时间';

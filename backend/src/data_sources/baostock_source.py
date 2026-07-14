@@ -20,7 +20,7 @@ class BaostockSource(DataSourceBase):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.data_path = config.get('data_path', 'uat/data')
+        self.data_path = config.get('data_path')
 
         # 初始化API限流器 - 使用基本面数据专用配置
         financial_rate_limit_config = config.get('financial_data_rate_limit', {})
@@ -269,6 +269,21 @@ class BaostockSource(DataSourceBase):
         except Exception as e:
             print(f"获取财务数据异常: {e}")
             return None
+
+    def fetch_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
+        """Baostock不提供K线数据"""
+        return []
+
+    def fetch_kline_range(
+        self,
+        code: str,
+        kline_type: str = 'minute1',
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 800
+    ) -> List[Dict[str, Any]]:
+        """Baostock不提供K线数据"""
+        return []
 
     def get_stock_fundamentals(self, ts_code: str, year: int = None, quarter: int = None) -> Optional[Dict[str, Any]]:
         """

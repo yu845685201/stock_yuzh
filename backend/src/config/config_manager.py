@@ -87,7 +87,22 @@ class ConfigManager:
                 'kline_max_workers': 4,
                 'kline_stock_batch_size': 1000,
                 'kline_1min_upsert_batch_size': 5000,
-                'kline_1min_db_max_writers': 2
+                'kline_1min_db_max_writers': 2,
+                'kline_1min_staging_batch_size': 20000,
+                'kline_1min_merge_optimized_enabled': True,
+                'kline_1min_merge_batch_size': 1000,
+                'kline_1min_csv_max_workers': 2,
+                'kline_1min_csv_max_queue': 20000,
+                'kline_anomaly_report_limit': 5000,
+                'kline_1min_copy_enabled': True,
+                'kline_1min_staging_unlogged': True,
+                'kline_1min_pipeline_enabled': True,
+                'kline_1min_partition_cleanup': 'truncate',
+                'kline_1min_partition_batch_size': 5000,
+                'kline_1min_pipeline_queue_size': 200,
+                'kline_1min_pipeline_fetch_workers': 4,
+                'kline_1min_pipeline_normalize_workers': 4,
+                'kline_1min_pipeline_write_workers': 2
             },
             'rate_limit': {
                 'enabled': True,

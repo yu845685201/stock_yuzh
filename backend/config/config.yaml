@@ -21,7 +21,7 @@ database:
   pool:
     enabled: true
     min_connections: 8
-    max_connections: 25
+    max_connections: 40
 
 # 数据路径配置
 data_paths:
@@ -41,7 +41,7 @@ data_sources:
     base_url: http://127.0.0.1:8080
     timeout: 30
     rate_limit:
-      enabled: true
+      enabled: false
       calls_per_period: 50
       sleep_duration: 1.0
 
@@ -107,6 +107,21 @@ sync:
   kline_stock_batch_size: 1000
   kline_1min_upsert_batch_size: 2000
   kline_1min_db_max_writers: 4
+  kline_1min_staging_batch_size: 20000
+  kline_1min_merge_optimized_enabled: true
+  kline_1min_merge_batch_size: 1000
+  kline_1min_csv_max_workers: 2
+  kline_1min_csv_max_queue: 20000
+  kline_anomaly_report_limit: 5000
+  kline_1min_copy_enabled: true
+  kline_1min_staging_unlogged: false
+  kline_1min_pipeline_enabled: true
+  kline_1min_partition_cleanup: truncate
+  kline_1min_partition_batch_size: 5000
+  kline_1min_pipeline_queue_size: 200
+  kline_1min_pipeline_fetch_workers: 8
+  kline_1min_pipeline_normalize_workers: 8
+  kline_1min_pipeline_write_workers: 4
   # 动态批次大小配置
   batch_sizes:
     stock_info: 2000      # 股票信息字段多

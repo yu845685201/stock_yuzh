@@ -60,6 +60,38 @@ class DataSourceBase(ABC):
         """
         pass
 
+    @abstractmethod
+    def fetch_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
+        """
+        获取全量K线数据
+
+        Args:
+            code: 股票代码
+            kline_type: K线类型
+        """
+        pass
+
+    @abstractmethod
+    def fetch_kline_range(
+        self,
+        code: str,
+        kline_type: str = 'minute1',
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        limit: int = 800
+    ) -> List[Dict[str, Any]]:
+        """
+        获取区间K线数据
+
+        Args:
+            code: 股票代码
+            kline_type: K线类型
+            start_date: 开始日期
+            end_date: 结束日期
+            limit: 返回条数上限
+        """
+        pass
+
     @property
     def is_connected(self) -> bool:
         """返回是否已连接"""
