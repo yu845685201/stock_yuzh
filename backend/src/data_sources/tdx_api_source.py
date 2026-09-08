@@ -3,6 +3,7 @@ Tdx API数据源实现 - 用于获取K线数据
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -48,41 +49,74 @@ class TdxApiSource(DataSourceBase):
         """Tdx API不提供基本面数据"""
         return None
 
-    def _request(self, path: str, params: Dict[str, Any]) -> Optional[Any]:
+    def _request(self, path: str, params: Dict[str, Any], retries: int = 3) -> Optional[Any]:
         if not self.base_url:
             logger.error("Tdx API base_url未配置")
             return None
 
-        if self.rate_limiter:
-            self.rate_limiter.wait_if_needed()
-
         url = f"{self.base_url}{path}"
-        try:
-            resp = requests.get(url, params=params, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error(f"Tdx API请求失败: {url} params={params} error={e}")
-            return None
+        last_error = None
+        for attempt in range(1, retries + 1):
+            if self.rate_limiter:
+                self.rate_limiter.wait_if_needed()
 
-        if isinstance(data, dict):
-            if 'data' in data:
-                payload = data['data']
-                if isinstance(payload, dict):
-                    if 'List' in payload:
-                        return payload['List']
-                    if 'list' in payload:
-                        return payload['list']
-                return payload
-            if 'result' in data:
-                payload = data['result']
-                if isinstance(payload, dict):
-                    if 'List' in payload:
-                        return payload['List']
-                    if 'list' in payload:
-                        return payload['list']
-                return payload
-        return data
+            try:
+                resp = requests.get(url, params=params, timeout=self.timeout)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Tdx API请求失败(第{attempt}次): {url} params={params} error={e}")
+                if attempt < retries:
+                    time.sleep(min(2 ** attempt, 8))
+                continue
+
+            if isinstance(data, dict) and data.get('code') not in (0, None):
+                # 中间件业务层错误（code=-1）
+                logger.warning(f"Tdx API业务错误: {url} params={params} message={data.get('message')}")
+                return None
+
+            if isinstance(data, dict):
+                if 'data' in data:
+                    payload = data['data']
+                    if isinstance(payload, dict):
+                        if 'List' in payload:
+                            return payload['List']
+                        if 'list' in payload:
+                            return payload['list']
+                    return payload
+                if 'result' in data:
+                    payload = data['result']
+                    if isinstance(payload, dict):
+                        if 'List' in payload:
+                            return payload['List']
+                        if 'list' in payload:
+                            return payload['list']
+                    return payload
+            return data
+
+        logger.error(f"Tdx API重试耗尽: {url} params={params} error={last_error}")
+        return None
+
+    def get_kline_qfq_full(self, code: str) -> List[Dict[str, Any]]:
+        """前复权日K全量（/api/kline type=day，同花顺源，无 amount）"""
+        data = self._request('/api/kline', {'code': code, 'type': 'day'})
+        return data if isinstance(data, list) else []
+
+    def get_kline_raw_full(self, code: str) -> List[Dict[str, Any]]:
+        """原始（不复权）日K全量（/api/kline-all type=day，含真实 amount）"""
+        data = self._request('/api/kline-all', {'code': code, 'type': 'day'})
+        return data if isinstance(data, list) else []
+
+    def get_kline_qfq_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """前复权日K尾部（/api/kline-history，日期参数中间件未实现，仅最近N条）"""
+        data = self._request('/api/kline-history', {'code': code, 'type': 'day', 'limit': limit})
+        return data if isinstance(data, list) else []
+
+    def get_kline_raw_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """原始日K尾部（/api/kline-all?limit=N，从最近截取，含真实 amount）"""
+        data = self._request('/api/kline-all', {'code': code, 'type': 'day', 'limit': limit})
+        return data if isinstance(data, list) else []
 
     def get_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
         """调用 /api/kline-all 获取全量K线"""

@@ -4,7 +4,9 @@
 psycopg2-binary==2.9.9
 
 # 数据源
-baostock==0.8.9
+# baostock 0.9.0+ 已迁移服务端域名至 public-api.baostock.com，
+# 旧版 0.8.x 仍连 www.baostock.com（10030 端口已下线，login 会挂死）
+baostock>=0.9.3
 
 # 配置管理
 PyYAML==6.0.1
@@ -27,3 +29,6 @@ psutil==5.9.8
 
 # HTTP客户端
 requests==2.31.0
+
+# 测试
+pytest==7.4.3

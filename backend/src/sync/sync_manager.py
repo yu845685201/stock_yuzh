@@ -342,6 +342,17 @@ class SyncManager:
 
             total_stocks = len(stocks)
 
+            # 双源拉取模式：init/指定区间=双全量；日常=双尾部+除权检测
+            fetch_full = init_mode or bool(start_date and end_date)
+            tail_limit = int(self.config_manager.get('sync.kline_day_tail_limit', 5))
+            detection = {'checked': 0, 'hits': 0, 'refetched': 0}
+            detection_details = []
+            source_missing = {'qfq_empty': 0, 'raw_empty': 0}
+            result['detection'] = detection
+            result['detection_details'] = detection_details
+            result['source_missing'] = source_missing
+            result['failed_stocks'] = 0
+
             def process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
                 ts_code = stock_item.get('ts_code')
                 stock_code = stock_item.get('stock_code')
@@ -372,76 +383,108 @@ class SyncManager:
                 db_start_wall = None
                 db_end_wall = None
 
-                if init_mode:
-                    api_start = time.time()
-                    if api_start_wall is None:
-                        api_start_wall = api_start
-                    raw = self.tdx_api_source.get_kline_all(stock_code, 'day')
-                    api_end_wall = time.time()
-                    local_api_time += api_end_wall - api_start
-                    self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
+                # ---- 双源拉取与合并（init/区间=双全量；日常=双尾部）----
+                merged_records: List[Dict[str, Any]] = []
+                refetched = False
+                stock_detection_details: List[Dict[str, Any]] = []
+                fetch_start = time.time()
+                if api_start_wall is None:
+                    api_start_wall = fetch_start
 
-                    if raw:
-                        for item in raw:
-                            if isinstance(item, dict):
-                                item_with_code = {'ts_code': ts_code}
-                                item_with_code.update(item)
-                                raw_for_csv.append(item_with_code)
-
-                        records, record_anomalies = self._normalize_kline_day_records(
-                            raw, stock_item, fundamentals_map
-                        )
-                        per_stock_records.extend(records)
-                        local_anomalies.extend(record_anomalies)
+                if fetch_full:
+                    qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code)
+                    raw_list = self.tdx_api_source.get_kline_raw_full(stock_code)
                 else:
-                    for trade_date_chunk in self._chunk_list(trade_dates, 700):
-                        start_trade_date = trade_date_chunk[0]
-                        end_trade_date = trade_date_chunk[-1]
-                        api_start = time.time()
-                        if api_start_wall is None:
-                            api_start_wall = api_start
-                        raw = self.tdx_api_source.get_kline_history(
-                            stock_code,
-                            'day',
-                            start_date=start_trade_date,
-                            end_date=end_trade_date,
-                            limit=800
-                        )
-                        api_end_wall = time.time()
-                        local_api_time += api_end_wall - api_start
-                        self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - api_start)
+                    qfq_list = self.tdx_api_source.get_kline_qfq_tail(stock_code, tail_limit)
+                    raw_list = self.tdx_api_source.get_kline_raw_tail(stock_code, tail_limit)
+                api_end_wall = time.time()
+                local_api_time += api_end_wall - fetch_start
+                self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - fetch_start)
 
-                        if not raw:
-                            continue
+                local_source_missing = {'qfq_empty': 0, 'raw_empty': 0}
+                if not qfq_list:
+                    local_source_missing['qfq_empty'] = 1
+                if not raw_list:
+                    local_source_missing['raw_empty'] = 1
 
-                        for item in raw:
-                            if isinstance(item, dict):
-                                item_with_code = {'ts_code': ts_code}
-                                item_with_code.update(item)
-                                raw_for_csv.append(item_with_code)
+                merged_records = self._merge_kline_day_sources(qfq_list, raw_list)
 
-                        allowed_dates = set(trade_date_chunk)
-                        records, record_anomalies = self._normalize_kline_day_records(
-                            raw, stock_item, fundamentals_map, allowed_dates=allowed_dates
-                        )
-                        per_stock_records.extend(records)
-                        local_anomalies.extend(record_anomalies)
+                # ---- 日常增量的跨快照除权检测（命中→整股重拉自愈）----
+                stock_detection = {'checked': 0, 'hits': 0, 'refetched': 0}
+                if not fetch_full and merged_records:
+                    hit, detail = self._detect_kline_day_refetch(ts_code, merged_records)
+                    stock_detection['checked'] = 1
+                    if hit:
+                        stock_detection['hits'] = 1
+                        stock_detection_details.append({'ts_code': ts_code, **detail})
+                        logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
+                        refetch_start = time.time()
+                        qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code)
+                        raw_list = self.tdx_api_source.get_kline_raw_full(stock_code)
+                        local_api_time += time.time() - refetch_start
+                        merged_records = self._merge_kline_day_sources(qfq_list, raw_list)
+                        stock_detection['refetched'] = 1
+                        refetched = True
 
-                if per_stock_records and save_to_csv and raw_for_csv:
+                if not merged_records:
+                    return {
+                        'records': 0,
+                        'db_rows': 0,
+                        'api_time': local_api_time,
+                        'csv_time': local_csv_time,
+                        'db_time': local_db_time,
+                        'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
+                        'csv_span': None,
+                        'db_span': None,
+                        'anomalies': [],
+                        'detection': stock_detection,
+                        'detection_details': stock_detection_details,
+                        'source_missing': local_source_missing,
+                        'error': None
+                    }
+
+                # ---- CSV（合并后的原始口径，按允许日期过滤）----
+                if save_to_csv:
+                    for item in merged_records:
+                        if isinstance(item, dict):
+                            item_with_code = {'ts_code': ts_code}
+                            item_with_code.update(item)
+                            raw_for_csv.append(item_with_code)
                     csv_start = time.time()
                     if csv_start_wall is None:
                         csv_start_wall = csv_start
                     filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
-                    self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
+                    if filtered_raw:
+                        self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
                     csv_end_wall = time.time()
                     local_csv_time += csv_end_wall - csv_start
                     self._log_progress('csv 生成', stock_index, total_stocks, stock_code, stock_name, csv_end_wall - csv_start)
 
+                # ---- normalize（preclose 链/change_rate/基本面匹配/turnover）----
+                allowed_dates = set(trade_dates) if (trade_dates and not init_mode) else None
+                if init_mode or refetched:
+                    # 全量口径：整股替换写库，不做日期过滤
+                    records, record_anomalies = self._normalize_kline_day_records(
+                        merged_records, stock_item, fundamentals_map
+                    )
+                else:
+                    records, record_anomalies = self._normalize_kline_day_records(
+                        merged_records, stock_item, fundamentals_map, allowed_dates=allowed_dates
+                    )
+                for record in records:
+                    record['adjust_flag'] = 2  # 前复权
+                per_stock_records.extend(records)
+                local_anomalies.extend(record_anomalies)
+
+                # ---- 写库：init/重拉=整股原子替换；区间/日常=upsert ----
                 if per_stock_records and save_to_db:
                     db_start = time.time()
                     if db_start_wall is None:
                         db_start_wall = db_start
-                    db_rows = self.db_conn.upsert_his_kline_day(per_stock_records)
+                    if init_mode or refetched:
+                        db_rows = self.db_conn.replace_his_kline_day(ts_code, per_stock_records)
+                    else:
+                        db_rows = self.db_conn.upsert_his_kline_day(per_stock_records)
                     db_end_wall = time.time()
                     local_db_time += db_end_wall - db_start
                     self._log_progress('数据入库-', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
@@ -457,11 +500,29 @@ class SyncManager:
                     'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
                     'csv_span': (csv_start_wall, csv_end_wall) if csv_start_wall and csv_end_wall else None,
                     'db_span': (db_start_wall, db_end_wall) if db_start_wall and db_end_wall else None,
-                    'anomalies': local_anomalies
+                    'anomalies': local_anomalies,
+                    'detection': stock_detection,
+                    'detection_details': stock_detection_details,
+                    'source_missing': local_source_missing,
+                    'error': None
                 }
 
             def merge_stock_result(res: Dict[str, Any]) -> None:
                 nonlocal api_time, csv_time, db_time, api_span, csv_span, db_span
+
+                if res.get('error'):
+                    result['errors'].append(res['error'])
+                    result['failed_stocks'] += 1
+
+                det = res.get('detection') or {}
+                detection['checked'] += det.get('checked', 0)
+                detection['hits'] += det.get('hits', 0)
+                detection['refetched'] += det.get('refetched', 0)
+                details = res.get('detection_details') or []
+                if details:
+                    detection_details.extend(details[:200 - len(detection_details)])
+                for k, v in (res.get('source_missing') or {}).items():
+                    source_missing[k] = source_missing.get(k, 0) + v
 
                 result['records'] += res['records']
                 result['db_rows'] += res['db_rows']
@@ -486,6 +547,20 @@ class SyncManager:
                         max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1]
                     )
 
+            def _safe_process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
+                """单股异常隔离：一只股票失败不影响整场同步"""
+                try:
+                    return process_stock(stock_item, stock_index)
+                except Exception as e:
+                    self.logger.exception(f"单股日K采集失败: {stock_item.get('ts_code')} {e}")
+                    return {
+                        'records': 0, 'db_rows': 0, 'api_time': 0.0, 'csv_time': 0.0, 'db_time': 0.0,
+                        'api_span': None, 'csv_span': None, 'db_span': None,
+                        'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
+                        'detection_details': [], 'source_missing': {},
+                        'error': f"{stock_item.get('ts_code')}: {e}"
+                    }
+
             max_workers = self.config_manager.get('sync.kline_max_workers', 1)
             raw_batch_size = self.config_manager.get('sync.kline_stock_batch_size', 1000)
             try:
@@ -505,14 +580,14 @@ class SyncManager:
                 if max_workers and max_workers > 1 and len(stock_batch) > 1:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = [
-                            executor.submit(process_stock, s, batch_start + i + 1)
+                            executor.submit(_safe_process_stock, s, batch_start + i + 1)
                             for i, s in enumerate(stock_batch)
                         ]
                         for future in as_completed(futures):
                             merge_stock_result(future.result())
                 else:
                     for i, stock in enumerate(stock_batch):
-                        merge_stock_result(process_stock(stock, batch_start + i + 1))
+                        merge_stock_result(_safe_process_stock(stock, batch_start + i + 1))
 
                 self.logger.info(
                     f"日K线批次完成: 第{batch_no}/{total_batches}批, 累计记录{result['records']}条, 累计写库{result['db_rows']}条"
@@ -543,6 +618,108 @@ class SyncManager:
         result['report_path'] = self._write_kline_day_report(result, anomalies, timing)
 
         return result
+
+    def _merge_kline_day_sources(self, qfq_list: List[Dict[str, Any]],
+                                 raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        合并双源日K：前复权序列（同花顺源）为主表，原始序列（通达信源）提供
+        amount 与 raw_close。以 trade_date 对齐，原始域缺失时留空。
+        字段保持中间件原始单位（价格/成交额=厘，成交量=手），由 normalize 统一换算。
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
+        for item in qfq_list or []:
+            if not isinstance(item, dict):
+                continue
+            td = self._normalize_date_str(item.get('Time') or item.get('time'))
+            if not td:
+                continue
+            merged[td] = {
+                'Time': item.get('Time'),
+                'Open': item.get('Open'),
+                'High': item.get('High'),
+                'Low': item.get('Low'),
+                'Close': item.get('Close'),
+                'Last': item.get('Last'),
+                'Volume': item.get('Volume'),
+                # 同花顺源 amount 恒为 0，置空由原始域补充
+                'Amount': None,
+                'RawClose': None,
+            }
+        for item in raw_list or []:
+            if not isinstance(item, dict):
+                continue
+            td = self._normalize_date_str(item.get('Time') or item.get('time'))
+            if not td:
+                continue
+            row = merged.get(td)
+            if row is None:
+                # 前复权主表没有的日期（两源早期历史不一致），跳过
+                continue
+            row['Amount'] = item.get('Amount')
+            row['RawClose'] = item.get('Close')
+        return [merged[key] for key in sorted(merged.keys())]
+
+    def _detect_kline_day_refetch(self, ts_code: str, merged: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
+        """
+        日常增量的除权/修订检测（跨快照）：
+        1) 新拉最旧 bar 的 Last（同花顺前复权昨收）vs 库存上一交易日 close —— 命中即除权重基
+        2) 重叠日期 fresh raw_close vs 库存 raw_close —— 命中即源数据修订
+
+        返回 (是否命中, 明细)
+        """
+        if not merged:
+            return False, {}
+
+        abs_threshold = float(self.config_manager.get('sync.kline_day_detect_threshold_abs', 0.01))
+        pct_threshold = float(self.config_manager.get('sync.kline_day_detect_threshold_pct', 0.002))
+        raw_tolerance = float(self.config_manager.get('sync.kline_day_raw_match_tolerance', 0.005))
+
+        oldest = merged[0]
+        oldest_date = self._normalize_date_str(oldest.get('Time') or oldest.get('time'))
+        fresh_last = self._scale_price(self._to_float(oldest.get('Last')))
+
+        # 1) 前复权重基检测
+        if oldest_date and fresh_last:
+            prev_close = self.db_conn.fetch_prev_his_kline_day_close(ts_code, oldest_date)
+            if prev_close:
+                threshold = max(abs_threshold, abs(prev_close) * pct_threshold)
+                if abs(fresh_last - prev_close) > threshold:
+                    return True, {
+                        'type': 'qfq_rebase',
+                        'date': oldest_date,
+                        'stored_close': round(prev_close, 4),
+                        'fresh_last': round(fresh_last, 4),
+                        'diff': round(fresh_last - prev_close, 4)
+                    }
+
+        # 2) 原始域不可变校验（重叠日期）
+        dates = [self._normalize_date_str(r.get('Time') or r.get('time')) for r in merged]
+        dates = [d for d in dates if d]
+        if dates:
+            min_d, max_d = min(dates), max(dates)
+            stored_rows = self.db_conn.execute_query(
+                "SELECT trade_date, raw_close FROM his_kline_day "
+                "WHERE ts_code = %s AND trade_date >= %s AND trade_date <= %s AND raw_close IS NOT NULL",
+                (ts_code, min_d, max_d))
+            if stored_rows:
+                fresh_raw_map = {}
+                for r in merged:
+                    d = self._normalize_date_str(r.get('Time') or r.get('time'))
+                    fresh_raw_map[d] = self._scale_price(self._to_float(r.get('RawClose')))
+                for row in stored_rows:
+                    d = row['trade_date']
+                    stored_close = self._to_float(row['raw_close'])
+                    fresh_close = fresh_raw_map.get(d)
+                    if stored_close is None or fresh_close is None:
+                        continue
+                    if abs(fresh_close - stored_close) > max(raw_tolerance, abs(stored_close) * pct_threshold):
+                        return True, {
+                            'type': 'raw_revision',
+                            'date': d,
+                            'stored_raw_close': round(stored_close, 4),
+                            'fresh_raw_close': round(fresh_close, 4)
+                        }
+        return False, {}
 
     def sync_anal_kline_rise_25pre(
         self,
@@ -749,9 +926,11 @@ class SyncManager:
                 continue
             disclosure_date = self._normalize_date_str(item.get('disclosure_date'))
             if not disclosure_date:
+                # 无真实披露日的记录不参与时点匹配（时点不明宁缺毋滥）
                 continue
             record = {
                 'disclosure_date': disclosure_date,
+                'stat_date': self._normalize_date_str(item.get('stat_date')),
                 'total_share': item.get('total_share'),
                 'float_share': item.get('float_share')
             }
@@ -760,7 +939,10 @@ class SyncManager:
             entry['records'].append(record)
 
         for ts_code, entry in fundamentals_map.items():
-            combined = sorted(zip(entry['dates'], entry['records']), key=lambda x: x[0])
+            # 排序键 (disclosure_date, stat_date)：同日披露年报+一季报时，
+            # bisect 取报告期更新的一份（股本更新）
+            combined = sorted(zip(entry['dates'], entry['records']),
+                              key=lambda x: (x[0], x[1].get('stat_date') or ''))
             entry['dates'] = [x[0] for x in combined]
             entry['records'] = [x[1] for x in combined]
 
@@ -1021,6 +1203,7 @@ class SyncManager:
         low_v = self._scale_price(self._to_float(raw.get('low') or raw.get('Low')))
         close_v = self._scale_price(self._to_float(raw.get('close') or raw.get('Close')))
         last_v = self._scale_price(self._to_float(raw.get('last') or raw.get('Last')))
+        raw_close_v = self._scale_price(self._to_float(raw.get('raw_close') or raw.get('RawClose')))
         volume_v = self._scale_volume(self._to_float(raw.get('volume') or raw.get('Volume')))
         amount_v = self._scale_amount(self._to_float(raw.get('amount') or raw.get('Amount')))
 
@@ -1035,6 +1218,7 @@ class SyncManager:
             'close': close_v,
             'preclose': None,
             '_raw_last': last_v,
+            'raw_close': raw_close_v,
             'volume': volume_v,
             'amount': amount_v
         }
@@ -1481,6 +1665,14 @@ class SyncManager:
                 f"- 成功: {'是' if result.get('success') else '否'}",
                 f"- 记录数: {result.get('records', 0)}",
                 f"- 写库行数: {result.get('db_rows', 0)}",
+                f"- 失败股票: {result.get('failed_stocks', 0)}",
+                "",
+                "## 双源与除权检测（V3.0）",
+                f"- 除权检测: 检查 {result.get('detection', {}).get('checked', 0)} 只，"
+                f"命中 {result.get('detection', {}).get('hits', 0)}，"
+                f"整股重拉 {result.get('detection', {}).get('refetched', 0)}",
+                f"- 数据源缺失: 前复权空 {result.get('source_missing', {}).get('qfq_empty', 0)} 只，"
+                f"原始域空 {result.get('source_missing', {}).get('raw_empty', 0)} 只",
                 "",
                 "## 性能信息",
                 f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",

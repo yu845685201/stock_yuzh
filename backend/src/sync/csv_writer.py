@@ -290,6 +290,7 @@ class CsvWriter:
                 'ts_code': data.get('ts_code'),
                 'stock_code': data.get('stock_code'),
                 'stock_name': data.get('stock_name'),
+                'stat_date': data.get('stat_date'),
                 'disclosure_date': data.get('disclosure_date'),
                 'total_share': data.get('total_share'),
                 'float_share': data.get('float_share')
