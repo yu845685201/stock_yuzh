@@ -15,6 +15,10 @@ from ..utils.api_rate_limiter import ApiRateLimiter
 logger = logging.getLogger(__name__)
 
 
+class BaostockBlacklistError(RuntimeError):
+    """baostock 服务端封禁（黑名单用户）——调用方应立即停止采集，稍后换会话/降速重试"""
+
+
 class BaostockSource(DataSourceBase):
     """Baostock数据源，获取基本面数据"""
 
@@ -84,6 +88,15 @@ class BaostockSource(DataSourceBase):
             self._connected = lg.error_code == '0'
             if not self._connected:
                 print(f"Baostock登录失败: {lg.error_msg}")
+            else:
+                # 双保险：直接在 baostock 会话 socket 上强制超时（防无响应挂死）
+                try:
+                    import baostock.common.context as _bs_context
+                    _sock = getattr(_bs_context, 'default_socket', None)
+                    if _sock is not None:
+                        _sock.settimeout(60)
+                except Exception:
+                    pass
             return self._connected
         except Exception as e:
             print(f"Baostock连接异常: {e}")
@@ -227,7 +240,7 @@ class BaostockSource(DataSourceBase):
 
 
     def get_financial_data(self, code: str, year: int, quarter: int) -> Optional[Dict[str, Any]]:
-        """获取财务数据 - 严格按照文档要求"""
+        """获取财务数据（真实披露日 pubDate + 报告期 statDate）"""
         if not self._connected:
             return None
 
@@ -242,7 +255,11 @@ class BaostockSource(DataSourceBase):
                 f"query_profit_data {code} {year}Q{quarter}"
             )
             if rs.error_code != '0':
-                print(f"查询财务数据失败: {rs.error_msg}")
+                error_msg = rs.error_msg or ''
+                # 服务端封禁：立即抛出（调用方停止采集），避免静默吞掉导致数据缺失
+                if '黑名单' in error_msg or 'blacklist' in error_msg.lower():
+                    raise BaostockBlacklistError(f"baostock 封禁: {error_msg}")
+                print(f"查询财务数据失败: {error_msg}")
                 return None
 
             # 获取第一条记录
@@ -250,15 +267,34 @@ class BaostockSource(DataSourceBase):
                 row = rs.get_row_data()
                 field_names = rs.fields  # 获取字段名列表
 
-                # 使用字段名动态定位totalShare和liqaShare（产品设计文档要求）
-                total_share_idx = field_names.index('totalShare') if 'totalShare' in field_names else 9
-                # 按照产品设计文档：流通股本字段为liqaShare
-                liqa_share_idx = field_names.index('liqaShare') if 'liqaShare' in field_names else 10
+                def _field_idx(name: str, default_idx: int) -> int:
+                    return field_names.index(name) if name in field_names else default_idx
 
-                # 严格按照文档要求构建数据字典
+                def _norm_date(value: Optional[str]) -> Optional[str]:
+                    if not value:
+                        return None
+                    value = value.strip().replace('-', '')
+                    return value or None
+
+                # 使用字段名动态定位（totalShare/liqaShare 为产品设计文档要求）
+                total_share_idx = _field_idx('totalShare', 9)
+                liqa_share_idx = _field_idx('liqaShare', 10)
+                pub_date_idx = _field_idx('pubDate', -1)
+                stat_date_idx = _field_idx('statDate', -1)
+
+                # 报告期 statDate 是自然键，缺失则无法入库
+                stat_date = _norm_date(row[stat_date_idx]) if stat_date_idx >= 0 else None
+                if not stat_date:
+                    print(f"query_profit_data {code} {year}Q{quarter} 缺少 statDate，跳过该条")
+                    return None
+
+                # 真实披露日 pubDate：缺失时留空，不回填任何推算值
+                disclosure_date = _norm_date(row[pub_date_idx]) if pub_date_idx >= 0 else None
+
                 financial_data = {
                     'stock_code': code,
-                    'disclosure_date': self._get_disclosure_date(year, quarter),
+                    'stat_date': stat_date,
+                    'disclosure_date': disclosure_date,
                     'total_share': float(row[total_share_idx]) if row[total_share_idx] else None,  # 总股本，单位：股
                     'float_share': float(row[liqa_share_idx]) if row[liqa_share_idx] else None  # 流通股本（liqaShare字段），单位：股
                 }
@@ -266,6 +302,8 @@ class BaostockSource(DataSourceBase):
                 return financial_data
 
             return None
+        except BaostockBlacklistError:
+            raise
         except Exception as e:
             print(f"获取财务数据异常: {e}")
             return None
@@ -349,6 +387,7 @@ class BaostockSource(DataSourceBase):
                 fundamentals = {
                     'stock_code': stock_code,
                     'ts_code': ts_code,  # 直接使用传入的ts_code
+                    'stat_date': financial_data.get('stat_date'),
                     'disclosure_date': financial_data.get('disclosure_date'),
                     'total_share': financial_data.get('total_share'),
                     'float_share': financial_data.get('float_share'),
@@ -358,27 +397,8 @@ class BaostockSource(DataSourceBase):
                 return fundamentals
 
             return None
+        except BaostockBlacklistError:
+            raise
         except Exception as e:
             print(f"获取基本面数据异常: {e}")
             return None
-
-    def _get_disclosure_date(self, year: int, quarter: int) -> str:
-        """
-        获取信息披露日期 - 严格按照数据模型文档要求返回yyyyMMdd格式字符串
-
-        Args:
-            year: 年份
-            quarter: 季度
-
-        Returns:
-            信息披露日期（季度末日期，yyyyMMdd格式字符串）
-        """
-        # 季度末日期映射 - 返回yyyyMMdd格式字符串，符合varchar(8)类型
-        quarter_end_dates = {
-            1: f'{year}0331',
-            2: f'{year}0630',
-            3: f'{year}0930',
-            4: f'{year}1231'
-        }
-
-        return quarter_end_dates.get(quarter, f'{year}1231')

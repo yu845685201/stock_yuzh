@@ -5,6 +5,7 @@
 import psycopg2
 import psycopg2.extras
 import psycopg2.pool
+from psycopg2.extras import execute_values as pg_execute_values
 from typing import List, Dict, Any, Optional
 from contextlib import contextmanager
 from datetime import datetime, date, time, timedelta
@@ -715,7 +716,7 @@ class DatabaseConnection:
         批量upsert基本面数据
 
         Args:
-            fundamentals_data: 基本面数据列表
+            fundamentals_data: 基本面数据列表（含 stat_date 报告期、disclosure_date 真实披露日）
 
         Returns:
             影响的行数
@@ -725,13 +726,14 @@ class DatabaseConnection:
 
         upsert_sql = """
         INSERT INTO base_fundamentals_info
-        (ts_code, stock_code, stock_name, disclosure_date, total_share, float_share, create_time, update_time)
-        VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s, %(disclosure_date)s, %(total_share)s, %(float_share)s,
+        (ts_code, stock_code, stock_name, stat_date, disclosure_date, total_share, float_share, create_time, update_time)
+        VALUES (%(ts_code)s, %(stock_code)s, %(stock_name)s, %(stat_date)s, %(disclosure_date)s, %(total_share)s, %(float_share)s,
                 %(create_time)s, NOW())
-        ON CONFLICT (ts_code, disclosure_date)
+        ON CONFLICT (ts_code, stat_date)
         DO UPDATE SET
             stock_code = EXCLUDED.stock_code,
             stock_name = EXCLUDED.stock_name,
+            disclosure_date = EXCLUDED.disclosure_date,
             total_share = EXCLUDED.total_share,
             float_share = EXCLUDED.float_share,
             update_time = NOW()
@@ -743,6 +745,7 @@ class DatabaseConnection:
                 'ts_code': item['ts_code'],
                 'stock_code': item['stock_code'],
                 'stock_name': item['stock_name'],
+                'stat_date': item['stat_date'],
                 'disclosure_date': item['disclosure_date'],
                 'total_share': item['total_share'],
                 'float_share': item['float_share'],
@@ -967,7 +970,8 @@ class DatabaseConnection:
         upsert_sql = """
         INSERT INTO his_kline_day
         (ts_code, stock_code, stock_name, trade_date,
-         open, high, low, close, preclose, volume, amount, change_rate, turnover_rate,
+         open, high, low, close, preclose, volume, amount, raw_close, adjust_flag,
+         change_rate, turnover_rate,
          fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
         VALUES %s
         ON CONFLICT (ts_code, trade_date)
@@ -981,6 +985,8 @@ class DatabaseConnection:
             preclose = EXCLUDED.preclose,
             volume = EXCLUDED.volume,
             amount = EXCLUDED.amount,
+            raw_close = EXCLUDED.raw_close,
+            adjust_flag = EXCLUDED.adjust_flag,
             change_rate = EXCLUDED.change_rate,
             turnover_rate = EXCLUDED.turnover_rate,
             fundamentals_disclosure_date = EXCLUDED.fundamentals_disclosure_date,
@@ -1005,6 +1011,8 @@ class DatabaseConnection:
                 item.get('preclose'),
                 item.get('volume'),
                 item.get('amount'),
+                item.get('raw_close'),
+                item.get('adjust_flag'),
                 item.get('change_rate'),
                 item.get('turnover_rate'),
                 item.get('fundamentals_disclosure_date'),
@@ -1016,6 +1024,61 @@ class DatabaseConnection:
             ))
 
         return self.execute_values(upsert_sql, params_list, page_size=2000)
+
+    def replace_his_kline_day(self, ts_code: str, kline_data: List[Dict[str, Any]]) -> int:
+        """
+        整股原子替换日K线：单事务内先删该股全部行再批量插入（全量初始化/除权重刷用）
+
+        Args:
+            ts_code: 股票ts_code
+            kline_data: 该股全量日K数据列表
+
+        Returns:
+            插入的行数
+        """
+        if not kline_data:
+            return 0
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM his_kline_day WHERE ts_code = %s", (ts_code,))
+                insert_sql = """
+                INSERT INTO his_kline_day
+                (ts_code, stock_code, stock_name, trade_date,
+                 open, high, low, close, preclose, volume, amount, raw_close, adjust_flag,
+                 change_rate, turnover_rate,
+                 fundamentals_disclosure_date, total_share, float_share, source, create_time, update_time)
+                VALUES %s
+                """
+                params_list = []
+                now = datetime.now()
+                for item in kline_data:
+                    params_list.append((
+                        item['ts_code'],
+                        item['stock_code'],
+                        item['stock_name'],
+                        item['trade_date'],
+                        item.get('open'),
+                        item.get('high'),
+                        item.get('low'),
+                        item.get('close'),
+                        item.get('preclose'),
+                        item.get('volume'),
+                        item.get('amount'),
+                        item.get('raw_close'),
+                        item.get('adjust_flag'),
+                        item.get('change_rate'),
+                        item.get('turnover_rate'),
+                        item.get('fundamentals_disclosure_date'),
+                        item.get('total_share'),
+                        item.get('float_share'),
+                        item.get('source'),
+                        item.get('create_time', now),
+                        now
+                    ))
+                pg_execute_values(cursor, insert_sql, params_list, page_size=2000)
+            conn.commit()
+        return len(kline_data)
 
     def upsert_anal_kline_rise_25pre(self, kline_data: List[Dict[str, Any]]) -> int:
         """
@@ -1156,7 +1219,7 @@ class DatabaseConnection:
         """
         params: List[Any] = []
         query = """
-        SELECT ts_code, disclosure_date, total_share, float_share
+        SELECT ts_code, stat_date, disclosure_date, total_share, float_share
         FROM base_fundamentals_info
         """
         if ts_codes:
@@ -1170,7 +1233,7 @@ class DatabaseConnection:
         """
         params: List[Any] = []
         query = """
-        SELECT t.ts_code, t.disclosure_date, t.total_share, t.float_share
+        SELECT t.ts_code, t.stat_date, t.disclosure_date, t.total_share, t.float_share
         FROM base_fundamentals_info t
         INNER JOIN (
             SELECT ts_code, MAX(disclosure_date) AS disclosure_date
@@ -1189,7 +1252,7 @@ class DatabaseConnection:
         """
         params: List[Any] = [start_date, end_date]
         query = """
-        SELECT ts_code, disclosure_date, total_share, float_share
+        SELECT ts_code, stat_date, disclosure_date, total_share, float_share
         FROM base_fundamentals_info
         WHERE disclosure_date >= %s AND disclosure_date <= %s
         """
@@ -1204,7 +1267,7 @@ class DatabaseConnection:
         """
         params: List[Any] = [end_date]
         query = """
-        SELECT ts_code, disclosure_date, total_share, float_share
+        SELECT ts_code, stat_date, disclosure_date, total_share, float_share
         FROM base_fundamentals_info
         WHERE disclosure_date <= %s
         """
@@ -1230,14 +1293,14 @@ class DatabaseConnection:
 
         query = f"""
         WITH in_range AS (
-            SELECT ts_code, disclosure_date, total_share, float_share
+            SELECT ts_code, stat_date, disclosure_date, total_share, float_share
             FROM base_fundamentals_info
             WHERE disclosure_date >= %s AND disclosure_date <= %s
             {ts_filter}
         ),
         prev_one AS (
             SELECT DISTINCT ON (ts_code)
-                ts_code, disclosure_date, total_share, float_share
+                ts_code, stat_date, disclosure_date, total_share, float_share
             FROM base_fundamentals_info
             WHERE disclosure_date < %s
             {ts_filter}

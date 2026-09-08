@@ -93,13 +93,15 @@ CREATE TABLE base_fundamentals_info (
     -- 主键，自增
     id BIGSERIAL PRIMARY KEY,
     -- TS代码，关联股票基本信息
-    ts_code VARCHAR(20),
+    ts_code VARCHAR(20) NOT NULL,
     -- 股票编码，用于业务查询
     stock_code VARCHAR(20),
     -- 股票名称
     stock_name VARCHAR(20),
-    -- 信息披露日期，财报发布日期
-    disclosure_date TIMESTAMP,
+    -- 报告期（季度末，yyyyMMdd），自然键：一股一期唯一
+    stat_date VARCHAR(8) NOT NULL,
+    -- 信息披露日期（真实公告日，yyyyMMdd），来自 baostock pubDate；缺失时留空
+    disclosure_date VARCHAR(8),
     -- 总股本，单位：股
     total_share NUMERIC(20, 4),
     -- 流通股本，单位：股
@@ -107,7 +109,9 @@ CREATE TABLE base_fundamentals_info (
     -- 数据创建时间，插入时自动设置
     create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     -- 数据修改时间，更新时自动更新
-    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- 自然键：报告期一股一期唯一（真实披露日可能同日双报告，不作键）
+    CONSTRAINT uk_bfi_code_stat UNIQUE (ts_code, stat_date)
 );
 
 -- 创建索引以提高查询性能
@@ -115,8 +119,8 @@ CREATE TABLE base_fundamentals_info (
 CREATE INDEX idx_base_fundamentals_info_ts_code ON base_fundamentals_info (ts_code);
 -- 股票编码索引
 CREATE INDEX idx_base_fundamentals_info_stock_code ON base_fundamentals_info (stock_code);
--- 信息披露日期索引
-CREATE INDEX idx_base_fundamentals_info_disclosure_date ON base_fundamentals_info (disclosure_date);
+-- 真实披露日期索引（时点匹配用）
+CREATE INDEX idx_bfi_pub ON base_fundamentals_info (disclosure_date);
 
 -- 表注释
 COMMENT ON TABLE base_fundamentals_info IS '基本面信息表';
@@ -126,7 +130,8 @@ COMMENT ON COLUMN base_fundamentals_info.id IS '主键，自增ID';
 COMMENT ON COLUMN base_fundamentals_info.ts_code IS 'TS代码，关联base_stock_info.ts_code';
 COMMENT ON COLUMN base_fundamentals_info.stock_code IS '股票编码，关联base_stock_info.stock_code';
 COMMENT ON COLUMN base_fundamentals_info.stock_name IS '股票名称';
-COMMENT ON COLUMN base_fundamentals_info.disclosure_date IS '信息披露日期，财报发布日期';
+COMMENT ON COLUMN base_fundamentals_info.disclosure_date IS '信息披露日期（真实公告日 pubDate，yyyyMMdd），缺失时留空';
+COMMENT ON COLUMN base_fundamentals_info.stat_date IS '报告期（季度末 statDate，yyyyMMdd），自然键';
 COMMENT ON COLUMN base_fundamentals_info.total_share IS '总股本，单位：股，精确到4位小数';
 COMMENT ON COLUMN base_fundamentals_info.float_share IS '流通股本，单位：股，精确到4位小数';
 COMMENT ON COLUMN base_fundamentals_info.create_time IS '数据创建时间，记录插入时间';
@@ -270,10 +275,20 @@ CREATE TABLE his_kline_day (
     is_st BOOLEAN,
     -- 复权状态：1-后复权，2-前复权，3-不复权
     adjust_flag SMALLINT,
+    -- 原始收盘价（不复权，元），用于本地计算复权因子与跨源校验
+    raw_close NUMERIC(20, 4),
     -- 涨跌幅，精度：小数点后6位
     change_rate NUMERIC(10, 6),
     -- 换手率，百分比
     turnover_rate NUMERIC(10, 6),
+    -- 匹配到的基本面信息披露日期（真实公告日，yyyyMMdd）
+    fundamentals_disclosure_date VARCHAR(8),
+    -- 匹配到的总股本，单位：股
+    total_share NUMERIC(20, 4),
+    -- 匹配到的流通股本，单位：股
+    float_share NUMERIC(20, 4),
+    -- 数据来源标识
+    source VARCHAR(20),
     -- 滚动市盈率，TTM算法
     pe_ttm NUMERIC(20, 6),
     -- 市净率

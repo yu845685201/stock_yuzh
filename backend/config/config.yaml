@@ -105,6 +105,11 @@ sync:
   timeout: 30
   kline_max_workers: 8
   kline_stock_batch_size: 1000
+  # 日K双源三模式配置（V3.0 方案）
+  kline_day_tail_limit: 5                  # 日常增量拉取的尾部条数
+  kline_day_detect_threshold_abs: 0.01     # 除权检测绝对阈值（元）
+  kline_day_detect_threshold_pct: 0.002    # 除权检测相对阈值（占价格比例）
+  kline_day_raw_match_tolerance: 0.005     # 原始域不可变校验容差（元）
   kline_1min_upsert_batch_size: 2000
   kline_1min_db_max_writers: 4
   kline_1min_staging_batch_size: 20000
@@ -125,6 +130,10 @@ sync:
   # 动态批次大小配置
   batch_sizes:
     stock_info: 2000      # 股票信息字段多
+  # 基本面重刷防封禁配置（baostock 黑名单；2026-09-07 17:05 由 0.25/300 上调）
+  # 注意：键必须位于 sync 段下，代码读取路径为 sync.fundamentals_rebuild_call_sleep
+  fundamentals_rebuild_call_sleep: 0.6     # 每次季度调用间隔（秒）
+  fundamentals_rebuild_recycle_calls: 1000 # 每 N 次调用回收会话（重新登录）
 
 # CSV文件管理配置
 csv:
@@ -143,3 +152,4 @@ csv:
         mode: overwrite
       base_fundamentals_info:
         mode: overwrite
+  # （基本面重刷防封禁配置已移至 sync 段，见上方 sync.fundamentals_rebuild_call_sleep）

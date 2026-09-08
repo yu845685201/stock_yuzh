@@ -425,6 +425,46 @@ def sync_fundamentals(ctx, no_csv, no_db, batch_size, dry_run, list_status, qps_
 
 
 
+@cli.command('rebuild-fundamentals')
+@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
+@click.option('--codes', help='指定股票ts_code列表，逗号分隔（默认全市场 type=股票）')
+@click.option('--no-resume', is_flag=True, default=False, help='忽略 manifest 断点，从头开始')
+@click.option('--manifest-path', default=None, help='manifest 文件路径（默认 tmp/fundamentals_rebuild_manifest.json）')
+@click.pass_context
+def rebuild_fundamentals(ctx, no_csv, codes, no_resume, manifest_path):
+    """基本面全量重刷（串行+manifest断点，约9-10小时，支持中断续跑）"""
+    config_manager = ctx.obj['config_manager']
+    from src.sync.fundamentals_rebuild_manager import FundamentalsRebuildManager
+
+    ts_codes = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
+    manager = FundamentalsRebuildManager(
+        config_manager,
+        manifest_path=manifest_path
+    )
+    result = manager.execute(
+        ts_codes=ts_codes,
+        resume=not no_resume,
+        save_to_csv=not no_csv,
+        save_to_db=True
+    )
+
+    stats = result.get('stats', {})
+    if result.get('success'):
+        click.echo("\n✓ 基本面全量重刷完成!")
+    else:
+        click.echo("\n✗ 基本面全量重刷异常终止（可用相同命令断点续跑）")
+        for err in result.get('errors', []):
+            click.echo(f"  - {err}")
+    click.echo(f"  - 本轮完成股票: {stats.get('stocks_done', 0)}（跳过 {stats.get('stocks_skipped', 0)}）")
+    click.echo(f"  - 季度调用: {stats.get('calls', 0)}")
+    click.echo(f"  - upsert 记录: {stats.get('records', 0)}")
+    click.echo(f"  - 零记录重试找回: {stats.get('stocks_zero_retry', 0)}，失败: {stats.get('failed_stocks', 0)}")
+    if result.get('duration') is not None:
+        click.echo(f"  - 耗时: {result['duration'] / 60:.0f} 分钟")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 @cli.command()
 @click.pass_context
 def status(ctx):

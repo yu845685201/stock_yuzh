@@ -1,0 +1,706 @@
+{
+  "generated_at": "2026-09-05 23:27:30.782010",
+  "count": 100,
+  "stocks": [
+    {
+      "ts_code": "sh.600036",
+      "stock_code": "600036",
+      "stock_name": "招商银行",
+      "list_date": "20020409",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.600519",
+      "stock_code": "600519",
+      "stock_name": "贵州茅台",
+      "list_date": "20010827",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.601288",
+      "stock_code": "601288",
+      "stock_name": "农业银行",
+      "list_date": "20100715",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.601328",
+      "stock_code": "601328",
+      "stock_name": "交通银行",
+      "list_date": "20070515",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.601398",
+      "stock_code": "601398",
+      "stock_name": "工商银行",
+      "list_date": "20061027",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.601939",
+      "stock_code": "601939",
+      "stock_name": "建设银行",
+      "list_date": "20070925",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.601988",
+      "stock_code": "601988",
+      "stock_name": "中国银行",
+      "list_date": "20060705",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sz.000001",
+      "stock_code": "000001",
+      "stock_name": "平安银行",
+      "list_date": "19910403",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sz.000002",
+      "stock_code": "000002",
+      "stock_name": "万科A",
+      "list_date": "19910129",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sz.000858",
+      "stock_code": "000858",
+      "stock_name": "五粮液",
+      "list_date": "19980427",
+      "category": "bluechip"
+    },
+    {
+      "ts_code": "sh.603092",
+      "stock_code": "603092",
+      "stock_name": "德力佳",
+      "list_date": "20251107",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.603248",
+      "stock_code": "603248",
+      "stock_name": "锡华科技",
+      "list_date": "20251223",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.603293",
+      "stock_code": "603293",
+      "stock_name": "埃泰克",
+      "list_date": "20260416",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.603435",
+      "stock_code": "603435",
+      "stock_name": "嘉德利",
+      "list_date": "20260522",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.688757",
+      "stock_code": "688757",
+      "stock_name": "胜科纳米",
+      "list_date": "20250325",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.688783",
+      "stock_code": "688783",
+      "stock_name": "西安奕材",
+      "list_date": "20251028",
+      "category": "new"
+    },
+    {
+      "ts_code": "sz.301173",
+      "stock_code": "301173",
+      "stock_name": "毓恬冠佳",
+      "list_date": "20250303",
+      "category": "new"
+    },
+    {
+      "ts_code": "sz.301491",
+      "stock_code": "301491",
+      "stock_name": "汉桑科技",
+      "list_date": "20250806",
+      "category": "new"
+    },
+    {
+      "ts_code": "sz.301531",
+      "stock_code": "301531",
+      "stock_name": "春光集团",
+      "list_date": "20260511",
+      "category": "new"
+    },
+    {
+      "ts_code": "sz.301575",
+      "stock_code": "301575",
+      "stock_name": "艾芬达",
+      "list_date": "20250910",
+      "category": "new"
+    },
+    {
+      "ts_code": "sh.600229",
+      "stock_code": "600229",
+      "stock_name": "城市传媒",
+      "list_date": "20000309",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600322",
+      "stock_code": "600322",
+      "stock_name": "津投城开",
+      "list_date": "20010910",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600339",
+      "stock_code": "600339",
+      "stock_name": "中油工程",
+      "list_date": "20001225",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600360",
+      "stock_code": "600360",
+      "stock_name": "华微电子",
+      "list_date": "20010316",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600530",
+      "stock_code": "600530",
+      "stock_name": "交大昂立",
+      "list_date": "20010702",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600563",
+      "stock_code": "600563",
+      "stock_name": "法拉电子",
+      "list_date": "20021210",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600860",
+      "stock_code": "600860",
+      "stock_name": "京城股份",
+      "list_date": "19940506",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600883",
+      "stock_code": "600883",
+      "stock_name": "博闻科技",
+      "list_date": "19951208",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.601198",
+      "stock_code": "601198",
+      "stock_name": "东兴证券",
+      "list_date": "20150226",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.601375",
+      "stock_code": "601375",
+      "stock_name": "中原证券",
+      "list_date": "20170103",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.601615",
+      "stock_code": "601615",
+      "stock_name": "明阳智能",
+      "list_date": "20190123",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603103",
+      "stock_code": "603103",
+      "stock_name": "横店影视",
+      "list_date": "20171012",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603135",
+      "stock_code": "603135",
+      "stock_name": "中重科技",
+      "list_date": "20230410",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603139",
+      "stock_code": "603139",
+      "stock_name": "康惠股份",
+      "list_date": "20170421",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603216",
+      "stock_code": "603216",
+      "stock_name": "梦天家居",
+      "list_date": "20211215",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603222",
+      "stock_code": "603222",
+      "stock_name": "济民健康",
+      "list_date": "20150217",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603308",
+      "stock_code": "603308",
+      "stock_name": "应流股份",
+      "list_date": "20140122",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603666",
+      "stock_code": "603666",
+      "stock_name": "亿嘉和",
+      "list_date": "20180612",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603912",
+      "stock_code": "603912",
+      "stock_name": "佳力图",
+      "list_date": "20171101",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603960",
+      "stock_code": "603960",
+      "stock_name": "克来机电",
+      "list_date": "20170314",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.603986",
+      "stock_code": "603986",
+      "stock_name": "兆易创新",
+      "list_date": "20160818",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.605009",
+      "stock_code": "605009",
+      "stock_name": "豪悦护理",
+      "list_date": "20200911",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.605499",
+      "stock_code": "605499",
+      "stock_name": "东鹏饮料",
+      "list_date": "20210527",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.605588",
+      "stock_code": "605588",
+      "stock_name": "冠石科技",
+      "list_date": "20210812",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688001",
+      "stock_code": "688001",
+      "stock_name": "华兴源创",
+      "list_date": "20190722",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688091",
+      "stock_code": "688091",
+      "stock_name": "上海谊众",
+      "list_date": "20210909",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688131",
+      "stock_code": "688131",
+      "stock_name": "皓元医药",
+      "list_date": "20210608",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688178",
+      "stock_code": "688178",
+      "stock_name": "万德斯",
+      "list_date": "20200114",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688207",
+      "stock_code": "688207",
+      "stock_name": "格灵深瞳",
+      "list_date": "20220317",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688368",
+      "stock_code": "688368",
+      "stock_name": "晶丰明源",
+      "list_date": "20191014",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688375",
+      "stock_code": "688375",
+      "stock_name": "国博电子",
+      "list_date": "20220722",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688420",
+      "stock_code": "688420",
+      "stock_name": "美腾科技",
+      "list_date": "20221209",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688660",
+      "stock_code": "688660",
+      "stock_name": "电气风电",
+      "list_date": "20210519",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.688662",
+      "stock_code": "688662",
+      "stock_name": "富信科技",
+      "list_date": "20210401",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000007",
+      "stock_code": "000007",
+      "stock_name": "全新好",
+      "list_date": "19920413",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000042",
+      "stock_code": "000042",
+      "stock_name": "中洲控股",
+      "list_date": "19940921",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000498",
+      "stock_code": "000498",
+      "stock_name": "山东路桥",
+      "list_date": "19970609",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000517",
+      "stock_code": "000517",
+      "stock_name": "荣安地产",
+      "list_date": "19930806",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000701",
+      "stock_code": "000701",
+      "stock_name": "厦门信达",
+      "list_date": "19970226",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000813",
+      "stock_code": "000813",
+      "stock_name": "德展健康",
+      "list_date": "19980519",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.000923",
+      "stock_code": "000923",
+      "stock_name": "河钢资源",
+      "list_date": "19990714",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.001279",
+      "stock_code": "001279",
+      "stock_name": "强邦新材",
+      "list_date": "20241011",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002066",
+      "stock_code": "002066",
+      "stock_name": "瑞泰科技",
+      "list_date": "20060823",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002164",
+      "stock_code": "002164",
+      "stock_name": "宁波东力",
+      "list_date": "20070823",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002396",
+      "stock_code": "002396",
+      "stock_name": "星网锐捷",
+      "list_date": "20100623",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002491",
+      "stock_code": "002491",
+      "stock_name": "通鼎互联",
+      "list_date": "20101021",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002673",
+      "stock_code": "002673",
+      "stock_name": "西部证券",
+      "list_date": "20120503",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002833",
+      "stock_code": "002833",
+      "stock_name": "弘亚数控",
+      "list_date": "20161228",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002878",
+      "stock_code": "002878",
+      "stock_name": "元隆雅图",
+      "list_date": "20170606",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.002918",
+      "stock_code": "002918",
+      "stock_name": "蒙娜丽莎",
+      "list_date": "20171219",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300014",
+      "stock_code": "300014",
+      "stock_name": "亿纬锂能",
+      "list_date": "20091030",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300056",
+      "stock_code": "300056",
+      "stock_name": "中创环保",
+      "list_date": "20100226",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300077",
+      "stock_code": "300077",
+      "stock_name": "国民技术",
+      "list_date": "20100430",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300100",
+      "stock_code": "300100",
+      "stock_name": "双林股份",
+      "list_date": "20100806",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300213",
+      "stock_code": "300213",
+      "stock_name": "佳讯飞鸿",
+      "list_date": "20110505",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300241",
+      "stock_code": "300241",
+      "stock_name": "瑞丰光电",
+      "list_date": "20110712",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300270",
+      "stock_code": "300270",
+      "stock_name": "中威电子",
+      "list_date": "20111012",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300378",
+      "stock_code": "300378",
+      "stock_name": "鼎捷数智",
+      "list_date": "20140127",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300397",
+      "stock_code": "300397",
+      "stock_name": "天和防务",
+      "list_date": "20140910",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300537",
+      "stock_code": "300537",
+      "stock_name": "广信材料",
+      "list_date": "20160830",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300542",
+      "stock_code": "300542",
+      "stock_name": "新晨科技",
+      "list_date": "20160920",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300546",
+      "stock_code": "300546",
+      "stock_name": "雄帝科技",
+      "list_date": "20160928",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300578",
+      "stock_code": "300578",
+      "stock_name": "会畅科技",
+      "list_date": "20170125",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300583",
+      "stock_code": "300583",
+      "stock_name": "赛托生物",
+      "list_date": "20170106",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300626",
+      "stock_code": "300626",
+      "stock_name": "华瑞股份",
+      "list_date": "20170320",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300636",
+      "stock_code": "300636",
+      "stock_name": "同和药业",
+      "list_date": "20170331",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300741",
+      "stock_code": "300741",
+      "stock_name": "华宝股份",
+      "list_date": "20180301",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.300834",
+      "stock_code": "300834",
+      "stock_name": "星辉环材",
+      "list_date": "20220113",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.301129",
+      "stock_code": "301129",
+      "stock_name": "瑞纳智能",
+      "list_date": "20211102",
+      "category": "random"
+    },
+    {
+      "ts_code": "sz.301137",
+      "stock_code": "301137",
+      "stock_name": "哈焊华通",
+      "list_date": "20220322",
+      "category": "random"
+    },
+    {
+      "ts_code": "sh.600525",
+      "stock_code": "600525",
+      "stock_name": "ST长园",
+      "list_date": "20021202",
+      "category": "st"
+    },
+    {
+      "ts_code": "sh.600543",
+      "stock_code": "600543",
+      "stock_name": "*ST莫高",
+      "list_date": "20040324",
+      "category": "st"
+    },
+    {
+      "ts_code": "sh.603189",
+      "stock_code": "603189",
+      "stock_name": "*ST网达",
+      "list_date": "20160914",
+      "category": "st"
+    },
+    {
+      "ts_code": "sh.603789",
+      "stock_code": "603789",
+      "stock_name": "ST星农",
+      "list_date": "20150427",
+      "category": "st"
+    },
+    {
+      "ts_code": "sh.688201",
+      "stock_code": "688201",
+      "stock_name": "ST信安",
+      "list_date": "20210421",
+      "category": "st"
+    },
+    {
+      "ts_code": "sz.000639",
+      "stock_code": "000639",
+      "stock_name": "ST西王",
+      "list_date": "19961126",
+      "category": "st"
+    },
+    {
+      "ts_code": "sz.300167",
+      "stock_code": "300167",
+      "stock_name": "ST迪威迅",
+      "list_date": "20110125",
+      "category": "st"
+    },
+    {
+      "ts_code": "sz.300205",
+      "stock_code": "300205",
+      "stock_name": "*ST天喻",
+      "list_date": "20110421",
+      "category": "st"
+    },
+    {
+      "ts_code": "sz.300290",
+      "stock_code": "300290",
+      "stock_name": "ST荣科",
+      "list_date": "20120216",
+      "category": "st"
+    },
+    {
+      "ts_code": "sz.300366",
+      "stock_code": "300366",
+      "stock_name": "ST创意",
+      "list_date": "20140127",
+      "category": "st"
+    }
+  ]
+}
