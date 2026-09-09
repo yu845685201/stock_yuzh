@@ -208,3 +208,7 @@ __marimo__/
 
 prod/
 uat/
+
+# 跑数中间产物：断点 manifest、G3 对账基线锚点、CSV 落地文件
+# 本地必须保留（G3 对账依赖 baseline_*.json），但不纳入版本控制
+backend/tmp/
