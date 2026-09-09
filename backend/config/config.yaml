@@ -110,6 +110,9 @@ sync:
   kline_day_detect_threshold_abs: 0.01     # 除权检测绝对阈值（元）
   kline_day_detect_threshold_pct: 0.002    # 除权检测相对阈值（占价格比例）
   kline_day_raw_match_tolerance: 0.005     # 原始域不可变校验容差（元）
+  # 中间件增强路径开关（V3.0 M-C）：true=qfq走/api/kline-qfq缓存、raw尾部走/api/kline-recent；
+  # false=保持 V2.0 直连路径（/api/kline-history + /api/kline-all）。验证通过前保持 false
+  kline_day_use_enhanced_api: false
   kline_1min_upsert_batch_size: 2000
   kline_1min_db_max_writers: 4
   kline_1min_staging_batch_size: 20000

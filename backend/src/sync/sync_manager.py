@@ -67,6 +67,8 @@ class SyncManager:
         # 初始化Tdx API数据源
         if self.config_manager.get('data_sources.tdx_api.enabled', True):
             tdx_api_config = self.config_manager.get('data_sources.tdx_api', {})
+            # 中间件增强路径开关（V3.0 M-C），false 时保持 V2.0 直连路径
+            tdx_api_config['use_enhanced_api'] = self.config_manager.get('sync.kline_day_use_enhanced_api', False)
             self.tdx_api_source = TdxApiSource(tdx_api_config)
 
         # 初始化基本面数据管理器
@@ -419,7 +421,8 @@ class SyncManager:
                         stock_detection_details.append({'ts_code': ts_code, **detail})
                         logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
                         refetch_start = time.time()
-                        qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code)
+                        # 增强路径下必须 refresh=True 绕过缓存回源，否则从同一份失效缓存取回同样错位的数据
+                        qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code, refresh=True)
                         raw_list = self.tdx_api_source.get_kline_raw_full(stock_code)
                         local_api_time += time.time() - refetch_start
                         merged_records = self._merge_kline_day_sources(qfq_list, raw_list)

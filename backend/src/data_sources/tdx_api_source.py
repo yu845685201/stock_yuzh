@@ -21,6 +21,8 @@ class TdxApiSource(DataSourceBase):
         super().__init__(config)
         self.base_url = (config.get('base_url') or '').rstrip('/')
         self.timeout = config.get('timeout', 30)
+        # 中间件增强路径开关（V3.0 M-C）：true 时尾部/全量请求走 /api/kline-qfq、/api/kline-recent 新接口
+        self.use_enhanced_api = bool(config.get('use_enhanced_api', False))
 
         rate_limit_config = config.get('rate_limit', {})
         if rate_limit_config.get('enabled', True):
@@ -98,9 +100,20 @@ class TdxApiSource(DataSourceBase):
         logger.error(f"Tdx API重试耗尽: {url} params={params} error={last_error}")
         return None
 
-    def get_kline_qfq_full(self, code: str) -> List[Dict[str, Any]]:
-        """前复权日K全量（/api/kline type=day，同花顺源，无 amount）"""
-        data = self._request('/api/kline', {'code': code, 'type': 'day'})
+    def get_kline_qfq_full(self, code: str, refresh: bool = False) -> List[Dict[str, Any]]:
+        """前复权日K全量
+
+        - 增强路径（use_enhanced_api=true）：/api/kline-qfq（缓存优先；refresh=true 时
+          绕过缓存回源并重建，调用方除权检测命中后的重拉必须传 refresh=true）
+        - 传统路径：/api/kline type=day（同花顺源，每次全量回源）
+        """
+        if self.use_enhanced_api:
+            params = {'code': code, 'type': 'day'}
+            if refresh:
+                params['refresh'] = 1
+            data = self._request('/api/kline-qfq', params)
+        else:
+            data = self._request('/api/kline', {'code': code, 'type': 'day'})
         return data if isinstance(data, list) else []
 
     def get_kline_raw_full(self, code: str) -> List[Dict[str, Any]]:
@@ -109,13 +122,27 @@ class TdxApiSource(DataSourceBase):
         return data if isinstance(data, list) else []
 
     def get_kline_qfq_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """前复权日K尾部（/api/kline-history，日期参数中间件未实现，仅最近N条）"""
-        data = self._request('/api/kline-history', {'code': code, 'type': 'day', 'limit': limit})
+        """前复权日K尾部
+
+        - 增强路径：/api/kline-qfq?limit=N（缓存命中约100ms）
+        - 传统路径：/api/kline-history（日期参数中间件未实现，仅最近N条，服务端全量回源）
+        """
+        if self.use_enhanced_api:
+            data = self._request('/api/kline-qfq', {'code': code, 'type': 'day', 'limit': limit})
+        else:
+            data = self._request('/api/kline-history', {'code': code, 'type': 'day', 'limit': limit})
         return data if isinstance(data, list) else []
 
     def get_kline_raw_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """原始日K尾部（/api/kline-all?limit=N，从最近截取，含真实 amount）"""
-        data = self._request('/api/kline-all', {'code': code, 'type': 'day', 'limit': limit})
+        """原始日K尾部（含真实 amount）
+
+        - 增强路径：/api/kline-recent?limit=N（单次协议请求，约50ms）
+        - 传统路径：/api/kline-all?limit=N（服务端全量拼接后截取）
+        """
+        if self.use_enhanced_api:
+            data = self._request('/api/kline-recent', {'code': code, 'type': 'day', 'limit': limit})
+        else:
+            data = self._request('/api/kline-all', {'code': code, 'type': 'day', 'limit': limit})
         return data if isinstance(data, list) else []
 
     def get_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
