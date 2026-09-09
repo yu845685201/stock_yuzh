@@ -1,3 +1,7 @@
+# 手工验证脚本：baostock 登录 + 日K取数连通性检查
+# 说明：本文件顶层直接执行，非 pytest 用例；命名为 manual_* 以免被 pytest 自动收集。
+# 运行：cd backend && python3 test/manual_check_kline.py
+
 import baostock as bs
 import pandas as pd
 

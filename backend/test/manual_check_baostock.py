@@ -1,3 +1,7 @@
+# 手工验证脚本：baostock 各接口连通性逐步检查
+# 说明：非 pytest 用例；命名为 manual_* 以免被 pytest 自动收集。
+# 运行：cd backend && python3 test/manual_check_baostock.py
+
 """
 baostock 接口连通性测试
 
