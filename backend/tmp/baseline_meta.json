@@ -1,0 +1,26 @@
+{
+  "snapshot_time": "20260905_232844",
+  "kline": {
+    "rows_total": "16652820",
+    "stocks": "5218",
+    "min_date": "19901219",
+    "max_date": "20260828",
+    "amount_null": "0",
+    "amount_zero": "704893",
+    "amount_pos": "15947927",
+    "raw_close_filled": "0"
+  },
+  "fundamentals": {
+    "rows_total": "225444",
+    "stocks": "5155",
+    "min_date": "20070331",
+    "max_date": "20250930"
+  },
+  "test_stock_count": 100,
+  "per_stock_covered": 100,
+  "dump_codes": {
+    "sz.000001": 8442,
+    "sh.600519": 5993,
+    "sz.000858": 6737
+  }
+}
