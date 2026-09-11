@@ -324,8 +324,9 @@ class SyncManager:
             stock_ts_codes = [s['ts_code'] for s in stocks if s.get('ts_code')]
 
             trade_dates: Optional[List[str]] = None
+            is_explicit_range = bool(start_date and end_date)
             if not init_mode:
-                if start_date and end_date:
+                if is_explicit_range:
                     trade_dates = self._get_trade_dates(start_date, end_date)
                 else:
                     today_str = date.today().strftime('%Y-%m-%d')
@@ -344,9 +345,21 @@ class SyncManager:
 
             total_stocks = len(stocks)
 
-            # 双源拉取模式：init/指定区间=双全量；日常=双尾部+除权检测
-            fetch_full = init_mode or bool(start_date and end_date)
+            # 双源拉取模式：init=双全量；日常/近期区间=双尾部；远期区间=双全量
+            # 判定原则：只要请求区间的起点落在最近 tail_window 个交易日内，就用 tail 覆盖，
+            # 不再拉全历史（~1MB/只），避免"补 1~2 天却全量拉取"压垮中间件。
             tail_limit = int(self.config_manager.get('sync.kline_day_tail_limit', 5))
+            tail_window = int(self.config_manager.get('sync.kline_day_tail_window', 10))
+            if init_mode:
+                fetch_full = True
+            else:
+                span_len = self._trade_span_to_today(min(trade_dates)) if trade_dates else 10 ** 6
+                if span_len <= tail_window:
+                    fetch_full = False
+                    # tail 需覆盖 起点→今日 的全部交易日，另留 2 根缓冲（今日 bar 可能尚未就绪）
+                    tail_limit = max(tail_limit, span_len + 2)
+                else:
+                    fetch_full = True
             detection = {'checked': 0, 'hits': 0, 'refetched': 0}
             detection_details = []
             source_missing = {'qfq_empty': 0, 'raw_empty': 0}
@@ -412,8 +425,9 @@ class SyncManager:
                 merged_records = self._merge_kline_day_sources(qfq_list, raw_list)
 
                 # ---- 日常增量的跨快照除权检测（命中→整股重拉自愈）----
+                # 仅日常增量执行：显式区间补齐不做整股重拉，避免触发全量回源
                 stock_detection = {'checked': 0, 'hits': 0, 'refetched': 0}
-                if not fetch_full and merged_records:
+                if not fetch_full and not is_explicit_range and merged_records:
                     hit, detail = self._detect_kline_day_refetch(ts_code, merged_records)
                     stock_detection['checked'] = 1
                     if hit:
@@ -902,6 +916,22 @@ class SyncManager:
             if calendar_date:
                 trade_dates.append(calendar_date.replace('-', ''))
         return trade_dates
+
+    def _trade_span_to_today(self, earliest: str) -> int:
+        """返回 earliest(YYYYMMDD) 到今日（含）之间的交易日数量。
+
+        用于判断某日期区间能否由 tail（最近 N 个交易日）覆盖。解析失败返回一个大数，
+        使调用方退化为全量拉取（安全兜底）。
+        """
+        d = (earliest or '').replace('-', '')
+        if len(d) != 8 or not d.isdigit():
+            return 10 ** 6
+        earliest_dash = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+        today_str = date.today().strftime('%Y-%m-%d')
+        if earliest_dash > today_str:
+            return 0
+        return len(self._get_trade_dates(earliest_dash, today_str))
 
     def _build_fundamentals_map(
         self,

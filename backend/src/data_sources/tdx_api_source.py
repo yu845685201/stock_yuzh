@@ -5,6 +5,7 @@ Tdx API数据源实现 - 用于获取K线数据
 import logging
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -12,6 +13,10 @@ from .base import DataSourceBase
 from ..utils.api_rate_limiter import ApiRateLimiter
 
 logger = logging.getLogger(__name__)
+
+# 本地中间件主机名：这些地址必须绕过系统代理
+# （沙箱/CI 环境常注入 HTTP_PROXY，会把 127.0.0.1 的请求也劫持到代理，导致大面积 ProxyError）
+_LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1', '0.0.0.0'}
 
 
 class TdxApiSource(DataSourceBase):
@@ -21,6 +26,8 @@ class TdxApiSource(DataSourceBase):
         super().__init__(config)
         self.base_url = (config.get('base_url') or '').rstrip('/')
         self.timeout = config.get('timeout', 30)
+        # 本地中间件地址：请求显式绕过系统代理（见 _LOCAL_HOSTS 注释）
+        self._bypass_proxy = urlparse(self.base_url).hostname in _LOCAL_HOSTS
         # 中间件增强路径开关（V3.0 M-C）：true 时尾部/全量请求走 /api/kline-qfq、/api/kline-recent 新接口
         self.use_enhanced_api = bool(config.get('use_enhanced_api', False))
 
@@ -63,7 +70,11 @@ class TdxApiSource(DataSourceBase):
                 self.rate_limiter.wait_if_needed()
 
             try:
-                resp = requests.get(url, params=params, timeout=self.timeout)
+                # 本地中间件不走系统代理：显式传 proxies，避免被 HTTP_PROXY 劫持
+                resp = requests.get(
+                    url, params=params, timeout=self.timeout,
+                    proxies={'http': None, 'https': None} if self._bypass_proxy else None
+                )
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as e:

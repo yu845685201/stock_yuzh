@@ -107,6 +107,7 @@ sync:
   kline_stock_batch_size: 1000
   # 日K双源三模式配置（V3.0 方案）
   kline_day_tail_limit: 5                  # 日常增量拉取的尾部条数
+  kline_day_tail_window: 10                # 区间起点落在最近N个交易日内时改用tail（避免小范围补齐触发全量拉取）
   kline_day_detect_threshold_abs: 0.01     # 除权检测绝对阈值（元）
   kline_day_detect_threshold_pct: 0.002    # 除权检测相对阈值（占价格比例）
   kline_day_raw_match_tolerance: 0.005     # 原始域不可变校验容差（元）
