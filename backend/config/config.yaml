@@ -139,6 +139,25 @@ sync:
   fundamentals_rebuild_call_sleep: 0.6     # 每次季度调用间隔（秒）
   fundamentals_rebuild_recycle_calls: 1000 # 每 N 次调用回收会话（重新登录）
 
+# 技术分析链配置（doc/技术分析链方案设计.MD）
+analysis:
+  # CSV / 进度文件 / 运行元信息输出目录（相对仓库根 stock_yuzh/，或绝对路径）
+  output_dir: uat/data/analysis
+  # 分析窗口（仅加载锚定日往前多久的日K线）由「链 YAML 的 lookback 字段」决定，
+  # 默认 1y；此处不重复配置，避免两处口径冲突。
+  # 前复权断裂判定容差（百分点）：|change_rate| > 制度上限 + 容差 即判为断裂
+  break_tolerance_pct: 0.6
+  # 是否执行「缺行」检测
+  check_missing_day: true
+  # 缺行分流模式：
+  #   gap = 只把「孤立单日缺行」判为存疑；连续≥2交易日缺行按疑似停牌处理（不计存疑，仅记入 meta）
+  #   all = 方案原文行为，所有交易日缺行都判为存疑
+  #   off = 不做缺行检测
+  missing_day_mode: gap
+  # 进度输出间隔：每 N 只股票 或 每 M%，先到者为准
+  progress_interval_stocks: 200
+  progress_interval_percent: 5.0
+
 # CSV文件管理配置
 csv:
   file_management:

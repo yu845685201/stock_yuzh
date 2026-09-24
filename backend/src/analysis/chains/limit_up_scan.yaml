@@ -1,0 +1,16 @@
+# 分析链：涨停扫描
+#
+# 一条链一个文件，文件名即链名；analyze run 必须用 --chain limit_up_scan 显式引用（无默认链）。
+# modules 列表顺序 = 执行顺序（首批模块相互独立，顺序不影响结果）。
+chain: limit_up_scan
+description: 涨停扫描链：锚定日是否涨停 + 连续涨停数
+
+# 分析窗口：仅加载锚定日往前该区间的日K线（默认 1y = 最近 1 年）。
+# 支持：1y / 2y（自然年）、6m / 3m（自然月）、250d（交易日）、纯数字(交易日)、0 或 all（全历史）。
+# 实际窗口 = max(本字段, 各模块 max_lookback)，模块回看需求不会被截断。
+lookback: 1y
+
+modules:
+  - name: limit_up_today          # 是否涨停（锚定日）
+  - name: consecutive_limit_up    # 连续涨停数
+    params: {max_lookback: 60}

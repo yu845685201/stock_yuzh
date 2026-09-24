@@ -14,6 +14,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 from src.config import ConfigManager
 from src.sync import SyncManager
 from src.database import DatabaseConnection
+from src.cli.analysis_cli import analyze
 
 
 def setup_logging():
@@ -34,6 +35,10 @@ def cli(ctx, env):
     ctx.ensure_object(dict)
     ctx.obj['env'] = env
     ctx.obj['config_manager'] = ConfigManager(env=env)
+
+
+# 技术分析链命令组（analyze run / list-chains / list-modules / progress）
+cli.add_command(analyze)
 
 
 @cli.command()
