@@ -28,6 +28,7 @@ from ..kline_1min.adapters import (
 )
 from ..kline_1min.usecase import Kline1MinSyncUseCase
 from .kline_rise_25pre import generate_kline_rise_25pre
+from .report_writer import write_markdown_report
 
 class SyncManager:
     """数据同步管理器"""
@@ -1143,37 +1144,22 @@ class SyncManager:
         return generate_kline_rise_25pre(kline_rows)
 
     def _write_anal_kline_report(self, result: Dict[str, Any], timing: Dict[str, Any]) -> Optional[str]:
-        try:
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-            report_dir = os.path.join(repo_root, 'doc', 'reports')
-            os.makedirs(report_dir, exist_ok=True)
-
-            filename = f"anal_kline_rise_25pre_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            report_path = os.path.join(report_dir, filename)
-
-            lines = [
-                "# 立体K线数据生成报告",
-                "",
-                "## 同步概览",
-                f"- 成功: {'是' if result.get('success') else '否'}",
-                f"- 记录数: {result.get('records', 0)}",
-                f"- 写库行数: {result.get('db_rows', 0)}",
-                "",
-                "## 性能信息",
-                f"- K线数据查询耗时: {timing.get('query_time', 0)} 秒",
-                f"- 立体K线生成耗时: {timing.get('gen_time', 0)} 秒",
-                f"- 写库耗时: {timing.get('db_time', 0)} 秒",
-                f"- 总耗时: {timing.get('total_time', 0)} 秒",
-                ""
-            ]
-
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-
-            return report_path
-        except Exception as e:
-            self.logger.error(f"生成立体K线报告失败: {e}")
-            return None
+        lines = [
+            "# 立体K线数据生成报告",
+            "",
+            "## 同步概览",
+            f"- 成功: {'是' if result.get('success') else '否'}",
+            f"- 记录数: {result.get('records', 0)}",
+            f"- 写库行数: {result.get('db_rows', 0)}",
+            "",
+            "## 性能信息",
+            f"- K线数据查询耗时: {timing.get('query_time', 0)} 秒",
+            f"- 立体K线生成耗时: {timing.get('gen_time', 0)} 秒",
+            f"- 写库耗时: {timing.get('db_time', 0)} 秒",
+            f"- 总耗时: {timing.get('total_time', 0)} 秒",
+            ""
+        ]
+        return write_markdown_report(lines, 'anal_kline_rise_25pre_report', log_label='立体K线报告')
 
     def _log_progress(
         self,
@@ -1301,88 +1287,74 @@ class SyncManager:
         anomalies: List[Dict[str, Any]],
         timing: Dict[str, Any]
     ) -> Optional[str]:
-        try:
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-            report_dir = os.path.join(repo_root, 'doc', 'reports')
-            os.makedirs(report_dir, exist_ok=True)
+        lines = [
+            "# 1分钟K线数据同步报告",
+            "",
+            "## 同步概览",
+            f"- 成功: {'是' if result.get('success') else '否'}",
+            f"- 记录数: {result.get('records', 0)}",
+            f"- 写库行数: {result.get('db_rows', 0)}",
+            "",
+            "## 性能信息",
+            f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
+            f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
+            f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
+            f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
+            f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
+            f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
+            f"- 流水线墙钟耗时: {timing.get('pipeline_wall', 0)} 秒",
+            f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
+            f"- COPY耗时: {timing.get('copy_time', 0)} 秒",
+            f"- COPY写入行数: {timing.get('copy_rows', 0)}",
+            f"- COPY是否启用: {'是' if timing.get('copy_used') else '否'}",
+            f"- 分区清理模式: {timing.get('partition_cleanup_mode', '')}",
+            f"- 流水线是否启用: {'是' if timing.get('pipeline_enabled') else '否'}",
+            f"- 流水线采集线程数: {timing.get('pipeline_fetch_workers', 0)}",
+            f"- 流水线归一化线程数: {timing.get('pipeline_normalize_workers', 0)}",
+            f"- 流水线写入线程数: {timing.get('pipeline_write_workers', 0)}",
+            f"- db_time/records(秒/条): {timing.get('db_time_per_record', 0)}",
+            f"- db_wall/total_time: {timing.get('db_wall_ratio', 0)}",
+            f"- 并发线程数: {timing.get('parallel', 1)}",
+            f"- 股票批次大小: {timing.get('stock_batch_size', 1000)}",
+            f"- 入库并发写数: {timing.get('db_max_writers', 2)}",
+            f"- 异常样本上限: {timing.get('anomaly_limit', 0)}",
+            f"- 异常样本省略数: {timing.get('anomaly_omitted', 0)}",
+            ""
+        ]
 
-            filename = f"kline_1min_sync_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            report_path = os.path.join(report_dir, filename)
-
-            lines = [
-                "# 1分钟K线数据同步报告",
+        failed_dates = result.get('failed_dates') or []
+        if failed_dates:
+            lines.extend([
+                "## 失败日期",
                 "",
-                "## 同步概览",
-                f"- 成功: {'是' if result.get('success') else '否'}",
-                f"- 记录数: {result.get('records', 0)}",
-                f"- 写库行数: {result.get('db_rows', 0)}",
+                "| trade_date |",
+                "| --- |"
+            ])
+            for item in failed_dates:
+                lines.append(f"| {item} |")
+        else:
+            lines.append("## 失败日期")
+            lines.append("")
+            lines.append("- 无失败日期")
+
+        if anomalies:
+            lines.extend([
+                "## 异常数据",
                 "",
-                "## 性能信息",
-                f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
-                f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
-                f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
-                f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
-                f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
-                f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
-                f"- 流水线墙钟耗时: {timing.get('pipeline_wall', 0)} 秒",
-                f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
-                f"- COPY耗时: {timing.get('copy_time', 0)} 秒",
-                f"- COPY写入行数: {timing.get('copy_rows', 0)}",
-                f"- COPY是否启用: {'是' if timing.get('copy_used') else '否'}",
-                f"- 分区清理模式: {timing.get('partition_cleanup_mode', '')}",
-                f"- 流水线是否启用: {'是' if timing.get('pipeline_enabled') else '否'}",
-                f"- 流水线采集线程数: {timing.get('pipeline_fetch_workers', 0)}",
-                f"- 流水线归一化线程数: {timing.get('pipeline_normalize_workers', 0)}",
-                f"- 流水线写入线程数: {timing.get('pipeline_write_workers', 0)}",
-                f"- db_time/records(秒/条): {timing.get('db_time_per_record', 0)}",
-                f"- db_wall/total_time: {timing.get('db_wall_ratio', 0)}",
-                f"- 并发线程数: {timing.get('parallel', 1)}",
-                f"- 股票批次大小: {timing.get('stock_batch_size', 1000)}",
-                f"- 入库并发写数: {timing.get('db_max_writers', 2)}",
-                f"- 异常样本上限: {timing.get('anomaly_limit', 0)}",
-                f"- 异常样本省略数: {timing.get('anomaly_omitted', 0)}",
-                ""
-            ]
+                "| ts_code | trade_date | trade_time | change_rate | limit_rate |",
+                "| --- | --- | --- | --- | --- |"
+            ])
+            for item in anomalies:
+                lines.append(
+                    f"| {item.get('ts_code')} | {item.get('trade_date')} | {item.get('trade_time')} | "
+                    f"{item.get('change_rate')} | {item.get('limit_rate')} |"
+                )
+        else:
+            lines.append("## 异常数据")
+            lines.append("")
+            lines.append("- 无异常数据")
 
-            failed_dates = result.get('failed_dates') or []
-            if failed_dates:
-                lines.extend([
-                    "## 失败日期",
-                    "",
-                    "| trade_date |",
-                    "| --- |"
-                ])
-                for item in failed_dates:
-                    lines.append(f"| {item} |")
-            else:
-                lines.append("## 失败日期")
-                lines.append("")
-                lines.append("- 无失败日期")
-
-            if anomalies:
-                lines.extend([
-                    "## 异常数据",
-                    "",
-                    "| ts_code | trade_date | trade_time | change_rate | limit_rate |",
-                    "| --- | --- | --- | --- | --- |"
-                ])
-                for item in anomalies:
-                    lines.append(
-                        f"| {item.get('ts_code')} | {item.get('trade_date')} | {item.get('trade_time')} | "
-                        f"{item.get('change_rate')} | {item.get('limit_rate')} |"
-                    )
-            else:
-                lines.append("## 异常数据")
-                lines.append("")
-                lines.append("- 无异常数据")
-
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-
-            return report_path
-        except Exception as e:
-            self.logger.error(f"生成1分钟K线同步报告失败: {e}")
-            return None
+        return write_markdown_report(lines, 'kline_1min_sync_report', log_label='1分钟K线同步报告')
 
     def _write_kline_day_report(
         self,
@@ -1390,64 +1362,50 @@ class SyncManager:
         anomalies: List[Dict[str, Any]],
         timing: Dict[str, Any]
     ) -> Optional[str]:
-        try:
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-            report_dir = os.path.join(repo_root, 'doc', 'reports')
-            os.makedirs(report_dir, exist_ok=True)
+        lines = [
+            "# 日K线数据同步报告",
+            "",
+            "## 同步概览",
+            f"- 成功: {'是' if result.get('success') else '否'}",
+            f"- 记录数: {result.get('records', 0)}",
+            f"- 写库行数: {result.get('db_rows', 0)}",
+            f"- 失败股票: {result.get('failed_stocks', 0)}",
+            "",
+            "## 双源与除权检测（V3.0）",
+            f"- 除权检测: 检查 {result.get('detection', {}).get('checked', 0)} 只，"
+            f"命中 {result.get('detection', {}).get('hits', 0)}，"
+            f"整股重拉 {result.get('detection', {}).get('refetched', 0)}",
+            f"- 数据源缺失: 前复权空 {result.get('source_missing', {}).get('qfq_empty', 0)} 只，"
+            f"原始域空 {result.get('source_missing', {}).get('raw_empty', 0)} 只",
+            "",
+            "## 性能信息",
+            f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
+            f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
+            f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
+            f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
+            f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
+            f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
+            f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
+            f"- 并发线程数: {timing.get('parallel', 1)}",
+            f"- 股票批次大小: {timing.get('stock_batch_size', 1000)}",
+            ""
+        ]
 
-            filename = f"kline_day_sync_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            report_path = os.path.join(report_dir, filename)
-
-            lines = [
-                "# 日K线数据同步报告",
+        if anomalies:
+            lines.extend([
+                "## 异常数据",
                 "",
-                "## 同步概览",
-                f"- 成功: {'是' if result.get('success') else '否'}",
-                f"- 记录数: {result.get('records', 0)}",
-                f"- 写库行数: {result.get('db_rows', 0)}",
-                f"- 失败股票: {result.get('failed_stocks', 0)}",
-                "",
-                "## 双源与除权检测（V3.0）",
-                f"- 除权检测: 检查 {result.get('detection', {}).get('checked', 0)} 只，"
-                f"命中 {result.get('detection', {}).get('hits', 0)}，"
-                f"整股重拉 {result.get('detection', {}).get('refetched', 0)}",
-                f"- 数据源缺失: 前复权空 {result.get('source_missing', {}).get('qfq_empty', 0)} 只，"
-                f"原始域空 {result.get('source_missing', {}).get('raw_empty', 0)} 只",
-                "",
-                "## 性能信息",
-                f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
-                f"- CSV累计耗时: {timing.get('csv_time', 0)} 秒",
-                f"- 写库累计耗时: {timing.get('db_time', 0)} 秒",
-                f"- tdx-api实际耗时(墙钟): {timing.get('api_wall', 0)} 秒",
-                f"- CSV实际耗时(墙钟): {timing.get('csv_wall', 0)} 秒",
-                f"- 写库实际耗时(墙钟): {timing.get('db_wall', 0)} 秒",
-                f"- 总耗时(墙钟): {timing.get('total_time', 0)} 秒",
-                f"- 并发线程数: {timing.get('parallel', 1)}",
-                f"- 股票批次大小: {timing.get('stock_batch_size', 1000)}",
-                ""
-            ]
+                "| ts_code | trade_date | change_rate | limit_rate |",
+                "| --- | --- | --- | --- |"
+            ])
+            for item in anomalies:
+                lines.append(
+                    f"| {item.get('ts_code')} | {item.get('trade_date')} | "
+                    f"{item.get('change_rate')} | {item.get('limit_rate')} |"
+                )
+        else:
+            lines.append("## 异常数据")
+            lines.append("")
+            lines.append("- 无异常数据")
 
-            if anomalies:
-                lines.extend([
-                    "## 异常数据",
-                    "",
-                    "| ts_code | trade_date | change_rate | limit_rate |",
-                    "| --- | --- | --- | --- |"
-                ])
-                for item in anomalies:
-                    lines.append(
-                        f"| {item.get('ts_code')} | {item.get('trade_date')} | "
-                        f"{item.get('change_rate')} | {item.get('limit_rate')} |"
-                    )
-            else:
-                lines.append("## 异常数据")
-                lines.append("")
-                lines.append("- 无异常数据")
-
-            with open(report_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-
-            return report_path
-        except Exception as e:
-            self.logger.error(f"生成日K线同步报告失败: {e}")
-            return None
+        return write_markdown_report(lines, 'kline_day_sync_report', log_label='日K线同步报告')

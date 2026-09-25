@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..config.config_manager import ConfigManager
 from ..database.connection import DatabaseConnection
 from ..data_sources.baostock_source import BaostockSource, BaostockBlacklistError
+from .report_writer import write_markdown_report
 
 
 class BaostockNetworkDeadError(RuntimeError):
@@ -323,18 +324,19 @@ class FundamentalsRebuildManager:
 
     def _write_report(self, result: Dict[str, Any], manifest: Dict[str, Any], total_tasks: int) -> Optional[str]:
         stats = result['stats']
-        report_dir = ROOT.parent / 'doc' / 'reports'
-        report_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = report_dir / f'fundamentals_rebuild_report_{ts}.md'
         duration_min = result.get('duration', 0) / 60
-        path.write_text(f"""# 基本面全量重刷报告 {ts}
-
-- 状态：{'成功' if result['success'] else '异常终止'}
-- 任务：{total_tasks} 只股票（本轮完成 {stats['stocks_done']}，跳过 {stats['stocks_skipped']}）
-- 季度调用：{stats['calls']}；upsert 记录：{stats['records']}
-- 零记录二次重试找回：{stats['stocks_zero_retry']}；失败股票：{stats['failed_stocks']}
-- manifest：{self.manifest_path}（已完成 {len(manifest['completed'])}，失败 {len(manifest['failed'])}）
-- 耗时：{duration_min:.0f} 分钟
-""", encoding='utf-8')
-        return str(path)
+        lines = [
+            f"# 基本面全量重刷报告 {ts}",
+            "",
+            f"- 状态：{'成功' if result['success'] else '异常终止'}",
+            f"- 任务：{total_tasks} 只股票（本轮完成 {stats['stocks_done']}，跳过 {stats['stocks_skipped']}）",
+            f"- 季度调用：{stats['calls']}；upsert 记录：{stats['records']}",
+            f"- 零记录二次重试找回：{stats['stocks_zero_retry']}；失败股票：{stats['failed_stocks']}",
+            f"- manifest：{self.manifest_path}（已完成 {len(manifest['completed'])}，失败 {len(manifest['failed'])}）",
+            f"- 耗时：{duration_min:.0f} 分钟",
+            "",
+        ]
+        return write_markdown_report(
+            lines, 'fundamentals_rebuild_report', log_label='基本面重刷报告', ts=ts
+        )
