@@ -14,6 +14,7 @@ from ..data_sources.baostock_source import BaostockSource
 from ..sync.csv_writer import CsvWriter
 from ..models.collection_result import CollectionResult, CollectionStatistics, CollectionStatus
 from ..utils.progress_formatter import ProgressFormatter
+from .fundamentals_common import expand_quarters, slice_batch, extract_disclosure_date_str, render_stock_progress, persist_batch
 
 
 class FundamentalsManager:
@@ -97,23 +98,11 @@ class FundamentalsManager:
 
             # 如果指定了批次，进行批次过滤
             if batch is not None and init_mode:
-                # 计算总批次数
-                total_batches = (len(stocks) + batch_size - 1) // batch_size
-
-                # 验证批次范围
-                if batch > total_batches:
-                    error_msg = f"批次编号超出范围: 请求批次{batch}，但总共只有{total_batches}个批次（共{len(stocks)}只股票，批次大小{batch_size}）"
+                error_msg, _total_batches, stocks = slice_batch(stocks, batch, batch_size, self.logger)
+                if error_msg:
                     self.logger.error(error_msg)
                     stats['error'] = error_msg
                     return stats
-
-                # 计算批次的起始和结束索引
-                start_idx = (batch - 1) * batch_size
-                end_idx = min(batch * batch_size, len(stocks))
-
-                # 切片获取该批次的股票
-                stocks = stocks[start_idx:end_idx]
-                self.logger.info(f"批次过滤: 批次{batch}/{total_batches}，处理股票索引{start_idx}-{end_idx-1}，共{len(stocks)}只股票")
 
             stats['total_stocks'] = len(stocks)
 
@@ -173,36 +162,29 @@ class FundamentalsManager:
 
                         # 提取披露日期(从第一条或唯一的数据中)
                         first_data = collection_result.data[0] if isinstance(collection_result.data, list) else collection_result.data
-                        disclosure_date = first_data.get('disclosure_date', '')
-                        if hasattr(disclosure_date, 'strftime'):
-                            disclosure_date_str = disclosure_date.strftime('%Y%m%d')
-                        else:
-                            disclosure_date_str = str(disclosure_date) if disclosure_date else ''
 
-                        # 使用formatter格式化进度信息
-                        progress_msg = self.progress_formatter.format_progress(
+                        progress_msg = render_stock_progress(
+                            self.progress_formatter,
+                            CollectionStatus.SUCCESS,
                             current=i + 1,
                             total=len(stocks),
-                            ts_code=stock['ts_code'],
-                            stock_name=stock['stock_name'],
-                            status=CollectionStatus.SUCCESS,
+                            stock=stock,
                             elapsed_time=baostock_time,
                             batch_num=batch_num,
                             total_batches=total_batches,
-                            disclosure_date=disclosure_date_str
+                            disclosure_date_str=extract_disclosure_date_str(first_data)
                         )
                         self.logger.info(progress_msg)
 
                     elif collection_result.is_no_data:
                         stats['no_data'] += 1
 
-                        # 无数据状态进度
-                        progress_msg = self.progress_formatter.format_progress(
+                        progress_msg = render_stock_progress(
+                            self.progress_formatter,
+                            CollectionStatus.NO_DATA,
                             current=i + 1,
                             total=len(stocks),
-                            ts_code=stock['ts_code'],
-                            stock_name=stock['stock_name'],
-                            status=CollectionStatus.NO_DATA,
+                            stock=stock,
                             elapsed_time=baostock_time,
                             batch_num=batch_num,
                             total_batches=total_batches
@@ -213,13 +195,12 @@ class FundamentalsManager:
                         stats['error_count'] += 1
                         stats['failed'] += 1  # 保持向后兼容
 
-                        # 错误状态进度
-                        progress_msg = self.progress_formatter.format_progress(
+                        progress_msg = render_stock_progress(
+                            self.progress_formatter,
+                            CollectionStatus.ERROR,
                             current=i + 1,
                             total=len(stocks),
-                            ts_code=stock['ts_code'],
-                            stock_name=stock['stock_name'],
-                            status=CollectionStatus.ERROR,
+                            stock=stock,
                             elapsed_time=baostock_time,
                             batch_num=batch_num,
                             total_batches=total_batches,
@@ -413,28 +394,12 @@ class FundamentalsManager:
             all_fundamentals = []
             
             if init_mode:
-                # 数据初始化模式：根据list_date动态计算起始季度
-                from ..utils.quarter_calculator import calculate_start_quarter, get_current_previous_quarter
-
-                # 获取股票上市日期并计算起始季度
-                list_date = stock.get('list_date')  # yyyyMMdd格式字符串或None
-                start_year, start_quarter = calculate_start_quarter(list_date)
-
-                # 获取当前前一季度
-                end_year, end_quarter = get_current_previous_quarter()
-
-                # 从计算出的起始季度遍历到当前前一季度
-                for y in range(start_year, end_year + 1):
-                    # 确定本年度的起始季度
-                    current_start_q = start_quarter if y == start_year else 1
-                    # 确定本年度的结束季度
-                    current_end_q = end_quarter if y == end_year else 4
-
-                    for q in range(current_start_q, current_end_q + 1):
-                        fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'], year=y, quarter=q)
-                        if fundamentals:
-                            fundamentals['stock_name'] = stock['stock_name']
-                            all_fundamentals.append(fundamentals)
+                # 数据初始化模式：根据list_date动态计算起始季度，遍历至当前前一季度
+                for y, q in expand_quarters(stock.get('list_date')):
+                    fundamentals = self.baostock.get_stock_fundamentals(stock['ts_code'], year=y, quarter=q)
+                    if fundamentals:
+                        fundamentals['stock_name'] = stock['stock_name']
+                        all_fundamentals.append(fundamentals)
                             
             elif year and quarter:
                 # 指定时间模式：只查询指定year和quarter的数据
@@ -487,37 +452,23 @@ class FundamentalsManager:
 
         if not dry_run:
             try:
-                # 记录CSV生成开始时间
-                csv_start_time = time.time()
+                result = persist_batch(
+                    batch_data,
+                    csv_writer=self.csv_writer,
+                    db=self.db,
+                    save_to_csv=save_to_csv,
+                    save_to_db=save_to_db
+                )
 
-                # 写入CSV文件
-                if save_to_csv:
-                    self.csv_writer.write_base_fundamentals_info(batch_data)
-
-                # 记录CSV生成耗时
-                csv_time = time.time() - csv_start_time
                 if stats and 'timing' in stats:
-                    stats['timing']['csv_total'] += csv_time
+                    stats['timing']['csv_total'] += result['csv_time']
                     if save_to_csv:
                         stats['timing']['csv_batches'] += 1
-
-                # 记录数据库写入开始时间
-                db_start_time = time.time()
-
-                # 数据库upsert
-                if save_to_db:
-                    affected_rows = self.db.upsert_fundamentals_data(batch_data)
-                else:
-                    affected_rows = 0
-
-                # 记录数据库写入耗时
-                db_time = time.time() - db_start_time
-                if stats and 'timing' in stats:
-                    stats['timing']['db_total'] += db_time
+                    stats['timing']['db_total'] += result['db_time']
                     if save_to_db:
                         stats['timing']['db_batches'] += 1
 
-                self.logger.info(f"批次处理完成: {len(batch_data)} 条记录，CSV: {'是' if save_to_csv else '否'}，DB: {'是' if save_to_db else '否'}，影响行数: {affected_rows}")
+                self.logger.info(f"批次处理完成: {len(batch_data)} 条记录，CSV: {'是' if save_to_csv else '否'}，DB: {'是' if save_to_db else '否'}，影响行数: {result['affected_rows']}")
 
             except Exception as e:
                 self.logger.error(f"批次处理失败: {e}")
