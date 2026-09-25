@@ -5,7 +5,6 @@
 import time
 import logging
 import os
-import threading
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -16,7 +15,6 @@ from ..data_sources import BaostockSource, TdxApiSource
 from ..database import DatabaseConnection
 from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
-from ..utils.log_aggregator import LogAggregator
 from ..utils.data_transformer import DataTransformer
 from ..kline_1min.adapters import (
     CsvAsyncWriter,
@@ -43,11 +41,7 @@ class SyncManager:
         self.config_manager = config_manager or ConfigManager()
         self.db_conn = DatabaseConnection(self.config_manager)
         self.csv_writer = CsvWriter(self.config_manager)
-        self.db = self.db_conn  # 简化数据库访问
         self.logger = logging.getLogger(__name__)
-
-        # 数据库日志汇总器
-        self._db_log_aggregator = LogAggregator()
 
         # 初始化数据源
         self.baostock_source = None
@@ -113,7 +107,6 @@ class SyncManager:
         Returns:
             同步结果字典，包含stocks和耗时统计
         """
-        import time
         result = {
             'stocks': [],
             'timing': {
@@ -1000,138 +993,6 @@ class SyncManager:
             return None
         return entry['records'][idx - 1]
 
-    def _normalize_kline_1min_records(
-        self,
-        raw_records: List[Any],
-        stock: Dict[str, Any],
-        fundamentals_map: Dict[str, Dict[str, Any]],
-        previous_preclose: Optional[float],
-        allowed_dates: Optional[set] = None
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        normalized: List[Dict[str, Any]] = []
-        anomalies: List[Dict[str, Any]] = []
-
-        for raw in raw_records:
-            record = self._normalize_kline_1min_record(raw, stock)
-            if record:
-                normalized.append(record)
-
-        if not normalized:
-            return [], []
-
-        if allowed_dates:
-            normalized = [item for item in normalized if item.get('trade_date') in allowed_dates]
-
-        normalized.sort(key=lambda x: (x['trade_date'], x['trade_time']))
-
-        prev_close = self._to_float(previous_preclose)
-        for idx, record in enumerate(normalized):
-            last_value = self._to_float(record.pop('_raw_last', None))
-            if last_value is not None and last_value != 0:
-                preclose = last_value
-            else:
-                if prev_close is not None and prev_close != 0:
-                    preclose = prev_close
-                else:
-                    prev_db_close = self._to_float(self.db_conn.fetch_prev_his_kline_1min_close(
-                        record.get('ts_code'),
-                        record.get('trade_date'),
-                        record.get('trade_time')
-                    ))
-                    if prev_db_close is not None and prev_db_close != 0:
-                        preclose = prev_db_close
-                    else:
-                        preclose = self._to_float(record.get('open'))
-            record['preclose'] = preclose
-
-            close = self._to_float(record.get('close'))
-            record['close'] = close
-            if preclose and close is not None:
-                record['change_rate'] = (close - preclose) / preclose * 100
-            else:
-                record['change_rate'] = None
-
-            fundamentals = self._match_fundamentals(record['ts_code'], record['trade_date'], fundamentals_map)
-            if fundamentals:
-                record['fundamentals_disclosure_date'] = fundamentals.get('disclosure_date')
-                record['total_share'] = self._to_float(fundamentals.get('total_share'))
-                record['float_share'] = self._to_float(fundamentals.get('float_share'))
-            else:
-                record['fundamentals_disclosure_date'] = None
-                record['total_share'] = None
-                record['float_share'] = None
-
-            float_share = record.get('float_share')
-            volume = record.get('volume')
-            if float_share and volume is not None and float_share != 0:
-                record['turnover_rate'] = volume / float_share * 100
-            else:
-                record['turnover_rate'] = None
-
-            record['source'] = 'TDXAPI'
-
-            limit_rate = self._get_kline_limit_rate(record.get('stock_code'), record.get('stock_name'))
-            change_rate = record.get('change_rate')
-            if change_rate is not None and abs(change_rate) > limit_rate:
-                anomalies.append({
-                    'ts_code': record.get('ts_code'),
-                    'trade_date': record.get('trade_date'),
-                    'trade_time': record.get('trade_time'),
-                    'change_rate': round(change_rate, 6),
-                    'limit_rate': limit_rate
-                })
-
-            prev_close = close
-
-        return normalized, anomalies
-
-    def _normalize_kline_1min_record(self, raw: Any, stock: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not isinstance(raw, dict):
-            return None
-
-        trade_date = self._normalize_date_str(
-            raw.get('trade_date') or raw.get('date') or raw.get('tradeDate')
-        )
-        trade_time = self._normalize_time_str(
-            raw.get('trade_time') or raw.get('time') or raw.get('tradeTime')
-        )
-
-        trade_datetime = (
-            raw.get('trade_datetime') or raw.get('datetime') or raw.get('Time') or raw.get('time')
-        )
-        if (not trade_date or not trade_time) and trade_datetime:
-            trade_date, trade_time = self._split_datetime(trade_datetime)
-
-        if not trade_date or not trade_time:
-            return None
-
-        trade_datetime = f"{trade_date}{trade_time}"
-
-        open_v = self._scale_price(self._to_float(raw.get('open') or raw.get('Open')))
-        high_v = self._scale_price(self._to_float(raw.get('high') or raw.get('High')))
-        low_v = self._scale_price(self._to_float(raw.get('low') or raw.get('Low')))
-        close_v = self._scale_price(self._to_float(raw.get('close') or raw.get('Close')))
-        last_v = self._scale_price(self._to_float(raw.get('last') or raw.get('Last')))
-        volume_v = self._scale_volume(self._to_float(raw.get('volume') or raw.get('Volume')))
-        amount_v = self._scale_amount(self._to_float(raw.get('amount') or raw.get('Amount')))
-
-        return {
-            'ts_code': stock.get('ts_code'),
-            'stock_code': stock.get('stock_code'),
-            'stock_name': stock.get('stock_name'),
-            'trade_date': trade_date,
-            'trade_time': trade_time,
-            'trade_datetime': trade_datetime,
-            'open': open_v,
-            'high': high_v,
-            'low': low_v,
-            'close': close_v,
-            'preclose': None,
-            '_raw_last': last_v,
-            'volume': volume_v,
-            'amount': amount_v
-        }
-
     def _normalize_kline_day_records(
         self,
         raw_records: List[Any],
@@ -1462,11 +1323,6 @@ class SyncManager:
         except Exception as e:
             self.logger.error(f"生成立体K线报告失败: {e}")
             return None
-
-    def _chunk_list(self, items: List[str], size: int) -> List[List[str]]:
-        if not items or size <= 0:
-            return []
-        return [items[i:i + size] for i in range(0, len(items), size)]
 
     def _log_progress(
         self,
