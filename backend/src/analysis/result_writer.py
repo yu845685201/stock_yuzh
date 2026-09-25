@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -85,28 +86,31 @@ class ResultWriter:
 
     def write_meta(self, chain: str, as_of: str, meta: RunMeta) -> Path:
         path = self.resolve_paths(chain, as_of)["meta"]
+        data = dataclasses.asdict(meta)
         payload = {
-            "chain": meta.chain,
-            "as_of": meta.as_of,
-            "generator_version": meta.version,
-            "modules": list(meta.modules),
-            "started_at": meta.started_at,
-            "finished_at": meta.finished_at,
-            "duration_seconds": round(meta.duration_seconds, 2),
-            "stock_count": meta.stock_count,
-            "suspect_count": meta.suspect_count,
-            "lookback": meta.lookback,
-            "window_start": meta.window_start,
-            "window_trading_days": meta.loaded_trading_days,
-            "window_expanded_by_modules": meta.window_expanded,
+            "chain": data.pop("chain"),
+            "as_of": data.pop("as_of"),
+            "generator_version": data.pop("version"),
+            "modules": list(data.pop("modules")),
+            "started_at": data.pop("started_at"),
+            "finished_at": data.pop("finished_at"),
+            "duration_seconds": round(data.pop("duration_seconds"), 2),
+            "stock_count": data.pop("stock_count"),
+            "suspect_count": data.pop("suspect_count"),
+            "lookback": data.pop("lookback"),
+            "window_start": data.pop("window_start"),
+            "window_trading_days": data.pop("loaded_trading_days"),
+            "window_expanded_by_modules": data.pop("window_expanded"),
             "precheck": {
-                "break_count": meta.break_count,
-                "missing_day_count": meta.missing_count,
-                "suspended_stock_count": meta.suspended_count,
-                "suspended_detail_sample": meta.suspended_detail or {},
+                "break_count": data.pop("break_count"),
+                "missing_day_count": data.pop("missing_count"),
+                "suspended_stock_count": data.pop("suspended_count"),
+                "suspended_detail_sample": data.pop("suspended_detail") or {},
             },
             "csv": str(self.resolve_paths(chain, as_of)["csv"]),
         }
+        # RunMeta 新增字段自动追加到顶层，避免漏抄（历史键顺序保持不变）
+        payload.update(data)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
