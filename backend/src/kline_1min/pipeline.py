@@ -283,7 +283,8 @@ def run_pipeline(
         'api_span': None,
         'csv_span': None,
         'db_span': None,
-        'anomalies': []
+        'anomalies': [],
+        'errors': []
     }
 
     fetch_queue: "Queue[Optional[Dict[str, Any]]]" = Queue(maxsize=pipeline_queue_size)
@@ -303,6 +304,12 @@ def run_pipeline(
             result['api_time'] += local.get('api_time', 0.0)
             result['csv_time'] += local.get('csv_time', 0.0)
             result['db_time'] += local.get('db_time', 0.0)
+
+            # B-3 修复：write_worker 捕获的 DB 异常原先只停留在 local['errors']，
+            # merge_local 从不合并 → result['errors'] 为空，写库失败无感知
+            local_errors = local.get('errors')
+            if local_errors:
+                result['errors'].extend(local_errors)
 
             if anomaly_limit > 0:
                 remain = anomaly_limit - len(anomalies)
