@@ -4,7 +4,7 @@
 # - 启动前等待已有采集进程退出，杜绝双开竞争 baostock 会话
 # - 采集全部完成后自动卸载自身 launchd 任务，避免空转重启
 # =============================================================
-BACKEND_DIR="/Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/backend"
+BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLIST_LABEL="com.yuzh.fundamentals-rebuild"
 
 cd "$BACKEND_DIR" || exit 1

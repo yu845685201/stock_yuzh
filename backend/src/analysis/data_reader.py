@@ -67,9 +67,8 @@ class PrecheckResult:
 class DataReader:
     """his_kline_day / base_stock_info / base_trade_calendar 只读访问。"""
 
-    def __init__(self, config_manager, env: str = "uat", conn=None):
+    def __init__(self, config_manager, conn=None):
         self.config_manager = config_manager
-        self.env = env
         self._conn = conn
 
     # ------------------------------------------------------------------ 连接

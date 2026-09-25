@@ -1,36 +1,22 @@
 # A股盘后静态分析系统配置文件
 
-# 环境配置 (uat/prod)
-env: uat
-
-# 数据库配置
+# 数据库配置（单环境，E-1 拍平；库名保持 stock_analysis_uat 不变）
 database:
-  uat:
-    host: 127.0.0.1
-    port: 5432
-    user: postgres
-    password: yuzh1234
-    database: stock_analysis_uat
-  prod:
-    host: 127.0.0.1
-    port: 5432
-    user: postgres
-    password: yuzh1234
-    database: stock_analysis
+  host: 127.0.0.1
+  port: 5432
+  user: postgres
+  password: yuzh1234
+  database: stock_analysis_uat
   # 连接池配置
   pool:
     enabled: true
     min_connections: 8
     max_connections: 40
 
-# 数据路径配置
+# 数据路径配置（C-1 修正：原为搬迁前旧工作区绝对路径，实测不存在；统一为相对仓库根路径）
 data_paths:
-  uat:
-    csv: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/uat/data
-    vipdoc: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/uat/vipdoc
-  prod:
-    csv: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/prod/data
-    vipdoc: /Users/yuzh/develop/ai/claude/claude-code/workspace/stock_yuzh/prod/vipdoc
+  csv: uat/data
+  vipdoc: uat/vipdoc
 
 # 数据源配置
 data_sources:

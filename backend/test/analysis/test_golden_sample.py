@@ -47,9 +47,9 @@ BASELINE = {
 
 
 def _load():
-    cm = ConfigManager(env="uat")
+    cm = ConfigManager()
     try:
-        reader = DataReader(cm, env="uat")
+        reader = DataReader(cm)
         reader.latest_trade_date()
     except Exception as exc:  # pragma: no cover - 无数据库环境
         pytest.skip(f"数据库不可用: {exc!r}")

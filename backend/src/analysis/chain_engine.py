@@ -85,10 +85,9 @@ class EngineResult:
 class ChainEngine:
     """分析链执行引擎。"""
 
-    def __init__(self, config_manager, options: EngineOptions, env: str = "uat"):
+    def __init__(self, config_manager, options: EngineOptions):
         self.config_manager = config_manager
         self.options = options
-        self.env = env
 
     # ------------------------------------------------------------------ 入口
     def run(self, chain: ChainConfig) -> EngineResult:
@@ -96,7 +95,7 @@ class ChainEngine:
         started_at = now_iso()
         opts = self.options
 
-        with DataReader(self.config_manager, env=self.env) as reader:
+        with DataReader(self.config_manager) as reader:
             as_of = reader.resolve_as_of(opts.as_of)
             universe = reader.load_stock_universe()
             if not universe:

@@ -61,7 +61,6 @@ def run_chain(ctx, chain_name, modules_option, as_of, lookback, missing_day_mode
         raise click.UsageError("--chain 与 --modules 不能同时指定")
 
     config_manager = ctx.obj["config_manager"]
-    env = ctx.obj.get("env", "uat")
 
     if modules_option:
         chain = ChainConfig(chain="adhoc", description="CLI 临时链（--modules）",
@@ -98,7 +97,7 @@ def run_chain(ctx, chain_name, modules_option, as_of, lookback, missing_day_mode
                + ("" if options.lookback is None else "（CLI 覆盖）"))
     click.echo("开始加载数据并执行（长任务，可用 analyze progress 查看进度）...")
 
-    engine = ChainEngine(config_manager, options, env=env)
+    engine = ChainEngine(config_manager, options)
     try:
         result = engine.run(chain)
     except ValueError as exc:

@@ -28,13 +28,11 @@ def setup_logging():
 
 
 @click.group()
-@click.option('--env', default='uat', help='运行环境 (uat/prod)')
 @click.pass_context
-def cli(ctx, env):
+def cli(ctx):
     """A股盘后静态分析系统命令行工具"""
     ctx.ensure_object(dict)
-    ctx.obj['env'] = env
-    ctx.obj['config_manager'] = ConfigManager(env=env)
+    ctx.obj['config_manager'] = ConfigManager()
 
 
 # 技术分析链命令组（analyze run / list-chains / list-modules / progress）
@@ -477,7 +475,6 @@ def status(ctx):
     click.echo("系统状态:")
 
     config_manager = ctx.obj['config_manager']
-    click.echo(f"  - 环境: {config_manager.env}")
 
     # 检查数据库连接
     db_conn = DatabaseConnection(config_manager)

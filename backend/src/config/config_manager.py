@@ -10,15 +10,13 @@ from typing import Dict, Any, Optional
 class ConfigManager:
     """配置管理器，支持YAML配置文件和环境变量"""
 
-    def __init__(self, config_path: str = None, env: str = 'uat'):
+    def __init__(self, config_path: str = None):
         """
         初始化配置管理器
 
         Args:
             config_path: 配置文件路径，默认为 backend/config/config.yaml
-            env: 环境名称，默认为 uat
         """
-        self.env = env
         self.config_path = config_path or os.path.join(
             os.path.dirname(__file__), '..', '..', 'config', 'config.yaml'
         )
@@ -38,32 +36,16 @@ class ConfigManager:
     def _get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
         return {
-            'env': self.env,
             'database': {
-                'uat': {
-                    'host': '127.0.0.1',
-                    'port': 5432,
-                    'user': 'postgres',
-                    'password': os.getenv('DB_PASSWORD', 'yuzh1234'),
-                    'database': 'stock_analysis_uat'
-                },
-                'prod': {
-                    'host': '127.0.0.1',
-                    'port': 5432,
-                    'user': 'postgres',
-                    'password': os.getenv('DB_PASSWORD', 'yuzh1234'),
-                    'database': 'stock_analysis'
-                }
+                'host': '127.0.0.1',
+                'port': 5432,
+                'user': 'postgres',
+                'password': os.getenv('DB_PASSWORD', 'yuzh1234'),
+                'database': 'stock_analysis_uat'
             },
             'data_paths': {
-                'uat': {
-                    'csv': 'uat/data',
-                    'vipdoc': 'uat/vipdoc'
-                },
-                'prod': {
-                    'csv': 'prod/data',
-                    'vipdoc': 'prod/vipdoc'
-                }
+                'csv': 'uat/data',
+                'vipdoc': 'uat/vipdoc'
             },
             'data_sources': {
                 'baostock': {
@@ -141,12 +123,14 @@ class ConfigManager:
             return default
 
     def get_database_config(self) -> Dict[str, Any]:
-        """获取当前环境的数据库配置"""
-        return self.get(f'database.{self.env}', {})
+        """获取数据库连接配置（直接读 database 段；剔除 pool 子段以保持 psycopg2 连接参数口径）"""
+        cfg = dict(self.get('database', {}))
+        cfg.pop('pool', None)
+        return cfg
 
     def get_data_paths(self) -> Dict[str, str]:
-        """获取当前环境的数据路径配置"""
-        return self.get(f'data_paths.{self.env}', {})
+        """获取数据路径配置"""
+        return self.get('data_paths', {})
 
     def save_config(self) -> None:
         """保存配置到文件"""
