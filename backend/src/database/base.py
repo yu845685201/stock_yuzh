@@ -156,3 +156,8 @@ class ConnectionMixin:
                 psycopg2.extras.execute_values(cursor, query, params_list, page_size=page_size)
                 conn.commit()
                 return cursor.rowcount
+
+    def get_table_count(self, table_name: str) -> int:
+        """获取表行数（R-08 新增：status 命令内联 COUNT SQL 下沉，SQL 文本取自原实现）"""
+        result = self.execute_query(f"SELECT COUNT(*) as count FROM {table_name}")
+        return result[0]['count'] if result else 0

@@ -15,6 +15,7 @@ from src.config import ConfigManager
 from src.sync import SyncManager
 from src.database import DatabaseConnection
 from src.cli.analysis_cli import analyze
+from src.cli.common import csv_db_options, kline_range_options, parse_codes, render_sync_result
 
 
 def setup_logging():
@@ -71,8 +72,7 @@ def init(ctx, init_db):
 
 
 @cli.command()
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@csv_db_options
 @click.pass_context
 def sync_all(ctx, no_csv, no_db):
     """同步所有数据"""
@@ -96,8 +96,7 @@ def sync_all(ctx, no_csv, no_db):
 
 
 @cli.command()
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@csv_db_options
 @click.pass_context
 def sync_stocks(ctx, no_csv, no_db):
     """同步股票列表"""
@@ -129,24 +128,18 @@ def sync_trade_calendar(ctx, start_year, end_year):
     sync_manager = SyncManager(ctx.obj['config_manager'])
     result = sync_manager.sync_trade_calendar(start_year=start_year, end_year=end_year, save_to_db=True)
 
-    if result['success']:
-        click.echo("\n✓ 交易日历同步完成!")
-        click.echo(f"  - 记录数: {result['records']}")
-        click.echo(f"  - 写库行数: {result['db_rows']}")
-        click.echo(f"  - 耗时: {result['duration']:.2f} 秒")
-    else:
-        click.echo("\n✗ 交易日历同步失败!")
-        for error in result['errors']:
-            click.echo(f"  错误: {error}")
+    render_sync_result(
+        result,
+        success_title="✓ 交易日历同步完成!",
+        fail_title="✗ 交易日历同步失败!",
+        show_duration=True,
+        show_report=False
+    )
 
 
 @cli.command()
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
-@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段')
-@click.option('--start-date', help='指定开始日期(yyyyMMdd)')
-@click.option('--end-date', help='指定结束日期(yyyyMMdd)')
-@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
+@csv_db_options
+@kline_range_options
 @click.pass_context
 def sync_kline_1min(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
     """同步1分钟K线数据"""
@@ -168,9 +161,8 @@ def sync_kline_1min(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
     else:
         click.echo("  - 采集模式: 增量更新（当天）")
 
-    ts_codes = None
-    if codes:
-        ts_codes = [code.strip() for code in codes.split(',') if code.strip()]
+    ts_codes = parse_codes(codes)
+    if ts_codes:
         click.echo(f"  - 指定股票: {len(ts_codes)}只")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
@@ -183,26 +175,18 @@ def sync_kline_1min(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
         save_to_db=save_to_db
     )
 
-    if result['success']:
-        click.echo("\n✓ 1分钟K线同步完成!")
-        click.echo(f"  - 记录数: {result.get('records', 0)}")
-        click.echo(f"  - 写库行数: {result.get('db_rows', 0)}")
-        click.echo(f"  - 耗时: {result.get('duration', 0):.2f} 秒")
-        if result.get('report_path'):
-            click.echo(f"  - 报告: {result['report_path']}")
-    else:
-        click.echo("\n✗ 1分钟K线同步失败!")
-        for error in result['errors']:
-            click.echo(f"  错误: {error}")
+    render_sync_result(
+        result,
+        success_title="✓ 1分钟K线同步完成!",
+        fail_title="✗ 1分钟K线同步失败!",
+        show_duration=True,
+        show_report=True
+    )
 
 
 @cli.command()
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
-@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段')
-@click.option('--start-date', help='指定开始日期(yyyyMMdd)')
-@click.option('--end-date', help='指定结束日期(yyyyMMdd)')
-@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
+@csv_db_options
+@kline_range_options
 @click.pass_context
 def sync_kline_day(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
     """同步日K线数据"""
@@ -224,9 +208,8 @@ def sync_kline_day(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
     else:
         click.echo("  - 采集模式: 增量更新（当天）")
 
-    ts_codes = None
-    if codes:
-        ts_codes = [code.strip() for code in codes.split(',') if code.strip()]
+    ts_codes = parse_codes(codes)
+    if ts_codes:
         click.echo(f"  - 指定股票: {len(ts_codes)}只")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
@@ -239,17 +222,13 @@ def sync_kline_day(ctx, no_csv, no_db, init_mode, start_date, end_date, codes):
         save_to_db=save_to_db
     )
 
-    if result['success']:
-        click.echo("\n✓ 日K线同步完成!")
-        click.echo(f"  - 记录数: {result.get('records', 0)}")
-        click.echo(f"  - 写库行数: {result.get('db_rows', 0)}")
-        click.echo(f"  - 耗时: {result.get('duration', 0):.2f} 秒")
-        if result.get('report_path'):
-            click.echo(f"  - 报告: {result['report_path']}")
-    else:
-        click.echo("\n✗ 日K线同步失败!")
-        for error in result['errors']:
-            click.echo(f"  错误: {error}")
+    render_sync_result(
+        result,
+        success_title="✓ 日K线同步完成!",
+        fail_title="✗ 日K线同步失败!",
+        show_duration=True,
+        show_report=True
+    )
 
 
 @cli.command()
@@ -263,9 +242,8 @@ def sync_anal_kline_rise_25pre(ctx, init_mode, codes):
     else:
         click.echo("开始生成立体K线数据（日常更新）...")
 
-    ts_codes = None
-    if codes:
-        ts_codes = [code.strip() for code in codes.split(',') if code.strip()]
+    ts_codes = parse_codes(codes)
+    if ts_codes:
         click.echo(f"  - 指定股票: {len(ts_codes)}只")
 
     sync_manager = SyncManager(ctx.obj['config_manager'])
@@ -274,16 +252,13 @@ def sync_anal_kline_rise_25pre(ctx, init_mode, codes):
         ts_codes=ts_codes
     )
 
-    if result['success']:
-        click.echo("\n✓ 立体K线生成完成!")
-        click.echo(f"  - 记录数: {result.get('records', 0)}")
-        click.echo(f"  - 写库行数: {result.get('db_rows', 0)}")
-        if result.get('report_path'):
-            click.echo(f"  - 报告: {result['report_path']}")
-    else:
-        click.echo("\n✗ 立体K线生成失败!")
-        for error in result['errors']:
-            click.echo(f"  错误: {error}")
+    render_sync_result(
+        result,
+        success_title="✓ 立体K线生成完成!",
+        fail_title="✗ 立体K线生成失败!",
+        show_duration=False,
+        show_report=True
+    )
 
 
 @cli.command()
@@ -315,8 +290,7 @@ def sync_kline_1min_rollback(ctx):
 
 
 @cli.command()
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--no-db', is_flag=True, default=False, help='不保存到数据库')
+@csv_db_options
 @click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')
 @click.option('--dry-run', is_flag=True, help='试运行模式，不实际写入数据')
 @click.option('--list-status', type=click.Choice(['L', 'D', 'P']), default='L',
@@ -422,12 +396,6 @@ def sync_fundamentals(ctx, no_csv, no_db, batch_size, dry_run, list_status, qps_
         click.echo(f"  - 成功率: {result['success_rate']:.2%}")
 
 
-
-
-
-
-
-
 @cli.command('rebuild-fundamentals')
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--codes', help='指定股票ts_code列表，逗号分隔（默认全市场 type=股票）')
@@ -479,15 +447,13 @@ def status(ctx):
     # 检查数据库连接
     db_conn = DatabaseConnection(config_manager)
     try:
-        result = db_conn.execute_query("SELECT COUNT(*) as count FROM base_stock_info")
-        stock_count = result[0]['count'] if result else 0
+        stock_count = db_conn.get_table_count('base_stock_info')
         click.echo(f"  - 数据库连接: 正常")
         click.echo(f"  - 股票数量: {stock_count}")
 
         # 检查基本面数据表
         try:
-            result = db_conn.execute_query("SELECT COUNT(*) as count FROM base_fundamentals_info")
-            fundamentals_count = result[0]['count'] if result else 0
+            fundamentals_count = db_conn.get_table_count('base_fundamentals_info')
             click.echo(f"  - 基本面数据: {fundamentals_count} 条")
         except Exception:
             click.echo(f"  - 基本面数据表: 未初始化")
