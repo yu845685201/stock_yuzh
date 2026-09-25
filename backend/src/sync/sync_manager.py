@@ -29,6 +29,7 @@ from ..kline_1min.adapters import (
 from ..kline_1min.usecase import Kline1MinSyncUseCase
 from .kline_rise_25pre import generate_kline_rise_25pre
 from .report_writer import write_markdown_report
+from .kline_day_pipeline import KlineDaySharedState, KlineDayDeps, process_one_stock, safe_process_one_stock, merge_stock_result
 
 class SyncManager:
     """数据同步管理器"""
@@ -285,6 +286,10 @@ class SyncManager:
     ) -> Dict[str, Any]:
         """
         同步日K线数据 - 支持数据初始化/增量更新/指定日期范围
+
+        R-07c 拆分后本方法为编排壳：参数解析、数据源连接、批循环与线程池、汇总、报告；
+        单股处理流程见 kline_day_pipeline.py（process_one_stock / merge_stock_result）。
+        签名与返回键集合完全不变（外部契约：failed_stocks/detection/source_missing）。
         """
         result = {
             'success': False,
@@ -298,15 +303,11 @@ class SyncManager:
             result['errors'].append('Tdx API数据源未初始化')
             return result
 
-        api_time = 0.0
-        csv_time = 0.0
-        db_time = 0.0
-        api_span: Optional[Tuple[float, float]] = None
-        csv_span: Optional[Tuple[float, float]] = None
-        db_span: Optional[Tuple[float, float]] = None
-        anomalies: List[Dict[str, Any]] = []
+        ctx = KlineDaySharedState(result=result)
 
         start_ts = time.time()
+        max_workers: Optional[int] = None
+        stock_batch_size: Optional[int] = None
         try:
             if not self.tdx_api_source.connect():
                 raise RuntimeError("Tdx API连接失败")
@@ -355,223 +356,31 @@ class SyncManager:
                     tail_limit = max(tail_limit, span_len + 2)
                 else:
                     fetch_full = True
-            detection = {'checked': 0, 'hits': 0, 'refetched': 0}
-            detection_details = []
-            source_missing = {'qfq_empty': 0, 'raw_empty': 0}
-            result['detection'] = detection
-            result['detection_details'] = detection_details
-            result['source_missing'] = source_missing
+            result['detection'] = ctx.detection
+            result['detection_details'] = ctx.detection_details
+            result['source_missing'] = ctx.source_missing
             result['failed_stocks'] = 0
 
-            def process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
-                ts_code = stock_item.get('ts_code')
-                stock_code = stock_item.get('stock_code')
-                stock_name = stock_item.get('stock_name') or ''
-                if not ts_code or not stock_code:
-                    return {
-                        'records': 0,
-                        'db_rows': 0,
-                        'api_time': 0.0,
-                        'csv_time': 0.0,
-                        'db_time': 0.0,
-                        'api_span': None,
-                        'csv_span': None,
-                        'db_span': None,
-                        'anomalies': []
-                    }
-
-                per_stock_records: List[Dict[str, Any]] = []
-                raw_for_csv: List[Dict[str, Any]] = []
-                local_api_time = 0.0
-                local_csv_time = 0.0
-                local_db_time = 0.0
-                local_anomalies: List[Dict[str, Any]] = []
-                api_start_wall = None
-                api_end_wall = None
-                csv_start_wall = None
-                csv_end_wall = None
-                db_start_wall = None
-                db_end_wall = None
-
-                # ---- 双源拉取与合并（init/区间=双全量；日常=双尾部）----
-                merged_records: List[Dict[str, Any]] = []
-                refetched = False
-                stock_detection_details: List[Dict[str, Any]] = []
-                fetch_start = time.time()
-                if api_start_wall is None:
-                    api_start_wall = fetch_start
-
-                if fetch_full:
-                    qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code)
-                    raw_list = self.tdx_api_source.get_kline_raw_full(stock_code)
-                else:
-                    qfq_list = self.tdx_api_source.get_kline_qfq_tail(stock_code, tail_limit)
-                    raw_list = self.tdx_api_source.get_kline_raw_tail(stock_code, tail_limit)
-                api_end_wall = time.time()
-                local_api_time += api_end_wall - fetch_start
-                self._log_progress('数据采集', stock_index, total_stocks, stock_code, stock_name, api_end_wall - fetch_start)
-
-                local_source_missing = {'qfq_empty': 0, 'raw_empty': 0}
-                if not qfq_list:
-                    local_source_missing['qfq_empty'] = 1
-                if not raw_list:
-                    local_source_missing['raw_empty'] = 1
-
-                merged_records = self._merge_kline_day_sources(qfq_list, raw_list)
-
-                # ---- 日常增量的跨快照除权检测（命中→整股重拉自愈）----
-                # 仅日常增量执行：显式区间补齐不做整股重拉，避免触发全量回源
-                stock_detection = {'checked': 0, 'hits': 0, 'refetched': 0}
-                if not fetch_full and not is_explicit_range and merged_records:
-                    hit, detail = self._detect_kline_day_refetch(ts_code, merged_records)
-                    stock_detection['checked'] = 1
-                    if hit:
-                        stock_detection['hits'] = 1
-                        stock_detection_details.append({'ts_code': ts_code, **detail})
-                        logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
-                        refetch_start = time.time()
-                        # 增强路径下必须 refresh=True 绕过缓存回源，否则从同一份失效缓存取回同样错位的数据
-                        qfq_list = self.tdx_api_source.get_kline_qfq_full(stock_code, refresh=True)
-                        raw_list = self.tdx_api_source.get_kline_raw_full(stock_code)
-                        local_api_time += time.time() - refetch_start
-                        merged_records = self._merge_kline_day_sources(qfq_list, raw_list)
-                        stock_detection['refetched'] = 1
-                        refetched = True
-
-                if not merged_records:
-                    return {
-                        'records': 0,
-                        'db_rows': 0,
-                        'api_time': local_api_time,
-                        'csv_time': local_csv_time,
-                        'db_time': local_db_time,
-                        'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
-                        'csv_span': None,
-                        'db_span': None,
-                        'anomalies': [],
-                        'detection': stock_detection,
-                        'detection_details': stock_detection_details,
-                        'source_missing': local_source_missing,
-                        'error': None
-                    }
-
-                # ---- CSV（合并后的原始口径，按允许日期过滤）----
-                if save_to_csv:
-                    for item in merged_records:
-                        if isinstance(item, dict):
-                            item_with_code = {'ts_code': ts_code}
-                            item_with_code.update(item)
-                            raw_for_csv.append(item_with_code)
-                    csv_start = time.time()
-                    if csv_start_wall is None:
-                        csv_start_wall = csv_start
-                    filtered_raw = self._filter_raw_kline_by_dates(raw_for_csv, trade_dates)
-                    if filtered_raw:
-                        self.csv_writer.write_his_kline_day_raw(ts_code, filtered_raw)
-                    csv_end_wall = time.time()
-                    local_csv_time += csv_end_wall - csv_start
-                    self._log_progress('csv 生成', stock_index, total_stocks, stock_code, stock_name, csv_end_wall - csv_start)
-
-                # ---- normalize（preclose 链/change_rate/基本面匹配/turnover）----
-                allowed_dates = set(trade_dates) if (trade_dates and not init_mode) else None
-                if init_mode or refetched:
-                    # 全量口径：整股替换写库，不做日期过滤
-                    records, record_anomalies = self._normalize_kline_day_records(
-                        merged_records, stock_item, fundamentals_map
-                    )
-                else:
-                    records, record_anomalies = self._normalize_kline_day_records(
-                        merged_records, stock_item, fundamentals_map, allowed_dates=allowed_dates
-                    )
-                for record in records:
-                    record['adjust_flag'] = 2  # 前复权
-                per_stock_records.extend(records)
-                local_anomalies.extend(record_anomalies)
-
-                # ---- 写库：init/重拉=整股原子替换；区间/日常=upsert ----
-                if per_stock_records and save_to_db:
-                    db_start = time.time()
-                    if db_start_wall is None:
-                        db_start_wall = db_start
-                    if init_mode or refetched:
-                        db_rows = self.db_conn.replace_his_kline_day(ts_code, per_stock_records)
-                    else:
-                        db_rows = self.db_conn.upsert_his_kline_day(per_stock_records)
-                    db_end_wall = time.time()
-                    local_db_time += db_end_wall - db_start
-                    self._log_progress('数据入库-', stock_index, total_stocks, stock_code, stock_name, db_end_wall - db_start)
-                else:
-                    db_rows = 0
-
-                return {
-                    'records': len(per_stock_records),
-                    'db_rows': db_rows,
-                    'api_time': local_api_time,
-                    'csv_time': local_csv_time,
-                    'db_time': local_db_time,
-                    'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
-                    'csv_span': (csv_start_wall, csv_end_wall) if csv_start_wall and csv_end_wall else None,
-                    'db_span': (db_start_wall, db_end_wall) if db_start_wall and db_end_wall else None,
-                    'anomalies': local_anomalies,
-                    'detection': stock_detection,
-                    'detection_details': stock_detection_details,
-                    'source_missing': local_source_missing,
-                    'error': None
-                }
-
-            def merge_stock_result(res: Dict[str, Any]) -> None:
-                nonlocal api_time, csv_time, db_time, api_span, csv_span, db_span
-
-                if res.get('error'):
-                    result['errors'].append(res['error'])
-                    result['failed_stocks'] += 1
-
-                det = res.get('detection') or {}
-                detection['checked'] += det.get('checked', 0)
-                detection['hits'] += det.get('hits', 0)
-                detection['refetched'] += det.get('refetched', 0)
-                details = res.get('detection_details') or []
-                if details:
-                    detection_details.extend(details[:200 - len(detection_details)])
-                for k, v in (res.get('source_missing') or {}).items():
-                    source_missing[k] = source_missing.get(k, 0) + v
-
-                result['records'] += res['records']
-                result['db_rows'] += res['db_rows']
-                api_time += res['api_time']
-                csv_time += res['csv_time']
-                db_time += res['db_time']
-                anomalies.extend(res['anomalies'])
-
-                if res['api_span']:
-                    api_span = (
-                        min(api_span[0], res['api_span'][0]) if api_span else res['api_span'][0],
-                        max(api_span[1], res['api_span'][1]) if api_span else res['api_span'][1]
-                    )
-                if res['csv_span']:
-                    csv_span = (
-                        min(csv_span[0], res['csv_span'][0]) if csv_span else res['csv_span'][0],
-                        max(csv_span[1], res['csv_span'][1]) if csv_span else res['csv_span'][1]
-                    )
-                if res['db_span']:
-                    db_span = (
-                        min(db_span[0], res['db_span'][0]) if db_span else res['db_span'][0],
-                        max(db_span[1], res['db_span'][1]) if db_span else res['db_span'][1]
-                    )
-
-            def _safe_process_stock(stock_item: Dict[str, Any], stock_index: int) -> Dict[str, Any]:
-                """单股异常隔离：一只股票失败不影响整场同步"""
-                try:
-                    return process_stock(stock_item, stock_index)
-                except Exception as e:
-                    self.logger.exception(f"单股日K采集失败: {stock_item.get('ts_code')} {e}")
-                    return {
-                        'records': 0, 'db_rows': 0, 'api_time': 0.0, 'csv_time': 0.0, 'db_time': 0.0,
-                        'api_span': None, 'csv_span': None, 'db_span': None,
-                        'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
-                        'detection_details': [], 'source_missing': {},
-                        'error': f"{stock_item.get('ts_code')}: {e}"
-                    }
+            deps = KlineDayDeps(
+                tdx_api_source=self.tdx_api_source,
+                csv_writer=self.csv_writer,
+                db_conn=self.db_conn,
+                logger=self.logger,
+                fundamentals_map=fundamentals_map,
+                trade_dates=trade_dates,
+                init_mode=init_mode,
+                is_explicit_range=is_explicit_range,
+                save_to_csv=save_to_csv,
+                save_to_db=save_to_db,
+                fetch_full=fetch_full,
+                tail_limit=tail_limit,
+                total_stocks=total_stocks,
+                log_progress=self._log_progress,
+                merge_sources=self._merge_kline_day_sources,
+                detect_refetch=self._detect_kline_day_refetch,
+                filter_raw=self._filter_raw_kline_by_dates,
+                normalize_records=self._normalize_kline_day_records
+            )
 
             max_workers = self.config_manager.get('sync.kline_max_workers', 1)
             raw_batch_size = self.config_manager.get('sync.kline_stock_batch_size', 1000)
@@ -592,14 +401,18 @@ class SyncManager:
                 if max_workers and max_workers > 1 and len(stock_batch) > 1:
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = [
-                            executor.submit(_safe_process_stock, s, batch_start + i + 1)
+                            executor.submit(
+                                safe_process_one_stock, s, batch_start + i + 1, ctx=ctx, deps=deps
+                            )
                             for i, s in enumerate(stock_batch)
                         ]
                         for future in as_completed(futures):
-                            merge_stock_result(future.result())
+                            merge_stock_result(future.result(), ctx)
                 else:
                     for i, stock in enumerate(stock_batch):
-                        merge_stock_result(_safe_process_stock(stock, batch_start + i + 1))
+                        merge_stock_result(
+                            safe_process_one_stock(stock, batch_start + i + 1, ctx=ctx, deps=deps), ctx
+                        )
 
                 self.logger.info(
                     f"日K线批次完成: 第{batch_no}/{total_batches}批, 累计记录{result['records']}条, 累计写库{result['db_rows']}条"
@@ -615,19 +428,19 @@ class SyncManager:
 
         end_ts = time.time()
         timing = {
-            'api_time': round(api_time, 2),
-            'csv_time': round(csv_time, 2),
-            'db_time': round(db_time, 2),
+            'api_time': round(ctx.api_time, 2),
+            'csv_time': round(ctx.csv_time, 2),
+            'db_time': round(ctx.db_time, 2),
             'total_time': round(end_ts - start_ts, 2),
-            'parallel': max_workers if 'max_workers' in locals() else self.config_manager.get('sync.kline_max_workers', 1),
-            'stock_batch_size': stock_batch_size if 'stock_batch_size' in locals() else self.config_manager.get('sync.kline_stock_batch_size', 1000),
-            'api_wall': round(api_span[1] - api_span[0], 2) if api_span else 0,
-            'csv_wall': round(csv_span[1] - csv_span[0], 2) if csv_span else 0,
-            'db_wall': round(db_span[1] - db_span[0], 2) if db_span else 0
+            'parallel': max_workers if max_workers is not None else self.config_manager.get('sync.kline_max_workers', 1),
+            'stock_batch_size': stock_batch_size if stock_batch_size is not None else self.config_manager.get('sync.kline_stock_batch_size', 1000),
+            'api_wall': round(ctx.api_span[1] - ctx.api_span[0], 2) if ctx.api_span else 0,
+            'csv_wall': round(ctx.csv_span[1] - ctx.csv_span[0], 2) if ctx.csv_span else 0,
+            'db_wall': round(ctx.db_span[1] - ctx.db_span[0], 2) if ctx.db_span else 0
         }
 
         result['duration'] = timing['total_time']
-        result['report_path'] = self._write_kline_day_report(result, anomalies, timing)
+        result['report_path'] = self._write_kline_day_report(result, ctx.anomalies, timing)
 
         return result
 
