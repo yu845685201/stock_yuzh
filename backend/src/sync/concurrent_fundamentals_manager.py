@@ -153,6 +153,9 @@ class ConcurrentFundamentalsManager:
                         if current % 10 == 0 or percentage in [25.0, 50.0, 75.0, 100.0]:
                             self.logger.info(f"进度: {current}/{total} ({percentage:.1f}%)")
                 except Exception as e:
+                    # B-2 修复：批次级异常计入错误统计，不再仅 log 后继续
+                    stats.error_count += 1
+                    stats.failed += 1
                     self.logger.error(f"批次处理异常: {e}")
 
             # 处理剩余数据
@@ -331,6 +334,8 @@ class ConcurrentFundamentalsManager:
                         self.logger.error(progress_msg)
 
                 except Exception as e:
+                    # B-2 修复：与串行版口径一致——异常计入统计，不再静默丢失
+                    stats.add_result(CollectionResult.error(str(e), time.time() - stock_start_time))
                     self.logger.error(f"股票处理异常: {e}")
 
             # 批次处理
@@ -353,6 +358,9 @@ class ConcurrentFundamentalsManager:
             stats.increment_batch_count()
 
         except Exception as e:
+            # B-2 修复：批次级异常计入错误统计，不再仅 log 后继续
+            stats.error_count += 1
+            stats.failed += 1
             self.logger.error(f"批次处理失败: {e}")
 
         return batch_data
