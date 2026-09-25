@@ -13,7 +13,7 @@ from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..config import ConfigManager
 from ..data_sources import BaostockSource, TdxApiSource
-from ..database import DatabaseConnection, Stock
+from ..database import DatabaseConnection
 from .csv_writer import CsvWriter
 from .fundamentals_manager import FundamentalsManager
 from ..utils.log_aggregator import LogAggregator

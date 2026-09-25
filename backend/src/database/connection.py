@@ -83,27 +83,6 @@ class DatabaseConnectionPool:
             if conn:
                 self.pool.putconn(conn)
 
-    def get_pool_status(self) -> Dict[str, Any]:
-        """获取连接池状态信息"""
-        try:
-            return {
-                'min_connections': self.min_conn,
-                'max_connections': self.max_conn,
-                'current_connections': getattr(self.pool, '_used', 0) if hasattr(self.pool, '_used') else 'unknown'
-            }
-        except Exception as e:
-            self.logger.error(f"获取连接池状态失败: {e}")
-            return {'error': str(e)}
-
-    def close_pool(self):
-        """关闭连接池"""
-        try:
-            if hasattr(self, 'pool'):
-                self.pool.closeall()
-                self.logger.info("连接池已关闭")
-        except Exception as e:
-            self.logger.error(f"关闭连接池失败: {e}")
-
 class DatabaseConnection:
     """数据库连接管理类 - 向后兼容，支持连接池优化"""
 
@@ -898,62 +877,6 @@ class DatabaseConnection:
 
         return total_rows
 
-    def upsert_his_kline_1min(self, kline_data: List[Dict[str, Any]]) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def truncate_his_kline_1min_staging(self) -> None:
-        """保留旧接口占位（已弃用）"""
-        return None
-
-    def set_his_kline_1min_staging_unlogged(self, enable: bool) -> None:
-        """保留旧接口占位（已弃用）"""
-        return None
-
-    def copy_his_kline_1min_staging(self, kline_data: List[Dict[str, Any]]):
-        """保留旧接口占位（已弃用）"""
-        return 0, False
-
-    def insert_his_kline_1min_staging(self, kline_data: List[Dict[str, Any]]) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def merge_his_kline_1min_from_staging(self) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def _merge_his_kline_1min_from_staging_legacy(self) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def _merge_his_kline_1min_from_staging_optimized(self) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def _get_kline_1min_merge_batch_size(self) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def _ensure_his_kline_1min_staging_index(self, cursor) -> None:
-        """保留旧接口占位（已弃用）"""
-        return None
-
-    def _materialize_his_kline_1min_dedup(self, cursor) -> None:
-        """保留旧接口占位（已弃用）"""
-        return None
-
-    def _fetch_his_kline_1min_dedup_ts_codes(self, cursor) -> List[str]:
-        """保留旧接口占位（已弃用）"""
-        return []
-
-    def _merge_his_kline_1min_batch_update(self, cursor, ts_codes: List[str]) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
-    def _merge_his_kline_1min_batch_insert(self, cursor, ts_codes: List[str]) -> int:
-        """保留旧接口占位（已弃用）"""
-        return 0
-
     def upsert_his_kline_day(self, kline_data: List[Dict[str, Any]]) -> int:
         """
         批量upsert 日K线数据
@@ -1246,36 +1169,6 @@ class DatabaseConnection:
             params.append(ts_codes)
         return self.execute_query(query, tuple(params))
 
-    def fetch_fundamentals_in_range(self, ts_codes: Optional[List[str]], start_date: str, end_date: str) -> List[Dict[str, Any]]:
-        """
-        获取指定日期范围内基本面数据
-        """
-        params: List[Any] = [start_date, end_date]
-        query = """
-        SELECT ts_code, stat_date, disclosure_date, total_share, float_share
-        FROM base_fundamentals_info
-        WHERE disclosure_date >= %s AND disclosure_date <= %s
-        """
-        if ts_codes:
-            query += " AND ts_code = ANY(%s)"
-            params.append(ts_codes)
-        return self.execute_query(query, tuple(params))
-
-    def fetch_fundamentals_up_to(self, ts_codes: Optional[List[str]], end_date: str) -> List[Dict[str, Any]]:
-        """
-        获取截止到指定日期的基本面数据（用于匹配交易日前最近披露）
-        """
-        params: List[Any] = [end_date]
-        query = """
-        SELECT ts_code, stat_date, disclosure_date, total_share, float_share
-        FROM base_fundamentals_info
-        WHERE disclosure_date <= %s
-        """
-        if ts_codes:
-            query += " AND ts_code = ANY(%s)"
-            params.append(ts_codes)
-        return self.execute_query(query, tuple(params))
-
     def fetch_fundamentals_range_with_prev(
         self,
         ts_codes: Optional[List[str]],
@@ -1317,23 +1210,6 @@ class DatabaseConnection:
             params_prev.append(ts_codes)
 
         return self.execute_query(query, tuple(params + params_prev))
-
-    def fetch_last_his_kline_1min_preclose(self, ts_code: str) -> Optional[float]:
-        """
-        获取指定股票最后一条1分钟K线的preclose
-        """
-        query = """
-        SELECT preclose
-        FROM his_kline_1min
-        WHERE ts_code = %s
-        ORDER BY trade_date DESC, trade_time DESC
-        LIMIT 1
-        """
-        result = self.fetch_one(query, (ts_code,))
-        if result:
-            value = result.get('preclose')
-            return float(value) if value is not None else None
-        return None
 
     def fetch_last_his_kline_1min_close(self, ts_code: str) -> Optional[float]:
         """
@@ -1441,20 +1317,3 @@ class DatabaseConnection:
         ORDER BY trade_datetime ASC
         """
         return self.execute_query(query, (ts_code, parsed_dt))
-
-    def test_connection(self) -> bool:
-        """
-        测试数据库连接
-
-        Returns:
-            连接是否成功
-        """
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT 1")
-                    result = cursor.fetchone()
-                    return result[0] == 1
-        except Exception as e:
-            print(f"数据库连接测试失败: {e}")
-            return False
