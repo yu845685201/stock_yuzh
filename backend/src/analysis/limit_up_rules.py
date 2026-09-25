@@ -54,6 +54,12 @@ BSE_START = "20211115"
 #: 阈值相对制度上限的下浮（§3.9：主板 10% → 判定阈值 9.90）
 THRESHOLD_OFFSET = 0.10
 
+# 制度档位上限（百分点）——limit_pct 与 limit_pct_series 共用的单一来源（R-11）
+_LIMIT_PCT_MAIN = 10.0        # 主板/创业板注册制前：10%
+_LIMIT_PCT_MAIN_ST = 5.0      # 主板/创业板注册制前 ST：5%
+_LIMIT_PCT_GEM_STAR = 20.0    # 创业板注册制后 / 科创板：20%
+_LIMIT_PCT_BSE = 30.0         # 北交所：30%
+
 #: 股票代码前缀 → 板块
 _PREFIX_BOARD = {
     "60": BOARD_MAIN,
@@ -82,17 +88,17 @@ def limit_pct(board: str, trade_date: str, is_st: bool) -> Optional[float]:
     if board == BOARD_MAIN:
         if trade_date < LIMIT_SYSTEM_START:
             return None
-        return 5.0 if is_st else 10.0
+        return _LIMIT_PCT_MAIN_ST if is_st else _LIMIT_PCT_MAIN
     if board == BOARD_GEM:
         if trade_date >= GEM_20PCT_FROM:
-            return 20.0
+            return _LIMIT_PCT_GEM_STAR
         if trade_date < GEM_START:
             return None
-        return 5.0 if is_st else 10.0
+        return _LIMIT_PCT_MAIN_ST if is_st else _LIMIT_PCT_MAIN
     if board == BOARD_STAR:
-        return 20.0 if trade_date >= STAR_START else None
+        return _LIMIT_PCT_GEM_STAR if trade_date >= STAR_START else None
     if board == BOARD_BSE:
-        return 30.0 if trade_date >= BSE_START else None
+        return _LIMIT_PCT_BSE if trade_date >= BSE_START else None
     return None
 
 
@@ -105,15 +111,15 @@ def limit_pct_series(df: pd.DataFrame, board: str) -> pd.Series:
     is_st = df["is_st"].astype(bool).to_numpy() if "is_st" in df.columns else np.zeros(len(df), dtype=bool)
 
     if board == BOARD_MAIN:
-        pct = np.where(is_st, 5.0, 10.0)
+        pct = np.where(is_st, _LIMIT_PCT_MAIN_ST, _LIMIT_PCT_MAIN)
         pct = np.where(dates < LIMIT_SYSTEM_START, np.nan, pct)
     elif board == BOARD_GEM:
-        pct = np.where(dates >= GEM_20PCT_FROM, 20.0, np.where(is_st, 5.0, 10.0))
+        pct = np.where(dates >= GEM_20PCT_FROM, _LIMIT_PCT_GEM_STAR, np.where(is_st, _LIMIT_PCT_MAIN_ST, _LIMIT_PCT_MAIN))
         pct = np.where(dates < GEM_START, np.nan, pct)
     elif board == BOARD_STAR:
-        pct = np.where(dates >= STAR_START, 20.0, np.nan)
+        pct = np.where(dates >= STAR_START, _LIMIT_PCT_GEM_STAR, np.nan)
     elif board == BOARD_BSE:
-        pct = np.where(dates >= BSE_START, 30.0, np.nan)
+        pct = np.where(dates >= BSE_START, _LIMIT_PCT_BSE, np.nan)
     else:
         pct = np.full(len(df), np.nan)
 
