@@ -5,12 +5,9 @@ CSV文件写入器 - 严格按照产品设计文档要求，支持智能删除+A
 import os
 import csv
 import logging
-import uuid
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 from datetime import date, datetime
 from ..config import ConfigManager
-from ..utils.csv_file_manager import CsvFileManager
-from ..utils.log_aggregator import LogAggregator
 
 class CsvWriter:
     """CSV文件写入器，严格按照产品设计文档要求生成CSV文件，支持智能删除+Append模式"""
@@ -27,118 +24,6 @@ class CsvWriter:
         self.config_manager = config_manager or ConfigManager()
         self.csv_path = self.config_manager.get_data_paths().get('csv', 'data')
         self.logger = logging.getLogger(__name__)
-
-        # 初始化文件管理器
-        csv_config = self.config_manager.load_config().get('csv', {})
-        self.file_manager = CsvFileManager(csv_config)
-
-        # 写入会话管理
-        self._write_sessions: Dict[str, Set[str]] = {}  # session_id -> set of files written
-        self._session_files: Dict[str, str] = {}  # session_id -> session description
-
-        # 静默模式和日志汇总
-        self._silent_mode = False
-        self._log_aggregator = LogAggregator()
-
-    def start_write_session(self, description: str = None) -> str:
-        """
-        开始一个新的写入会话
-
-        Args:
-            description: 会话描述，用于日志记录
-
-        Returns:
-            会话ID
-        """
-        session_id = str(uuid.uuid4())
-        self._write_sessions[session_id] = set()
-        self._session_files[session_id] = description or f"Session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self.logger.info(f"开始新的写入会话: {session_id} - {self._session_files[session_id]}")
-        return session_id
-
-    def end_write_session(self, session_id: str) -> Dict[str, Any]:
-        """
-        结束写入会话并返回统计信息
-
-        Args:
-            session_id: 会话ID
-
-        Returns:
-            会话统计信息
-        """
-        if session_id not in self._write_sessions:
-            self.logger.warning(f"会话 {session_id} 不存在")
-            return {'error': 'Session not found'}
-
-        files_written = list(self._write_sessions[session_id])
-        description = self._session_files[session_id]
-
-        # 清理会话数据
-        del self._write_sessions[session_id]
-        del self._session_files[session_id]
-
-        stats = {
-            'session_id': session_id,
-            'description': description,
-            'files_written': files_written,
-            'total_files': len(files_written)
-        }
-
-        self.logger.info(f"写入会话结束: {session_id}, 写入文件数: {len(files_written)}")
-        return stats
-
-    def start_silent_mode(self):
-        """启动静默模式，隐藏单个文件的日志输出"""
-        self._silent_mode = True
-        self._log_aggregator.start_operation('csv')
-
-    def end_silent_mode(self):
-        """结束静默模式并显示汇总信息"""
-        if self._silent_mode:
-            self._log_aggregator.finish_operation('csv')
-            self._log_aggregator.print_summary('csv')
-            self._silent_mode = False
-
-        return self._log_aggregator.get_summary('csv')
-
-    def _should_delete_file(self, filepath: str, data_type: str) -> bool:
-        """
-        判断是否应该删除文件（智能删除策略）
-
-        Args:
-            filepath: 文件路径
-            data_type: 数据类型
-
-        Returns:
-            是否应该删除文件
-        """
-        # 检查是否有活跃的写入会话
-        for session_id, written_files in self._write_sessions.items():
-            if filepath in written_files:
-                # 文件已在当前会话中写入过，不需要删除
-                return False
-
-        # 文件未被当前会话写入过，应该删除
-        return os.path.exists(filepath)
-
-    def _mark_file_written(self, filepath: str, session_id: str = None):
-        """
-        标记文件已写入
-
-        Args:
-            filepath: 文件路径
-            session_id: 会话ID，如果为None则使用最新会话
-        """
-        if session_id is None:
-            # 使用最新的会话
-            if self._write_sessions:
-                session_id = list(self._write_sessions.keys())[-1]
-            else:
-                # 没有活跃会话，创建一个新会话
-                session_id = self.start_write_session("Auto session")
-
-        if session_id in self._write_sessions:
-            self._write_sessions[session_id].add(filepath)
 
     def _generate_filename(self, data_type: str, include_time: bool = False, include_seconds: bool = False) -> str:
         """
@@ -198,9 +83,6 @@ class CsvWriter:
                 writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
                 writer.writeheader()
                 writer.writerows(data)
-
-            # 标记文件已写入
-            self._mark_file_written(filepath)
 
             # 移除CSV保存明细日志，避免无意义的输出
 
@@ -359,30 +241,3 @@ class CsvWriter:
         filepath = os.path.join(dirpath, filename)
 
         self._write_csv_file(filepath, raw_data, data_type='his_kline_day')
-
-    def get_backup_info(self) -> Dict[str, Any]:
-        """
-        获取备份信息
-
-        Returns:
-            备份信息字典
-        """
-        return self.file_manager.get_backup_info()
-
-    def set_file_mode(self, data_type: str, mode: str) -> None:
-        """
-        设置指定数据类型的文件管理模式（临时设置，不修改配置文件）
-
-        Args:
-            data_type: 数据类型
-            mode: 模式 ('append', 'overwrite', 'backup_overwrite')
-        """
-        if mode not in ['append', 'overwrite', 'backup_overwrite']:
-            raise ValueError(f"无效的文件管理模式: {mode}")
-
-        if 'per_type_settings' not in self.file_manager.config:
-            self.file_manager.config['per_type_settings'] = {}
-
-        self.file_manager.config['per_type_settings'][data_type] = {'mode': mode}
-
-    

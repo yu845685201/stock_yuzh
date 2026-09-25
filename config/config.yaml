@@ -144,21 +144,5 @@ analysis:
   progress_interval_stocks: 200
   progress_interval_percent: 5.0
 
-# CSV文件管理配置
-csv:
-  file_management:
-    # 默认文件管理模式: overwrite(覆盖)，符合产品设计文档要求
-    mode: overwrite
-    # 备份配置 - 根据产品设计文档要求，不需要备份机制
-    backup:
-      enabled: false
-      directory: .backup
-      max_files: 10
-    # 按数据类型的特定设置 - 统一配置为覆盖模式
-    per_type_settings:
-      # 所有数据类型统一使用覆盖模式，符合"先删除已存在文件"要求
-      base_stock_info:
-        mode: overwrite
-      base_fundamentals_info:
-        mode: overwrite
-  # （基本面重刷防封禁配置已移至 sync 段，见上方 sync.fundamentals_rebuild_call_sleep）
+# （CSV 文件管理模式配置段已随 RK-3 方案A 删除：CsvFileManager 模式体系零消费，
+#  实际行为恒为 _write_csv_file 硬编码"存在即删除"）
