@@ -6,9 +6,6 @@
 - process_one_stock / safe_process_one_stock / merge_stock_result：原 process_stock /
   _safe_process_stock / merge_stock_result 三个闭包的模块级版本
 
-注意：本模块刻意不定义模块级 logger——process_one_stock 中除权检测命中分支的裸名
-logger.warning 是单列 bug B-1（命中路径 NameError 后被 safe 包装吞掉），在其单独修复前
-必须原样保留该行为。
 """
 
 from dataclasses import dataclass, field
@@ -129,7 +126,7 @@ def process_one_stock(
         if hit:
             stock_detection['hits'] = 1
             stock_detection_details.append({'ts_code': ts_code, **detail})
-            logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
+            deps.logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
             refetch_start = time.time()
             # 增强路径下必须 refresh=True 绕过缓存回源，否则从同一份失效缓存取回同样错位的数据
             qfq_list = deps.tdx_api_source.get_kline_qfq_full(stock_code, refresh=True)
