@@ -48,41 +48,7 @@ rate_limit:
     retry_delay: 0.1
 
 
-# 性能优化配置
-performance:
-
-# 稳定性增强配置
-stability:
-  # 智能重试机制
-  retry:
-    max_attempts: 5                     # 最大重试次数
-    backoff_factor: 2                   # 指数退避因子
-    jitter: true                        # 启用抖动避免集中重试
-    max_delay: 60                       # 最大延迟时间(秒)
-
-  # 熔断器配置
-  circuit_breaker:
-    enabled: true
-    failure_threshold: 10               # 失败阈值
-    recovery_timeout: 60                # 恢复超时时间(秒)
-    half_open_max_calls: 5              # 半开状态最大调用数
-
-  # 资源监控配置
-  resource_monitor:
-    enabled: true
-    memory_threshold: 90                # 内存使用阈值(%) (修复: 避免误判，适应macOS内存管理特性)
-    cpu_threshold: 85                   # CPU使用阈值(%)
-    disk_threshold: 90                  # 磁盘使用阈值(%)
-    check_interval: 5                   # 检查间隔(秒) (新增: 减少性能影响)
-
-  # 数据一致性保障
-  data_consistency:
-    enabled: true
-    validation_rules:                   # 数据验证规则
-      - check_completeness: true
-      - check_consistency: true
-      - check_duplicates: true
-    transaction_timeout: 30             # 事务超时时间(秒)
+# （performance/stability 配置段已随 C-3 删除：全仓零代码消费）
 
 # 同步配置
 sync:
@@ -100,16 +66,10 @@ sync:
   # 中间件增强路径开关（V3.0 M-C）：true=qfq走/api/kline-qfq缓存、raw尾部走/api/kline-recent；
   # false=保持 V2.0 直连路径（/api/kline-history + /api/kline-all）。验证通过前保持 false
   kline_day_use_enhanced_api: true
-  kline_1min_upsert_batch_size: 2000
   kline_1min_db_max_writers: 4
-  kline_1min_staging_batch_size: 20000
-  kline_1min_merge_optimized_enabled: true
-  kline_1min_merge_batch_size: 1000
   kline_1min_csv_max_workers: 2
   kline_1min_csv_max_queue: 20000
   kline_anomaly_report_limit: 5000
-  kline_1min_copy_enabled: true
-  kline_1min_staging_unlogged: false
   kline_1min_pipeline_enabled: true
   kline_1min_partition_cleanup: truncate
   kline_1min_partition_batch_size: 5000
