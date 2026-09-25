@@ -11,6 +11,7 @@ import requests
 
 from .base import DataSourceBase
 from ..utils.api_rate_limiter import ApiRateLimiter
+from ..utils.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -64,52 +65,55 @@ class TdxApiSource(DataSourceBase):
             return None
 
         url = f"{self.base_url}{path}"
-        last_error = None
-        for attempt in range(1, retries + 1):
+
+        def _attempt():
             if self.rate_limiter:
                 self.rate_limiter.wait_if_needed()
+            # 本地中间件不走系统代理：显式传 proxies，避免被 HTTP_PROXY 劫持
+            resp = requests.get(
+                url, params=params, timeout=self.timeout,
+                proxies={'http': None, 'https': None} if self._bypass_proxy else None
+            )
+            resp.raise_for_status()
+            return resp.json()
 
-            try:
-                # 本地中间件不走系统代理：显式传 proxies，避免被 HTTP_PROXY 劫持
-                resp = requests.get(
-                    url, params=params, timeout=self.timeout,
-                    proxies={'http': None, 'https': None} if self._bypass_proxy else None
-                )
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Tdx API请求失败(第{attempt}次): {url} params={params} error={e}")
-                if attempt < retries:
-                    time.sleep(min(2 ** attempt, 8))
-                continue
+        def _on_error(attempt, e):
+            logger.warning(f"Tdx API请求失败(第{attempt}次): {url} params={params} error={e}")
 
-            if isinstance(data, dict) and data.get('code') not in (0, None):
-                # 中间件业务层错误（code=-1）
-                logger.warning(f"Tdx API业务错误: {url} params={params} message={data.get('message')}")
-                return None
+        try:
+            data = run_with_retry(
+                _attempt,
+                attempts=retries,
+                backoff=lambda attempt: min(2 ** attempt, 8),
+                on_error=_on_error
+            )
+        except Exception as e:
+            logger.error(f"Tdx API重试耗尽: {url} params={params} error={e}")
+            return None
 
-            if isinstance(data, dict):
-                if 'data' in data:
-                    payload = data['data']
-                    if isinstance(payload, dict):
-                        if 'List' in payload:
-                            return payload['List']
-                        if 'list' in payload:
-                            return payload['list']
-                    return payload
-                if 'result' in data:
-                    payload = data['result']
-                    if isinstance(payload, dict):
-                        if 'List' in payload:
-                            return payload['List']
-                        if 'list' in payload:
-                            return payload['list']
-                    return payload
-            return data
+        if isinstance(data, dict) and data.get('code') not in (0, None):
+            # 中间件业务层错误（code=-1）
+            logger.warning(f"Tdx API业务错误: {url} params={params} message={data.get('message')}")
+            return None
 
-        logger.error(f"Tdx API重试耗尽: {url} params={params} error={last_error}")
-        return None
+        if isinstance(data, dict):
+            if 'data' in data:
+                payload = data['data']
+                if isinstance(payload, dict):
+                    if 'List' in payload:
+                        return payload['List']
+                    if 'list' in payload:
+                        return payload['list']
+                return payload
+            if 'result' in data:
+                payload = data['result']
+                if isinstance(payload, dict):
+                    if 'List' in payload:
+                        return payload['List']
+                    if 'list' in payload:
+                        return payload['list']
+                return payload
+        return data
 
     def get_kline_qfq_full(self, code: str, refresh: bool = False) -> List[Dict[str, Any]]:
         """前复权日K全量

@@ -13,6 +13,7 @@ from datetime import date, datetime
 import baostock as bs
 from ..utils.data_transformer import DataTransformer
 from ..utils.api_rate_limiter import ApiRateLimiter
+from ..utils.retry import run_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -116,36 +117,28 @@ class ThreadSafeBaostockSource(DataSourceBase):
             Exception: 重试耗尽后抛出最后一次异常
         """
         max_retries = 3
-        last_error = None
 
-        for attempt in range(max_retries):
-            try:
-                # 每次尝试前确保连接
-                # 注意：不能直接调用connect()因为它是带锁的，如果已经在锁内则没事，
-                # 但这里通常是在业务方法内，没有持有锁。
-                if not ThreadSafeBaostockSource._is_connected:
+        def _attempt():
+            # 每次尝试前确保连接
+            # 注意：不能直接调用connect()因为它是带锁的，如果已经在锁内则没事，
+            # 但这里通常是在业务方法内，没有持有锁。
+            if not ThreadSafeBaostockSource._is_connected:
+                self.connect()
+            return query_func()
+
+        def _on_error(attempt, e):
+            logger.warning(f"Baostock查询异常 (尝试 {attempt}/{max_retries}) {error_context}: {e}")
+            if attempt < max_retries:
+                # 尝试断开重连
+                try:
+                    self.disconnect()
+                    time.sleep(1) # 简单等待
                     self.connect()
-
-                return query_func()
-            except Exception as e:
-                last_error = e
-                # 检查是否是网络相关错误
-                error_str = str(e)
-                is_network_error = "Broken pipe" in error_str or "Connection reset" in error_str or "socket" in error_str.lower()
-
-                logger.warning(f"Baostock查询异常 (尝试 {attempt+1}/{max_retries}) {error_context}: {e}")
-
-                if attempt < max_retries - 1:
-                    # 尝试断开重连
-                    try:
-                        self.disconnect()
-                        time.sleep(1) # 简单等待
-                        self.connect()
-                    except Exception as re_e:
-                        logger.error(f"重连失败: {re_e}")
+                except Exception as re_e:
+                    logger.error(f"重连失败: {re_e}")
 
         # 重试耗尽，抛出最后一次异常
-        raise last_error
+        return run_with_retry(_attempt, attempts=max_retries, on_error=_on_error)
 
     def get_stock_list(self) -> List[Dict[str, Any]]:
         """获取股票列表 - 线程安全版本"""
