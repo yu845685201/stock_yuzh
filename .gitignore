@@ -206,12 +206,10 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-prod/
-uat/
-
-# 跑数中间产物：断点 manifest、G3 对账基线锚点、CSV 落地文件
-# 本地必须保留（G3 对账依赖 baseline_*.json），但不纳入版本控制
-backend/tmp/
+# R-16 目录重组：数据/日志/中间产物锚定仓库根
+/data/
+/logs/
+/tmp/
 # Redis 二进制与运行报告产物（R-05 出库，本地保留）
 dump.rdb
 *.rdb

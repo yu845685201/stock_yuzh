@@ -25,7 +25,7 @@ class CsvWriter:
             config_manager: 配置管理器
         """
         self.config_manager = config_manager or ConfigManager()
-        self.csv_path = self.config_manager.get_data_paths().get('csv', 'uat/data')
+        self.csv_path = self.config_manager.get_data_paths().get('csv', 'data')
         self.logger = logging.getLogger(__name__)
 
         # 初始化文件管理器

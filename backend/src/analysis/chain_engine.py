@@ -291,14 +291,14 @@ class ChainEngine:
 def build_output_dir(config_manager) -> Path:
     """解析输出目录：``analysis.output_dir`` 相对仓库根 ``stock_yuzh/``，或绝对路径。
 
-    默认 ``uat/data/analysis`` → ``stock_yuzh/uat/data/analysis``（方案 §2.5）。
+    默认 ``data/analysis`` → ``stock_yuzh/data/analysis``（方案 §2.5，R-16 后路径）。
     """
     configured = config_manager.get("analysis.output_dir") if config_manager else None
     repo_root = Path(__file__).resolve().parents[3]  # analysis → src → backend → stock_yuzh
     if configured:
         candidate = Path(str(configured)).expanduser()
         return candidate if candidate.is_absolute() else (repo_root / candidate)
-    return repo_root / "uat" / "data" / "analysis"
+    return repo_root / "data" / "analysis"
 
 
 def options_from_config(config_manager) -> EngineOptions:

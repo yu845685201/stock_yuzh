@@ -27,7 +27,7 @@ def write_markdown_report(
     log_label: str = '报告',
     ts: Optional[str] = None,
 ) -> Optional[str]:
-    """将 lines 写入 <repo_root>/doc/reports/<file_prefix>_<YYYYmmdd_HHMMSS>.md。
+    """将 lines 写入 <repo_root>/data/reports/<file_prefix>_<YYYYmmdd_HHMMSS>.md。
 
     Args:
         lines: 报告内容行（逐字保留各调用方原文案）
@@ -41,7 +41,7 @@ def write_markdown_report(
     try:
         if ts is None:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        report_dir = resolve_repo_root() / 'doc' / 'reports'
+        report_dir = resolve_repo_root() / 'data' / 'reports'
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / f"{file_prefix}_{ts}.md"
         with open(report_path, 'w', encoding='utf-8') as f:

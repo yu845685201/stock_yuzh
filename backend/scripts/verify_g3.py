@@ -16,7 +16,7 @@ from src.database.connection import DatabaseConnection
 def main():
     config_manager = ConfigManager()
     db = DatabaseConnection(config_manager)
-    meta = json.loads((ROOT / 'tmp' / 'baseline_meta.json').read_text(encoding='utf-8'))
+    meta = json.loads((ROOT.parent / 'tmp' / 'baseline_meta.json').read_text(encoding='utf-8'))
     checks = []
 
     # 1. 全局统计
@@ -44,7 +44,7 @@ def main():
     checks.append(('前视消除（披露日≤交易日）', kline['lookahead'] == 0))
 
     # 3. 与基线逐股行数对比（抽样 30 只）
-    stats_file = ROOT / 'tmp' / 'baseline_stock_stats.json'
+    stats_file = ROOT.parent / 'tmp' / 'baseline_stock_stats.json'
     base_stats = {r['ts_code']: r for r in json.loads(stats_file.read_text(encoding='utf-8'))}
     sample_codes = list(base_stats.keys())[:30]
     placeholders = ','.join(['%s'] * len(sample_codes))

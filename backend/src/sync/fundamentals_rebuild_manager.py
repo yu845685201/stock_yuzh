@@ -29,7 +29,7 @@ from ..utils.quarter_calculator import calculate_start_quarter, get_current_prev
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_MANIFEST = ROOT / 'tmp' / 'fundamentals_rebuild_manifest.json'
+DEFAULT_MANIFEST = ROOT.parent / 'tmp' / 'fundamentals_rebuild_manifest.json'
 
 
 class FundamentalsRebuildManager:

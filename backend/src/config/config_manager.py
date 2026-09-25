@@ -17,8 +17,9 @@ class ConfigManager:
         Args:
             config_path: 配置文件路径，默认为 backend/config/config.yaml
         """
+        # R-16：config.yaml 上移至仓库根 config/（backend/src/config/../../.. = 仓库根）
         self.config_path = config_path or os.path.join(
-            os.path.dirname(__file__), '..', '..', 'config', 'config.yaml'
+            os.path.dirname(__file__), '..', '..', '..', 'config', 'config.yaml'
         )
         self._config = None
 
@@ -44,8 +45,8 @@ class ConfigManager:
                 'database': 'stock_analysis_uat'
             },
             'data_paths': {
-                'csv': 'uat/data',
-                'vipdoc': 'uat/vipdoc'
+                'csv': 'data',
+                'vipdoc': 'data/vipdoc'
             },
             'data_sources': {
                 'baostock': {
@@ -129,8 +130,16 @@ class ConfigManager:
         return cfg
 
     def get_data_paths(self) -> Dict[str, str]:
-        """获取数据路径配置"""
-        return self.get('data_paths', {})
+        """获取数据路径配置（R-16：相对路径一律相对仓库根解析，与运行 cwd 无关）"""
+        raw = self.get('data_paths', {}) or {}
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+        resolved: Dict[str, str] = {}
+        for key, value in raw.items():
+            if value and not os.path.isabs(str(value)):
+                resolved[key] = os.path.join(repo_root, str(value))
+            else:
+                resolved[key] = value
+        return resolved
 
     def save_config(self) -> None:
         """保存配置到文件"""

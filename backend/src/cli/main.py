@@ -400,7 +400,7 @@ def sync_fundamentals(ctx, no_csv, no_db, batch_size, dry_run, list_status, qps_
 @click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
 @click.option('--codes', help='指定股票ts_code列表，逗号分隔（默认全市场 type=股票）')
 @click.option('--no-resume', is_flag=True, default=False, help='忽略 manifest 断点，从头开始')
-@click.option('--manifest-path', default=None, help='manifest 文件路径（默认 tmp/fundamentals_rebuild_manifest.json）')
+@click.option('--manifest-path', default=None, help='manifest 文件路径（默认 <仓库根>/tmp/fundamentals_rebuild_manifest.json）')
 @click.pass_context
 def rebuild_fundamentals(ctx, no_csv, codes, no_resume, manifest_path):
     """基本面全量重刷（串行+manifest断点，约9-10小时，支持中断续跑）"""

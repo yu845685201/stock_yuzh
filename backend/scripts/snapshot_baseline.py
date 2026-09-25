@@ -1,10 +1,10 @@
 """基线快照：记录跑数前数据库状态，供重建后 G3 对账
 
 输出：
-- doc/reports/baseline_snapshot_{ts}.md        人读报告
-- backend/tmp/baseline_meta.json               全局数字（G3 自动对比用）
-- backend/tmp/baseline_stock_stats.json        测试集 100 股逐股统计
-- backend/tmp/baseline_stock_dump_{code}.json  3 只样本股全量行
+- <repo_root>/data/reports/baseline_snapshot_{ts}.md        人读报告
+- <repo_root>/tmp/baseline_meta.json               全局数字（G3 自动对比用）
+- <repo_root>/tmp/baseline_stock_stats.json        测试集 100 股逐股统计
+- <repo_root>/tmp/baseline_stock_dump_{code}.json  3 只样本股全量行
 """
 import json
 import sys
@@ -80,12 +80,12 @@ def main():
         'per_stock_covered': len(per_stock),
         'dump_codes': {c: len(rows) for c, rows in dumps.items()},
     }
-    j(ROOT / 'tmp' / 'baseline_meta.json', meta)
-    j(ROOT / 'tmp' / 'baseline_stock_stats.json', per_stock)
+    j(ROOT.parent / 'tmp' / 'baseline_meta.json', meta)
+    j(ROOT.parent / 'tmp' / 'baseline_stock_stats.json', per_stock)
     for code, rows in dumps.items():
-        j(ROOT / 'tmp' / f'baseline_stock_dump_{code}.json', rows)
+        j(ROOT.parent / 'tmp' / f'baseline_stock_dump_{code}.json', rows)
 
-    report = ROOT.parent / 'doc' / 'reports' / f'baseline_snapshot_{ts}.md'
+    report = ROOT.parent / 'data' / 'reports' / f'baseline_snapshot_{ts}.md'
     report.parent.mkdir(parents=True, exist_ok=True)
     stats_lines = '\n'.join(
         f"| {r['ts_code']} | {r['rows']} | {r['min_date']} | {r['max_date']} |"

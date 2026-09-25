@@ -93,7 +93,7 @@ A股盘后静态分析系统
   数据库: stock_analysis_uat
   ```
 - **数据目录**
-  - CSV文件根目录：`uat/data`
+  - CSV文件根目录：`data`
   - 通达信数据根目录：`uat/vipdoc`
 
 ## 生产环境 (PROD)

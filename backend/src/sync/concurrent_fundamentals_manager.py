@@ -36,7 +36,7 @@ class ConcurrentFundamentalsManager:
 
         # 使用线程安全的baostock源
         baostock_config = {
-            'data_path': self.config.get('data_paths', {}).get('csv', 'uat/data'),
+            'data_path': self.config.get('data_paths', {}).get('csv', 'data'),
             'financial_data_rate_limit': self.config.get('data_sources.baostock', {}).get('financial_data_rate_limit', {})
         }
         self.baostock = ThreadSafeBaostockSource(baostock_config)

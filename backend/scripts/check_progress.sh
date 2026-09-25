@@ -12,12 +12,12 @@ cd "$(dirname "$0")/.."
 python3 -c "
 import json
 try:
-    d = json.load(open('tmp/fundamentals_rebuild_manifest.json'))
+    d = json.load(open('../tmp/fundamentals_rebuild_manifest.json'))
     print('manifest: completed %d / 5537, failed %d' % (len(d['completed']), len(d['failed'])))
     print('判定:', '已完成' if len(d['completed']) >= 5537 and not d['failed'] else '进行中')
 except FileNotFoundError:
     print('manifest 不存在（尚未开始）')"
-[ -f tmp/fundamentals_rebuild_DONE ] && echo "DONE 标记存在（重刷已完成）"
+[ -f ../tmp/fundamentals_rebuild_DONE ] && echo "DONE 标记存在（重刷已完成）"
 for f in /tmp/fundamentals_supervised.log /tmp/fundamentals_rebuild_full.log /tmp/fundamentals_rebuild_resume*.log /tmp/fundamentals_rebuild_final.log; do
     [ -f "$f" ] && echo "--- $f (最后写入: $(stat -f '%Sm' "$f"))" && grep -E "进度|FINAL|封禁|急停" "$f" 2>/dev/null | tail -2
 done
