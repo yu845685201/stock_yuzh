@@ -10,7 +10,8 @@
 cd "$(dirname "$0")/.."   # 进入 backend 目录
 
 # 项目虚拟环境解释器优先（系统 python3 缺少 yaml/psycopg2 等依赖）
-PYTHON="$(dirname "$0")/../.venv/bin/python"
+# 本脚本位于 backend/scripts/，venv 位于仓库根，故向上两级
+PYTHON="$(dirname "$0")/../../.venv/bin/python"
 [ -x "$PYTHON" ] || PYTHON=python3
 
 SKIP_TRUNCATE=0
