@@ -9,6 +9,10 @@
 # =============================================================
 cd "$(dirname "$0")/.."   # 进入 backend 目录
 
+# 项目虚拟环境解释器优先（系统 python3 缺少 yaml/psycopg2 等依赖）
+PYTHON="$(dirname "$0")/../.venv/bin/python"
+[ -x "$PYTHON" ] || PYTHON=python3
+
 SKIP_TRUNCATE=0
 [ "$1" == "--no-truncate" ] && SKIP_TRUNCATE=1
 
@@ -28,7 +32,7 @@ fi
 
 LOG=/tmp/kline_rebuild_$(date +%Y%m%d_%H%M%S).log
 echo "启动全市场日K双源重建，日志: $LOG"
-python3 -c "
+"$PYTHON" -c "
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 from src.config.config_manager import ConfigManager
@@ -42,6 +46,6 @@ print('=== FINAL ===', 'success:', r['success'], 'records:', r['records'], 'db_r
 
 echo ""
 echo "=== 运行 G3 全局对账 ==="
-python3 scripts/verify_g3.py
+"$PYTHON" scripts/verify_g3.py
 echo ""
 echo "G3 通过后: git add backend/src backend/test backend/scripts backend/config/config.yaml backend/requirements.txt doc/ && git commit && git push origin feature/data_coll_simple"
