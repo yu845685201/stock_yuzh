@@ -10,6 +10,7 @@ R-06 拆分后本文件为瘦外观（facade）：DatabaseConnection 由各 mixi
 - type_convert.py  日期/时间解析与转换表达式（TypeConvertMixin）
 - ddl.py           表/分区/约束/索引 DDL 与迁移（DdlMixin）
 - dao_fundamentals.py  基本面/交易日历/股票基础 DAO（FundamentalsDaoMixin）
+- dao_financial_pdf.py 财报PDF采集进度 DAO（FinancialPdfDaoMixin）
 - dao_kline_1min.py    1分钟K线分区 DAO（Kline1MinDaoMixin）
 - dao_kline_day.py     日K线 DAO（KlineDayDaoMixin）
 - dao_anal.py          立体K线 DAO（AnalDaoMixin）
@@ -20,6 +21,7 @@ from .base import ConnectionMixin
 from .type_convert import TypeConvertMixin
 from .ddl import DdlMixin
 from .dao_fundamentals import FundamentalsDaoMixin
+from .dao_financial_pdf import FinancialPdfDaoMixin
 from .dao_kline_1min import Kline1MinDaoMixin
 from .dao_kline_day import KlineDayDaoMixin
 from .dao_anal import AnalDaoMixin
@@ -30,6 +32,7 @@ class DatabaseConnection(
     TypeConvertMixin,
     DdlMixin,
     FundamentalsDaoMixin,
+    FinancialPdfDaoMixin,
     Kline1MinDaoMixin,
     KlineDayDaoMixin,
     AnalDaoMixin,

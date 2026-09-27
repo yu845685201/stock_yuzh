@@ -436,6 +436,72 @@ def rebuild_fundamentals(ctx, no_csv, codes, no_resume, manifest_path):
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+@cli.command('sync-financial-pdf')
+@click.option('--init', 'init_mode', is_flag=True, help='全历史初始化（含早年报告，断点分晚跑）')
+@click.option('--codes', default=None, help='指定股票代码列表，逗号分隔（如: 600519,000001，兼容 sh.600519 写法）')
+@click.option('--year', type=int, default=None, help='指定报告期年份（如 2023）')
+@click.option('--year-from', type=int, default=None, help='报告期起始年份（含，与--year-to配合）')
+@click.option('--year-to', type=int, default=None, help='报告期结束年份（含，与--year-from配合）')
+@click.option('--dry-run', is_flag=True, default=False, help='只建清单不下载（输出份数与容量估算，不写进度）')
+@click.pass_context
+def sync_financial_pdf(ctx, init_mode, codes, year, year_from, year_to, dry_run):
+    """采集财报PDF（巨潮资讯网）：默认增量（无进度股票回补近5年）"""
+    if init_mode and (year or year_from or year_to):
+        click.echo("\n✗ 错误: --init 与 --year/--year-from/--year-to 互斥")
+        return
+    if year_to is not None and year_from is None:
+        click.echo("\n✗ 错误: --year-to 必须与 --year-from 配合使用")
+        return
+    if year is not None:
+        year_from, year_to = year, year
+
+    if init_mode:
+        click.echo("开始采集财报PDF（全历史初始化）...")
+    elif year_from is not None:
+        click.echo(f"开始采集财报PDF（报告期 {year_from}~{year_to or year_from}）...")
+    else:
+        click.echo("开始采集财报PDF（增量：有进度只采新增，无进度回补近5年）...")
+
+    if codes:
+        click.echo(f"  - 指定股票: {codes}")
+    if dry_run:
+        click.echo("  - dry-run 模式: 只建清单不下载，不写进度")
+
+    from src.sync.financial_pdf_manager import FinancialPdfManager
+    manager = FinancialPdfManager(ctx.obj['config_manager'])
+    stock_codes = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
+    result = manager.execute(init_mode=init_mode, year_from=year_from, year_to=year_to,
+                             codes=stock_codes, dry_run=dry_run)
+
+    stats = result['stats']
+    if dry_run:
+        click.echo(f"\n✓ dry-run 完成（{stats['mode']}）")
+        click.echo(f"  - 股票: {stats['stocks_total']} 只")
+        click.echo(f"  - 计划下载: {stats['docs_planned']} 份")
+        click.echo(f"  - 容量估算: {stats['estimated_mb']:.0f} MB（adjunctSize 口径）")
+    elif result['success']:
+        click.echo(f"\n✓ 财报PDF采集完成（{stats['mode']}）!")
+    elif result['blocked']:
+        click.echo("\n✗ 财报PDF采集因巨潮风控急停（进度/断点已保存，稍后重跑即可续）")
+    else:
+        click.echo("\n✗ 财报PDF采集完成但存在失败（manifest 失败清单已记录，重跑可自动重试）")
+    click.echo(f"  - 股票: {stats['stocks_total']} 只（完成 {stats['stocks_done']}）")
+    click.echo(f"  - 计划 {stats['docs_planned']} 份，下载 {stats['docs_downloaded']}，"
+               f"跳过已有 {stats['docs_skipped_existing']}，非PDF跳过 {stats['docs_skipped_non_pdf']}，"
+               f"重试找回 {stats['docs_retried_ok']}，版本覆盖 {stats['docs_replaced']}，"
+               f"失败 {stats['docs_failed']}")
+    click.echo(f"  - 进度推进股票数: {stats['progress_advanced']}")
+    if stats['failed_stocks']:
+        click.echo(f"  - 失败股票: {stats['failed_stocks']}")
+    if result.get('errors'):
+        for err in result['errors']:
+            click.echo(f"  - 错误: {err}")
+    if result.get('duration') is not None:
+        click.echo(f"  - 耗时: {result['duration'] / 60:.1f} 分钟")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 @cli.command()
 @click.pass_context
 def status(ctx):

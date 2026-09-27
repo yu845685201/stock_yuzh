@@ -85,6 +85,18 @@ sync:
   fundamentals_rebuild_call_sleep: 0.6     # 每次季度调用间隔（秒）
   fundamentals_rebuild_recycle_calls: 1000 # 每 N 次调用回收会话（重新登录）
 
+# 财报PDF采集配置（巨潮资讯网，安全红线：串行限速、正常UA、不破解、仅自用）
+cninfo:
+  query_base_url: http://www.cninfo.com.cn
+  static_base_url: http://static.cninfo.com.cn
+  timeout: 30
+  query_interval: 0.5      # 检索接口请求间隔（秒）
+  download_interval: 0.5   # PDF下载间隔（秒）
+  page_size: 30
+  max_pages_per_window: 40 # 单检索窗口分页上限（超过自动对半拆窗）
+  backfill_years: 5        # 无进度股票的默认回补年数（报告期口径）
+  pdf_dir: data/financial_pdf  # PDF落盘根目录（相对仓库根 stock_yuzh/，或绝对路径）
+
 # 技术分析链配置（doc/技术分析链方案设计.MD）
 analysis:
   # CSV / 进度文件 / 运行元信息输出目录（相对仓库根 stock_yuzh/，或绝对路径）
