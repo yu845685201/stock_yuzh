@@ -27,6 +27,9 @@ pypinyin==0.51.0
 tqdm==4.66.1
 psutil==5.9.8
 
+# Excel .xls 解析（中证指数官网 indicator 估值文件）
+xlrd>=2.0.1
+
 # HTTP客户端
 requests==2.31.0
 

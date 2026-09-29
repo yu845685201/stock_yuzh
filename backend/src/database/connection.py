@@ -14,6 +14,7 @@ R-06 拆分后本文件为瘦外观（facade）：DatabaseConnection 由各 mixi
 - dao_kline_1min.py    1分钟K线分区 DAO（Kline1MinDaoMixin）
 - dao_kline_day.py     日K线 DAO（KlineDayDaoMixin）
 - dao_anal.py          立体K线 DAO（AnalDaoMixin）
+- dao_review_sync.py   每日复盘数据采集 DAO（ReviewDaoMixin）
 """
 
 from .pool import DatabaseConnectionPool
@@ -25,6 +26,7 @@ from .dao_financial_pdf import FinancialPdfDaoMixin
 from .dao_kline_1min import Kline1MinDaoMixin
 from .dao_kline_day import KlineDayDaoMixin
 from .dao_anal import AnalDaoMixin
+from .dao_review_sync import ReviewDaoMixin
 
 
 class DatabaseConnection(
@@ -36,5 +38,6 @@ class DatabaseConnection(
     Kline1MinDaoMixin,
     KlineDayDaoMixin,
     AnalDaoMixin,
+    ReviewDaoMixin,
 ):
     """数据库连接管理类 - 向后兼容，支持连接池优化"""

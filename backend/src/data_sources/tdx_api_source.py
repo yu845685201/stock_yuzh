@@ -203,3 +203,37 @@ class TdxApiSource(DataSourceBase):
         limit: int = 800
     ) -> List[Dict[str, Any]]:
         return self.get_kline_history(code, kline_type, start_date=start_date, end_date=end_date, limit=limit)
+
+    # ---------- 每日复盘数据采集扩展（方案 4.1/4.2/4.10；tdx-api 侧对应新增只读接口见 3.2/3.3）----------
+
+    def get_index_kline_all(self, code: str, kline_type: str = 'day') -> List[Dict[str, Any]]:
+        """指数日K全量历史（/api/index/all，Kline 含 UpCount/DownCount，仅指数有效）"""
+        data = self._request('/api/index/all', {'code': code, 'type': kline_type})
+        return data if isinstance(data, list) else []
+
+    def get_index_kline_tail(self, code: str, limit: int = 5, kline_type: str = 'day') -> List[Dict[str, Any]]:
+        """指数日K尾部增量（/api/index，limit=N）"""
+        data = self._request('/api/index', {'code': code, 'type': kline_type, 'limit': limit})
+        return data if isinstance(data, list) else []
+
+    def get_ths_factor(self, code: str) -> List[Dict[str, Any]]:
+        """复权因子全历史（/api/ths-factor，THS 同源；[{date, q_factor, h_factor}]）"""
+        data = self._request('/api/ths-factor', {'code': code})
+        return data if isinstance(data, list) else []
+
+    def get_xdxr(self, code: str, limit: int = 0) -> List[Dict[str, Any]]:
+        """除权除息事件（/api/xdxr；limit=0 全历史，>0 取尾部 N 条）"""
+        params: Dict[str, Any] = {'code': code}
+        if limit:
+            params['limit'] = limit
+        data = self._request('/api/xdxr', params)
+        return data if isinstance(data, list) else []
+
+    def get_minute_trade_history(self, code: str, trade_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        """全天分时成交（/api/minute-trade-all；不带 date 取当日，带 date 取历史全天，
+        中间件内部已分页聚合全量，Go 侧单请求 2s 超时【已验证】）"""
+        params: Dict[str, Any] = {'code': code}
+        if trade_date:
+            params['date'] = trade_date
+        data = self._request('/api/minute-trade-all', params)
+        return data if isinstance(data, list) else []

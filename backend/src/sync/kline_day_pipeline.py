@@ -23,6 +23,9 @@ class KlineDaySharedState:
     detection_details: List[Dict[str, Any]] = field(default_factory=list)
     source_missing: Dict[str, int] = field(default_factory=lambda: {'qfq_empty': 0, 'raw_empty': 0})
     anomalies: List[Dict[str, Any]] = field(default_factory=list)
+    # 当日检出除权（qfq_rebase 命中并整股重拉）的 ts_code 清单：
+    # sync 完成后由调用方落 tmp/adjust_trigger_YYYYMMDD.json，供复权因子增量同步使用（方案 4.2）
+    xdxr_hit_codes: List[str] = field(default_factory=list)
     api_time: float = 0.0
     csv_time: float = 0.0
     db_time: float = 0.0
@@ -253,6 +256,10 @@ def merge_stock_result(res: Dict[str, Any], ctx: KlineDaySharedState) -> None:
     details = res.get('detection_details') or []
     if details:
         ctx.detection_details.extend(details[:200 - len(ctx.detection_details)])
+    for d in details:
+        # 仅 qfq_rebase（前复权重基=除权）记入触发清单；raw_revision 是源修订，与除权无关
+        if d.get('type') == 'qfq_rebase' and d.get('ts_code') and d['ts_code'] not in ctx.xdxr_hit_codes:
+            ctx.xdxr_hit_codes.append(d['ts_code'])
     for k, v in (res.get('source_missing') or {}).items():
         ctx.source_missing[k] = ctx.source_missing.get(k, 0) + v
 

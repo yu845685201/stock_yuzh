@@ -431,6 +431,13 @@ class SyncManager:
                 )
 
             result['success'] = True
+            # 除权触发清单落盘（方案 4.2）：日常增量检出 qfq_rebase 的股票清单，
+            # 供复权因子增量同步（adjust_factor_manager）读取；与当日已有清单合并，幂等
+            if not init_mode and not is_explicit_range and ctx.xdxr_hit_codes:
+                try:
+                    self._write_adjust_trigger(ctx.xdxr_hit_codes)
+                except Exception as e:
+                    self.logger.warning(f"除权触发清单落盘失败（不影响日K同步）: {e}")
         except Exception as e:
             result['errors'].append(str(e))
             print(f"同步日K线失败: {e}")
@@ -495,6 +502,29 @@ class SyncManager:
             row['Amount'] = item.get('Amount')
             row['RawClose'] = item.get('Close')
         return [merged[key] for key in sorted(merged.keys())]
+
+    def _write_adjust_trigger(self, ts_codes: List[str]) -> str:
+        """落当日除权触发清单（tmp/adjust_trigger_YYYYMMDD.json，与已有清单合并幂等）。
+
+        消费方：adjust_factor_manager.read_adjust_trigger（复权因子增量，方案 4.2）。
+        """
+        import json
+        from .adjust_factor_manager import adjust_trigger_path
+        from .review_common import save_manifest, tmp_dir
+
+        trade_date = date.today().strftime('%Y%m%d')
+        path = adjust_trigger_path(trade_date)
+        merged: List[str] = list(dict.fromkeys(ts_codes))
+        try:
+            existing = json.loads(path.read_text(encoding='utf-8'))
+            merged = list(dict.fromkeys(merged + [str(c) for c in existing.get('ts_codes', [])]))
+        except Exception:
+            pass
+        payload = {'trade_date': trade_date, 'ts_codes': merged,
+                   'updated_at': datetime.now().isoformat(timespec='seconds')}
+        save_manifest(tmp_dir() / f'adjust_trigger_{trade_date}.json', payload)
+        self.logger.info(f"除权触发清单已落盘: {len(merged)} 只（{path.name}）")
+        return str(path)
 
     def _detect_kline_day_refetch(self, ts_code: str, merged: List[Dict[str, Any]]) -> Tuple[bool, Dict[str, Any]]:
         """

@@ -118,3 +118,86 @@ analysis:
 
 # （CSV 文件管理模式配置段已随 RK-3 方案A 删除：CsvFileManager 模式体系零消费，
 #  实际行为恒为 _write_csv_file 硬编码"存在即删除"）
+
+# ---- 每日复盘数据采集配置（每日复盘数据采集技术方案-V1.0-20260927）----
+# 合规红线：串行限速、正常 UA/Referer、不破解任何技术措施（含同花顺 hexin-v）、
+# 风控识别即退避冷却、仅自用不分发。频率预算见方案 §8.1，全部参数来自本段，无硬编码。
+review_sync:
+  # 通用（http_collector_base）
+  default_timeout: [5, 30]        # 连接5s/读30s
+  blocked_cooldown_seconds: 600   # 风控急停冷却
+  retry_attempts: 3               # 网络类异常重试次数（风控信号不重试）
+  # user_agent: 可覆盖默认 UA（与 cninfo 现用同款策略）
+  # bypass_proxy: false           # 默认外网走系统代理；true 显式绕过
+  # 各源请求间隔（秒）
+  index_interval: 0.2
+  factor_interval: 2.0
+  cninfo_interval: 0.5            # 沿用现有 cninfo.query_interval 口径
+  sse_szse_interval: 1.5
+  csindex_interval: 2.0
+  ths_interval: 2.0
+  sina_interval: 1.0
+  sina_sector_interval: 2.0     # 新浪 vip 板块接口（行业分类/概念成分，缺失数据采集方案 20260928）
+  sw_interval: 5.0              # 申万一级行业分类文件（swsresearch 下载中心，31+1 请求/次）
+  # 源间并发（用户决策 2026-09-27）：独立源波次并行，各源内部仍串行限速
+  parallel_sources: true
+  parallel_workers: 4            # 波内并发源数上限
+  # 分笔资金流（tdx 本地，并发≤3 灰度起步）
+  money_flow:
+    concurrent_workers: 3
+    request_interval: 0.15
+    big_amount_threshold: 500000  # 大单阈值（元）
+    top_amount_n: 50              # 成交额 Top N
+    pct_threshold: 0.07           # 涨跌幅异动阈值（|change_rate|≥7%，百分点 7 对应 7%）
+    gray_limit: 200               # 灰度期子集上限（稳定后放开 500）
+    throttle_on_timeout_pct: 0.05 # 超时率阈值，触发自动降速（间隔×2）
+  margin_lookback_days: 5        # 两融发布滞后回看天数（深所周末期间周中数据延迟可见）
+  # THS 财报（探路结论为"不可行"时置 false，报告章节标待补；三项 THS 源共用探路结论）
+  ths_finance:
+    enabled: true
+    backfill_years: 5
+  concept:
+    enabled: true
+  # 行业分类（缺失数据采集方案 20260928 §3；主源新浪行业板块 source=sina_hy 日更）
+  industry:
+    enabled: true
+    sw_enabled: true            # 申万 2021 一级增强口径 source=sw_2021（下载中心探路已通过）
+  unlock:
+    enabled: true
+    # 巨潮解禁公告路径（缺失数据采集方案 20260928 §5）：searchkey 窗口检索 -> 标题过滤 -> PDF 解析
+    searchkeys: ['限售股上市流通', '解除限售']
+    pdf_extract_max_pages: 3    # 解禁日一般在首页，向后多翻 2 页兜底
+    days_back: 3                # 日频增量回看天数（游标存在时取更近下界）
+  weekly_refresh_weekday: 6       # 周日（0=周一）跑概念/解禁
+  # 指数清单（code: 6位指数代码, ts_code: 库内主键, name: 简称, exchange: 所属所）
+  indices:
+    - {code: "000001", ts_code: sh.000001, name: 上证指数, exchange: sse}
+    - {code: "399001", ts_code: sz.399001, name: 深证成指, exchange: szse}
+    - {code: "399006", ts_code: sz.399006, name: 创业板指, exchange: szse}
+    - {code: "000688", ts_code: sh.000688, name: 科创50, exchange: sse}
+    - {code: "000300", ts_code: sh.000300, name: 沪深300, exchange: sse}
+    - {code: "899050", ts_code: bj.899050, name: 北证50, exchange: bse}
+  # 中证指数估值关注清单（官网每日 indicator 文件；中证仅发布其管理指数，
+  # 深交所指数（创业板指 399006 等）无文件 → 不入清单，实施时已实测）
+  csindex_indices:
+    - {code: "000300", name: 沪深300}
+    - {code: "000905", name: 中证500}
+    - {code: "000852", name: 中证1000}
+    - {code: "000001", name: 上证指数}
+    - {code: "000688", name: 科创50}
+  # 新浪外围市场清单（补充代码确认返回格式后增删，配置化）
+  sina_markets:
+    - {code: int_dji, name: 道琼斯}
+    - {code: int_nasdaq, name: 纳斯达克}
+    - {code: int_sp500, name: 标普500}
+    - {code: rt_hkHSI, name: 恒生指数}
+    - {code: fx_susdcny, name: 美元兑人民币}
+  # 巨潮公告 ann_type 标题分类词表（供复盘按类筛选，不做全文解析）
+  announcement_types:
+    定期报告: ['年度报告', '半年度报告', '中期报告', '季度报告', '一季度报告', '三季度报告']
+    业绩预告: ['业绩预告', '预增', '预减', '扭亏', '首亏', '续盈', '续亏', '略增', '略减']
+    业绩快报: ['业绩快报']
+    解禁: ['上市流通', '解除限售']
+    分红送转: ['分红', '派息', '送转', '权益分派', '利润分配']
+    增减持: ['增持', '减持', '增持计划', '减持计划']
+    重大事项: ['重大资产重组', '停牌', '复牌', '收购', '发行股份', '要约收购', '重大合同', '中标']
