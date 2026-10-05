@@ -19,9 +19,12 @@
 - 两融明细: commonSoaQuery.do?sqlId=RZRQ_MX_INFO&preStockCode=&beginDate=YYYYMMDD&endDate=YYYYMMDD
   （全市场单日 ~2000 条；列: stockCode/securityAbbr/rzye 融资余额元/rzmre 融资买入额/
     rzche 融资偿还额/rqyl 融券余量/无融券余额金额列 → 留空）
-- 龙虎榜(含席位): marketdata/tradedata/queryTradeOpenInfo.do?tradeDate=YYYYMMDD&secCode=&refType=
-  （行按 个股×原因×席位 展开：bsType B/S、branchRank、branchName、branchTxAmt；
-    refType 为披露原因代码）
+- 龙虎榜汇总: queryAllTradeOpenDate.do?Token=QUERY&tradeDate=YYYYMMDD&flag=1
+  （2026-10-02 实测切换：1 请求返回当日全部上榜行（个股×原因），旧 queryTradeOpenInfo.do
+    + refType 空传只返回 refType=1 一个分类（X-1 漏采 96%，已废弃删除）；
+    行字段: secCode/secAbbr/refType/secTxAmount 当日总成交额/
+    branchNameB/branchTxAmtB/branchNameS/branchTxAmtS（买卖各 5 席位逗号打包，
+    T12 实测一一对应；bsType 汇总行恒空））
 - 预约披露: commonSoaQuery.do?sqlId=SSE_SZSGG_DQBGYYQK_CAST_NEW&bulletintype=L011~L014&publishYear=YYYY
   （L011 年报/L012 半年报/L013 一季报/L014 三季报；列: companyCode/companyAbbr/
     publishDate0 预约日/actualDate 实际披露日）
@@ -38,14 +41,29 @@ from .http_collector_base import HttpCollectorBase, ReviewBlockedError
 
 logger = logging.getLogger(__name__)
 
-# 上交所 commonSoaQuery/queryTradeOpenInfo 返回 JSONP（jsonpCallback({...})），需剥壳
+# 上交所 commonSoaQuery/queryAllTradeOpenDate 返回 JSONP（jsonpCallback({...})），需剥壳
 _JSONP_PATTERN = re.compile(r'^[\w$.]+\((.*)\)\s*;?\s*$', re.S)
 
 SZSE_SHOWREPORT = 'http://www.szse.cn/api/report/ShowReport/data'
 SZSE_REFERER = 'http://www.szse.cn/'
 SSE_QUERY = 'http://query.sse.com.cn/commonSoaQuery.do'
-SSE_LHB_URL = 'http://query.sse.com.cn/marketdata/tradedata/queryTradeOpenInfo.do'
+SSE_LHB_SUMMARY_URL = 'http://query.sse.com.cn/marketdata/tradedata/queryAllTradeOpenDate.do'
+SSE_LHB_REFERER = 'http://www.sse.com.cn/disclosure/diclosure/public/dailydata/'
 SSE_REFERER = 'http://www.sse.com.cn/'
+
+# 上交所龙虎榜 refType -> 披露原因文本（第七轮 T21：全量提取自官网
+# search_diclosurePublic_2022.js 的 disclosureTypeByGgOption，共 19 项。
+# 注意官方文案 11/12 为"当日偏离"、1/2 为"累计达 20%"；未知代码回落
+# '披露原因代码{N}' 保持兼容、不丢数据）
+SSE_REF_TYPE_NAMES = {
+    '11': '涨幅偏离', '12': '跌幅偏离', '13': '振幅达15%', '14': '换手率达20%',
+    '15': '无涨跌幅限制', '1': '涨幅偏离累计达20%', '2': '跌幅偏离累计达20%',
+    '7': 'S涨幅累计偏离', '8': 'S跌幅累计偏离', '3': 'ST涨幅累计偏离',
+    '4': 'ST跌幅累计偏离', '5': '日均换手率及累计换手率指标',
+    '31': '异常波动停牌（A股）', '32': '异常波动停牌（B股）',
+    '41': '融资买入量达50%', '42': '融券卖出量达50%',
+    '37': '风险警示股票换手率达30%', '51': '退市整理的证券', '52': '实施特别停牌的证券',
+}
 
 # 上交所定期报告预约 bulletintype -> 报告期 (yyyy, MMDD)
 SSE_BULLETIN_PERIOD = {
@@ -213,24 +231,28 @@ class SzseSseSource(HttpCollectorBase):
             page += 1
         return rows
 
-    # ---------- 上交所 龙虎榜（含席位） ----------
+    # ---------- 上交所 龙虎榜（汇总接口：1 请求全部上榜行 + 打包席位） ----------
 
-    def fetch_sse_lhb(self, trade_date: str) -> List[Dict[str, Any]]:
-        """上交所每日交易公开信息（行按 个股×原因×席位 展开；tradeDate yyyyMMdd）
+    def fetch_sse_lhb_summary(self, trade_date: str) -> List[Dict[str, Any]]:
+        """上交所每日交易公开信息汇总（X-1 修复，2026-10-02 实测切换；tradeDate yyyyMMdd）。
 
-        返回原始行（bsType B/S、branchRank、branchName、branchTxAmt、refType）。
+        1 请求返回当日全部上榜行（个股×原因，实测 20260930 为 27 行 25 只，
+        refTypes 覆盖 [1,11,12,13,14,2]）。行字段：secCode/secAbbr/refType/
+        secTxAmount（个股当日总成交额）/branchNameB/branchTxAmtB/branchNameS/
+        branchTxAmtS（买卖各 5 席位逗号打包，T12 实测一一对应）；bsType 汇总行恒空。
+        旧接口 queryTradeOpenInfo.do + refType 空传只返回 refType=1 单分类
+        （沪市每日仅 1 只、漏采约 96%），已废弃删除。
         """
-        headers = {'Referer': 'http://www.sse.com.cn/disclosure/diclosure/public/dailydata/'}
-        data = self._parse_jsonp(self.get_text(SSE_LHB_URL, params={
-            'jsonCallBack': 'jsonpCallback', 'orderB': 'desc', 'orderS': 'desc',
-            'Token': 'QUERY', 'tradeDate': trade_date, 'secCode': '', 'refType': '',
+        headers = {'Referer': SSE_LHB_REFERER}
+        data = self._parse_jsonp(self.get_text(SSE_LHB_SUMMARY_URL, params={
+            'jsonCallBack': 'jsonpCallback', 'Token': 'QUERY',
+            'tradeDate': trade_date, 'flag': '1',
         }, headers=headers))
         if not isinstance(data, dict):
-            raise ValueError(f'上交所龙虎榜响应结构变更: {str(data)[:200]}')
-        page_help = data.get('pageHelp') or {}
-        rows = page_help.get('data')
+            raise ValueError(f'上交所龙虎榜汇总响应结构变更: {str(data)[:200]}')
+        rows = data.get('result')
         if rows is None:
-            rows = data.get('result') or []
+            rows = (data.get('pageHelp') or {}).get('data') or []
         return rows
 
     # ---------- 上交所 预约披露 ----------

@@ -31,6 +31,28 @@ class TestChainConfig:
         assert [s.name_en for s in chain.modules] == ["limit_up_today", "consecutive_limit_up"]
         assert chain.modules[1].params == {"max_lookback": 60}
 
+    def test_load_daily_review(self):
+        """每日复盘链（方案阶段1）：8 模块、60 交易日窗口。"""
+        chain = load_chain("daily_review")
+        assert chain.chain == "daily_review"
+        assert [s.name_en for s in chain.modules] == [
+            "limit_up_today",
+            "consecutive_limit_up",
+            "limit_down_today",
+            "burst_limit",
+            "limit_up_premium",
+            "big_mover",
+            "volume_surge",
+            "new_high_low",
+        ]
+        assert chain.lookback.is_all is False
+        assert str(chain.lookback) == "60d"
+        assert chain.modules[1].params == {"max_lookback": 60}
+        assert chain.modules[-1].params == {"window": 60}
+
+    def test_list_chains_contains_daily_review(self):
+        assert "daily_review" in [c.chain for c in list_chains()]
+
     def test_unknown_chain(self):
         with pytest.raises(ValueError, match="未知分析链"):
             load_chain("does_not_exist")

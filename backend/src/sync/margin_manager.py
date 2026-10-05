@@ -14,9 +14,10 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..config.config_manager import ConfigManager
+from ..data_sources.http_collector_base import ReviewBlockedError
 from ..data_sources.sse_szse_source import SzseSseSource
 from ..database.connection import DatabaseConnection
-from .review_common import code6_to_ts_code, write_review_report
+from .review_common import code6_to_ts_code, expand_trade_days, write_review_report
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,11 @@ class MarginManager:
         review = self.config.get('review_sync', {}) or {}
         self.lookback_days = int(review.get('margin_lookback_days', 5))
 
-    def execute(self, trade_date: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+    def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
+                write_report: bool = True) -> Dict[str, Any]:
         """拉取 trade_date（缺省 T-1）全市场两融明细。
 
-        交易所发布滞后时逐日回看（默认最多 3 天），沪深独立回补到各自最近有数据日，
+        交易所发布滞后时逐日回看（默认最多 5 天），沪深独立回补到各自最近有数据日，
         报告如实标注每所数据日期（复盘两融章节标注"数据日期 T-N"）。
         """
         started = datetime.now()
@@ -89,13 +91,94 @@ class MarginManager:
             if not dry_run and rows:
                 self.db.upsert_margin_trades(rows)
             result['success'] = bool(rows)
+        except ReviewBlockedError as e:
+            result['blocked'] = True
+            result['errors'].append(f'官网风控急停（本日未入库，稍后重跑补）: {e}')
+            logger.warning(f'两融风控急停 {trade_date}: {e}')
         except Exception as e:
             logger.exception(f'两融采集失败: {e}')
             result['errors'].append(str(e))
         finally:
             result['duration'] = (datetime.now() - started).total_seconds()
-            result['report_path'] = self._write_report(result)
+            # X-19：回填模式逐日报告抑制，结束后由 backfill_range 汇总
+            result['report_path'] = self._write_report(result) if write_report else None
         return result
+
+    # ---------- 历史区间回填（开发项 C） ----------
+
+    def backfill_range(self, start_date: str, end_date: str, dry_run: bool = False,
+                       suppress_report: bool = True) -> Dict[str, Any]:
+        """按交易日历展开 [start_date, end_date] 逐日回填（开发项 C，20230101 起实测 34h 量级）。
+
+        - **断点续跑只信查库（X-14 红线）**：margin_trade_daily 当日行数 > 0 跳过。
+          不得信任单次调用的 stats——margin 内置"发布滞后逐日回看"，显式 --trade-date d
+          而官网 d 未就绪时会静默采到 d-1（行数计入本次调用，误导"当日已成功"）；
+        - 数据日期核对：逐日记录 stats 的 szse_date/sse_date 实际数据日期，与请求日
+          不一致者汇总进报告（回看机制正常行为，如实标注）；
+        - 单日失败不阻塞（失败清单可重跑续补）；风控急停中止并记续跑点；
+        - 游标：margin 无 sync_cursor，回补不影响增量语义；
+        - 报告（X-19）：suppress_report=True 时逐日不落盘，结束写一份汇总；
+        - 限速：沿用现有 sse_szse_interval（1.5s）——实测 165s/日，深市官网 pagesize=20
+          固定、提速空间有限，不建议调整（方案 §六 风险表）。
+        """
+        started = datetime.now()
+        days = expand_trade_days(self.db, start_date, end_date)
+        stats: Dict[str, Any] = {
+            'range': f'{start_date}~{end_date}', 'days_total': len(days),
+            'days_done': 0, 'days_skipped': 0, 'rows': 0,
+            'days_failed': [], 'date_notes': [], 'last_completed_date': None,
+        }
+        result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
+                                  'blocked': False, 'backfill': True}
+        for d in days:
+            if not dry_run and self.db.fetch_margin_row_count(d) > 0:
+                stats['days_skipped'] += 1
+                continue
+            r = self.execute(trade_date=d, dry_run=dry_run, write_report=False)
+            if r.get('blocked'):
+                result['blocked'] = True
+                result['errors'].append(f'风控急停于 {d}，已完成 {stats["days_done"]} 日，'
+                                        f'续跑点 --start-date {d}')
+                break
+            if r['success']:
+                stats['days_done'] += 1
+                stats['rows'] += r['stats']['rows']
+                stats['last_completed_date'] = d
+                # X-14 数据日期核对：回看采到非请求日时如实记录
+                szse_d, sse_d = r['stats'].get('szse_date'), r['stats'].get('sse_date')
+                if szse_d != d or sse_d != d:
+                    stats['date_notes'].append(
+                        {'requested': d, 'szse_date': szse_d, 'sse_date': sse_d})
+            else:
+                stats['days_failed'].append({'date': d, 'errors': r['errors'][:2]})
+        result['success'] = not result['blocked'] and not stats['days_failed']
+        result['duration'] = (datetime.now() - started).total_seconds()
+        result['report_path'] = self._write_backfill_report(result)
+        return result
+
+    def _write_backfill_report(self, result: Dict[str, Any]) -> Optional[str]:
+        """回填汇总报告（X-19：整个区间只写一份）"""
+        stats = result['stats']
+        lines = [
+            f"- 区间：{stats['range']}（交易日 {stats['days_total']}：回填 {stats['days_done']}、"
+            f"跳过 {stats['days_skipped']}、失败 {len(stats['days_failed'])}）",
+            f"- 累计入库：{stats['rows']} 行（末完成日 {stats['last_completed_date']}）",
+            "- 断点续跑口径（X-14）：只信查库（margin_trade_daily 当日行数>0 跳过），"
+            "不信任单次调用 stats——回看机制会静默采到 d-1",
+        ]
+        if stats['date_notes']:
+            shown = stats['date_notes'][:20]
+            lines.append(f"- 数据日期核对（请求日≠数据日，回看行为；共 {len(stats['date_notes'])} 日，"
+                         f"至多展示 20）: {shown}")
+        if result['blocked']:
+            lines.append(f"- ⚠ 风控急停：{result['errors']}")
+        if stats['days_failed']:
+            lines.append(f"- 失败日期清单（可重跑续补）: "
+                         f"{[f['date'] for f in stats['days_failed'][:30]]}")
+        status = '风控急停（部分完成，可续跑）' if result['blocked'] else \
+            ('成功' if result['success'] else '部分失败（失败清单见上，可重跑续补）')
+        return write_review_report('两融历史回填报告', 'margin_backfill_report',
+                                   status, lines, result.get('duration'))
 
     # ---------- 每所行构造（回看复用） ----------
 

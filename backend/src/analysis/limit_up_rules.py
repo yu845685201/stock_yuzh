@@ -158,3 +158,40 @@ def annotate_limit_up(df: pd.DataFrame, stock_code: str, board: str = None) -> p
     out["_limit_known"] = out["_limit_pct"].notna() & change_rate.notna()
     out["_limit_up"] = (hit & out["_limit_known"]).fillna(False).astype(bool)
     return out
+
+
+def annotate_limit_down(df: pd.DataFrame, stock_code: str, board: str = None) -> pd.DataFrame:
+    """为日 K 序列追加跌停判定列（向量化，与 :func:`annotate_limit_up` 镜像）。
+
+    判定口径：``change_rate ≤ -(制度上限 − 下浮)`` 且 ``close ≤ low``
+    （收于跌停 ⟹ 收盘价即当日最低价，跌停价是当日可成交的最低价）。
+
+    追加列：
+        ``_limit_pct``      制度上限（百分点，NaN=制度不适用/板块未知）
+        ``_limit_down``     是否跌停（bool；制度不适用时为 False）
+        ``_limit_down_known`` 该行是否具备判定条件（bool）
+
+    Returns:
+        新的 DataFrame（不修改入参）。
+    """
+    out = df.copy()
+    board = board or board_of(stock_code)
+    out["_limit_pct"] = limit_pct_series(out, board)
+
+    if "change_rate" in out.columns:
+        change_rate = pd.to_numeric(out["change_rate"], errors="coerce")
+    else:
+        change_rate = pd.Series(np.nan, index=out.index, dtype="float64")
+    threshold = -(out["_limit_pct"] - THRESHOLD_OFFSET)
+    hit = change_rate.le(threshold)
+
+    # 逻辑必要条件：收于跌停 ⟹ 收盘价即当日最低价。low 缺失时不启用该护栏。
+    if "close" in out.columns and "low" in out.columns:
+        close = pd.to_numeric(out["close"], errors="coerce")
+        low = pd.to_numeric(out["low"], errors="coerce")
+        guard = close.le(low).where(low.notna(), True)
+        hit &= guard
+
+    out["_limit_down_known"] = out["_limit_pct"].notna() & change_rate.notna()
+    out["_limit_down"] = (hit & out["_limit_down_known"]).fillna(False).astype(bool)
+    return out

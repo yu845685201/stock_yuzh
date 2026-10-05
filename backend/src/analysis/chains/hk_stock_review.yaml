@@ -1,0 +1,30 @@
+# 分析链：港股核心个股截面（33 只池，港美股指标与港股个股分析链整合方案 V1.0 §5）
+#
+# domain: overseas_stocks —— 数据域为港股个股（overseas_kline_day，qfq，市场自身日历）；
+# 15 只 A-H 两地公司引擎自动回挂 a_close 对照列（his_kline_day 前复权，as-of 最近）。
+# 运行：backend/run_cli.py analyze run --chain hk_stock_review [--as-of yyyyMMdd]
+#
+# ⛔ 禁止条款：涨跌停系模块（limit_up_today / consecutive_limit_up / limit_down_today /
+#    burst_limit / limit_up_premium）依赖 A 股涨跌停制度，港股无涨跌停，严禁加入本链。
+# 口径三注：qfq 前复权滚动（历史随公司行动变化）；市场自身交易日历（勿用 A 股日历）；
+#    big_mover/volume_surge 是波动/量能口径，与涨停无关，严禁连板/晋级语言。
+# AH 两列（ah_5d_diff/ah_premium）为参考口径：A 15:00 / H 16:00 / 汇率采集时点三者
+#    错位 + 双复权基准独立滚动；「未对齐」「无A股映射」行不参与 AH 结论。
+
+chain: hk_stock_review
+domain: overseas_stocks
+description: "[外围] 港股个股截面：大波动、放量、5日/20日、60日位置与新高新低、A-H 对比与溢价"
+
+# 窗口语义同外围指数链（行数窗口）；position_60d/new_high_low 需 61 行。
+lookback: 60d
+
+modules:
+  - name: big_mover               # 大波动（±5% 默认阈值，外围语境非涨跌停）
+  - name: volume_surge            # 放量倍数（比值无量纲，量纲差异免疫）
+  - name: chg_5d                  # 5 日累计%
+  - name: chg_20d                 # 20 日累计%
+  - name: position_60d            # 60 日位置%
+  - name: new_high_low            # 60 日新高新低
+    params: {window: 60}
+  - name: ah_5d_diff              # A-H 5 日差（A 侧−H 侧；无映射/未对齐有专词）
+  - name: ah_premium              # A-H 溢价率（fx_shkdcny 缺失记「汇率待补」）

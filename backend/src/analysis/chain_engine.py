@@ -22,7 +22,9 @@ from typing import Any, Dict, List, Optional, Sequence
 import pandas as pd
 
 from .chain_config import ChainConfig
+from .data_domain import WINDOW_BUFFER, get_domain
 from .data_reader import MISSING_MODE_GAP, DataReader
+from .env_assembly import assemble_env
 from .lookback import Lookback
 from .module_base import DATA_INSUFFICIENT, ChainContext, ModuleResult, StockInfo
 from .module_registry import build
@@ -30,9 +32,6 @@ from .progress_tracker import ProgressTracker
 from .result_writer import RunMeta, ResultWriter, now_iso
 
 logger = logging.getLogger(__name__)
-
-#: 加载窗口相对模块回看天数的余量
-WINDOW_BUFFER = 2
 
 
 def _is_hit(value: Any) -> bool:
@@ -94,56 +93,45 @@ class ChainEngine:
         started = time.monotonic()
         started_at = now_iso()
         opts = self.options
+        # 数据域分发（整合方案 §2）：股票池/K线加载/预检/锚定日按域策略，
+        # 引擎主干（逐股跑模块 → CSV）零改动
+        domain = get_domain(chain.domain)
 
         with DataReader(self.config_manager) as reader:
-            as_of = reader.resolve_as_of(opts.as_of)
-            universe = reader.load_stock_universe()
+            as_of = domain.resolve_as_of(reader, opts.as_of)
+            universe = domain.load_universe(reader, self.config_manager)
             if not universe:
-                raise ValueError("股票池为空（base_stock_info.list_status='L' ∩ his_kline_day）")
+                raise ValueError(domain.universe_empty_error)
 
             modules = [build(spec.name_en, spec.params) for spec in chain.modules]
             module_names = [m.name for m in modules]
 
-            # 取列裁剪：各模块 required_columns 并集
-            columns: List[str] = ["change_rate", "is_st"]
+            # 取列裁剪：各模块 required_columns 并集（域基列在前）
+            columns: List[str] = list(domain.base_columns)
             for mod in modules:
                 columns.extend(mod.required_columns)
 
-            # 分析窗口：链 YAML 配置（默认 1y）；再与各模块回看需求取更早者
-            lookback = opts.lookback or chain.lookback
+            # 分析窗口 + 加载 + 预检均按域策略（A股=原逻辑搬运；外围=行数窗口/市场日历）
             module_days = max([m.effective_lookback() for m in modules] or [0])
-            window_expanded = False
-            if lookback.is_all:
-                window_start = None
-            else:
-                chain_start = reader.resolve_window_start(as_of, lookback)
-                candidates = [c for c in [chain_start] if c]
-                if module_days > 0:
-                    needed = reader.nth_trading_day_back(as_of, module_days + WINDOW_BUFFER)
-                    if needed:  # 交易日历不足则忽略，退化为链窗口
-                        candidates.append(needed)
-                        if chain_start and needed < chain_start:
-                            window_expanded = True
-                window_start = min(candidates) if candidates else None
-
-            logger.info(
-                "锚定日 %s | 股票池 %d 只 | 分析窗口 %s（起点 %s%s）| 模块 %s",
-                as_of, len(universe), lookback, window_start or "全历史",
-                "，因模块回看需求扩展" if window_expanded else "", ", ".join(module_names),
-            )
-
-            kdf = reader.load_kline(columns=columns, as_of=as_of, start_date=window_start)
-            pre = reader.precheck(
-                kdf,
-                as_of=as_of,
-                start_date=window_start,
-                break_tolerance_pct=opts.break_tolerance_pct,
-                check_missing_day=opts.check_missing_day,
-                universe=universe,
-                missing_day_mode=opts.missing_day_mode,
-            )
+            load = domain.load(reader, columns, as_of, chain, opts,
+                               module_days, universe)
+            kdf = load.kdf
+            pre = domain.precheck(reader, kdf, as_of, load, universe, opts)
             suspects = pre.suspects
+            lookback_desc = load.lookback_desc
+            window_start = load.window_start
+            window_expanded = load.window_expanded
+            # 截面环境装配（env_assembly；链未声明 env 时零行为变化）
+            if chain.env:
+                load.env_extras.update(assemble_env(chain.env, reader, as_of,
+                                                    self.config_manager))
             reader.close()
+
+        logger.info(
+            "锚定日 %s | 股票池 %d 只 | 分析窗口 %s（起点 %s%s）| 模块 %s",
+            as_of, len(universe), lookback_desc, window_start or "全历史",
+            "，因模块回看需求扩展" if window_expanded else "", ", ".join(module_names),
+        )
 
         loaded_trading_days = int(kdf["trade_date"].nunique()) if not kdf.empty else 0
         logger.info(
@@ -180,7 +168,8 @@ class ChainEngine:
                     reasons = suspects.get(ts_code, [])
                     if reasons:
                         suspect_count += 1
-                    results = self._run_modules(modules, g, as_of, stock, reasons)
+                    results = self._run_modules(modules, g, as_of, stock, reasons,
+                                                load.env_extras)
                     for name, res in results.items():
                         if _is_hit(res.value):
                             hit_summary[name] += 1
@@ -215,7 +204,7 @@ class ChainEngine:
                 duration_seconds=duration,
                 stock_count=len(rows),
                 suspect_count=suspect_count,
-                lookback=str(lookback),
+                lookback=lookback_desc,
                 window_start=window_start or "",
                 loaded_trading_days=loaded_trading_days,
                 window_expanded=window_expanded,
@@ -240,7 +229,7 @@ class ChainEngine:
             module_names=module_names,
             duration_seconds=duration,
             hit_summary=hit_summary,
-            lookback=str(lookback),
+            lookback=lookback_desc,
             window_start=window_start,
             loaded_trading_days=loaded_trading_days,
             window_expanded=window_expanded,
@@ -254,8 +243,12 @@ class ChainEngine:
         as_of: str,
         stock: StockInfo,
         reasons: List[str],
+        env_extras: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, ModuleResult]:
-        ctx = ChainContext(as_of=as_of, stock=stock, suspect_reasons=list(reasons), upstream={})
+        # env_extras：域装配的环境值（如 fx_hkdcny）预置进 upstream（方案 §4.2），
+        # 模块只读；逐股拷贝，防模块写入相互泄漏
+        ctx = ChainContext(as_of=as_of, stock=stock, suspect_reasons=list(reasons),
+                           upstream=dict(env_extras or {}))
         results: Dict[str, ModuleResult] = {}
         for mod in modules:
             try:

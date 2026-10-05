@@ -1,0 +1,28 @@
+# 分析链：外围指数截面（港 3 + 美 3，港美股指标与港股个股分析链整合方案 V1.0 §5）
+#
+# domain: overseas_indices —— 数据域为外围指数（overseas_kline_day，市场自身日历）。
+# 运行：backend/run_cli.py analyze run --chain overseas_index_scan [--as-of yyyyMMdd]
+# 锚定日缺省取 overseas_kline_day 最新市场日（非 A 股日历）。
+#
+# ⛔ 禁止条款：涨跌停系模块（limit_up_today / consecutive_limit_up / limit_down_today /
+#    burst_limit / limit_up_premium）依赖 A 股涨跌停制度，港美股无涨跌停，严禁加入本链。
+# 口径三注：qfq/指数原值（overseas_kline_day）；市场自身交易日历（窗口/缺日/累计均按
+#    该市场，勿用 A 股日历解读）；big_mover 在此语境是「大波动」不是涨跌停概念。
+# 与报告层的关系：本链 CSV 与复盘报告"外围指数"块同表同口径，可互证（方案 §6.1）。
+
+chain: overseas_index_scan
+domain: overseas_indices          # ★ 新字段：缺省 a_share；未知值加载报错
+description: "[外围] 外围指数截面：当日波动、5日/20日累计、60日位置与新高新低（市场自身日历）"
+
+# 外围域忽略 lookback 的 A 股日历换算：窗口按 max(模块回看)+缓冲 取每股最近 N 行（行数语义），
+# 此字段仅为链文档口径。
+lookback: 60d
+
+modules:
+  - name: big_mover               # 大波动（外围语境：无涨跌停，阈值即波动幅度）
+    params: {up_pct: 3, down_pct: -3}
+  - name: chg_5d                  # 5 日累计%
+  - name: chg_20d                 # 20 日累计%
+  - name: position_60d            # 60 日位置%（与 A 股指数章/报告块①同构）
+  - name: new_high_low            # 60 日新高新低（qfq 口径天然适用）
+    params: {window: 60}

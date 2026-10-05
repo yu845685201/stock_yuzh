@@ -65,13 +65,14 @@ class ChainContext:
         as_of: 锚定日 yyyyMMdd。
         stock: 当前股票信息。
         suspect_reasons: 数据预检发现的存疑原因（供模块参考）。
-        upstream: 前序模块结果（首批模块不用，预留「依赖型模块」）。
+        upstream: 前序模块结果 + 引擎装配的环境值（如外围域 fx_hkdcny，
+                  整合方案 §4.2；键名与模块名不冲突）。逐股独立副本。
     """
 
     as_of: str
     stock: StockInfo
     suspect_reasons: List[str] = field(default_factory=list)
-    upstream: Dict[str, ModuleResult] = field(default_factory=dict)
+    upstream: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_suspect(self) -> bool:

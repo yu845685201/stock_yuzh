@@ -16,7 +16,7 @@ from src.sync import SyncManager
 from src.database import DatabaseConnection
 from src.cli.analysis_cli import analyze
 from src.cli.common import csv_db_options, kline_range_options, parse_codes, render_sync_result
-from src.cli.review_sync_cli import review_commands
+from src.cli.review_sync_cli import review_commands, review_group
 
 
 def setup_logging():
@@ -40,9 +40,12 @@ def cli(ctx):
 # 技术分析链命令组（analyze run / list-chains / list-modules / progress）
 cli.add_command(analyze)
 
-# 每日复盘数据采集命令组（方案 2.6：编排器 + 13 个独立子命令，均支持 --dry-run）
+# 每日复盘数据采集命令组（方案 2.6：编排器 + 独立子命令，均支持 --dry-run）
 for _review_cmd in review_commands:
     cli.add_command(_review_cmd)
+
+# 复盘报告生成命令组（复盘报告层方案 §5.5：review generate）
+cli.add_command(review_group)
 
 
 @cli.command()

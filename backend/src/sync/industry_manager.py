@@ -47,6 +47,16 @@ class IndustryManager(SectorNodeManagerBase):
                             stats: Dict[str, Any]) -> None:
         if not self.sw_enabled:
             return
+        # G 项改良（V1.4）：单请求全量下载（含时点日期）优先；失败回退现行
+        # 31 次逐行业下载路径（保留兜底）
+        try:
+            rows = self.sw_source.fetch_all_classification()
+            self._sw_apply_all_classification(rows, dry_run=dry_run, stats=stats)
+            stats['sw_mode'] = 'all_download'
+            return
+        except Exception as e:
+            logger.warning(f'申万单请求路径失败，回退逐行业下载: {e}')
+            stats['sw_mode'] = 'per_industry_fallback'
         names = self.sw_source.fetch_industry_names()
         if not names:
             raise ReviewSyncError('申万一级行业清单为空（接口结构变更），本轮 sw_2021 不落库')
@@ -61,11 +71,45 @@ class IndustryManager(SectorNodeManagerBase):
         stats['sw_new'] = frag['members_new']
         stats['sw_out'] = frag['members_out']
 
+    def _sw_apply_all_classification(self, rows, dry_run: bool,
+                                     stats: Dict[str, Any]) -> None:
+        """单请求路径入库：成分带官方起始/结束日期（时点成分，与概念映射口径对齐）。
+
+        SwClass 的起始/结束日期即官方成员任期——退出再回归的股票 in_date 也随
+        文件刷新（upsert_concept_maps_explicit，非快照 diff 语义）。
+        """
+        concept_rows: Dict[str, Dict[str, Any]] = {}
+        map_rows: List[Dict[str, Any]] = []
+        for r in rows:
+            name = r['industry']
+            concept_rows.setdefault(name, {'concept_code': name, 'concept_name': name,
+                                           'source': 'sw_2021'})
+            map_rows.append({
+                'concept_code': name, 'ts_code': r['code6'],
+                'in_date': r.get('in_date') or None,
+                'out_date': r.get('out_date') or None,
+            })
+        if not dry_run:
+            self.db.upsert_concepts(list(concept_rows.values()))
+            self.db.upsert_concept_maps_explicit(map_rows)
+        active = sum(1 for m in map_rows if not m['out_date'])
+        stats['sw_names'] = len(concept_rows)
+        stats['sw_members'] = active
+        stats['sw_total_rows'] = len(map_rows)
+
     def report_extra_lines(self, stats: Dict[str, Any]) -> List[str]:
         if 'sw_names' not in stats:
             return []
+        mode = stats.get('sw_mode', 'per_industry')
+        if mode == 'all_download':
+            return [
+                f"增强口径：申万 2021 一级行业 {stats['sw_names']} 个 / "
+                f"在册 {stats['sw_members']} 条（共 {stats.get('sw_total_rows', 0)} 行含历史任期，"
+                f"单请求路径含时点成分）；报告行业榜优先本口径",
+            ]
         return [
             f"增强口径：申万 2021 一级行业 {stats['sw_names']} 个 / "
-            f"在册 {stats['sw_members']} 条（新进 {stats['sw_new']}，退出 {stats['sw_out']}）；"
+            f"在册 {stats['sw_members']} 条（新进 {stats['sw_new']}，退出 {stats['sw_out']}，"
+            f"{'单请求失败回退' if mode == 'per_industry_fallback' else '逐行业'}路径）；"
             f"报告行业榜优先本口径",
         ]

@@ -310,3 +310,28 @@ ALTER TABLE trade_index_info ADD COLUMN IF NOT EXISTS up_count INTEGER,
 -- (ts_code, trade_date) 业务唯一键（upsert 依赖；若存在重复行需先清理，运行时 ensure 会保留每组 id 最大者）
 CREATE UNIQUE INDEX IF NOT EXISTS uk_trade_index_info_ts_code_trade_date ON trade_index_info (ts_code, trade_date);
 
+
+-- ---------- overseas_kline_day（外围日K，技术方案 V1.0 20261004 §5） ----------
+-- trade_date 为市场自身交易日（非 A 股日历！A 股休市日外围行正常入库，假期外围观察前提）；
+-- adj_type: raw=指数/不复权，qfq=个股前复权（滚动口径）；下游消费按
+-- "A 股锚定日 D → D 或 D 前最近市场交易日"映射，禁止与 A 股日历直接等值 join
+CREATE TABLE IF NOT EXISTS overseas_kline_day (
+    id BIGSERIAL PRIMARY KEY,
+    market_code VARCHAR(20) NOT NULL,   -- hkHSI / usDJI / hk00700 …
+    trade_date VARCHAR(8) NOT NULL,     -- 市场自身交易日 YYYYMMDD
+    open NUMERIC(20, 4),
+    high NUMERIC(20, 4),
+    low NUMERIC(20, 4),
+    close NUMERIC(20, 4),
+    volume NUMERIC(24, 4),
+    adj_type VARCHAR(8) DEFAULT 'raw',
+    source VARCHAR(16) DEFAULT 'ifzq',
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+DO $$
+BEGIN
+    ALTER TABLE overseas_kline_day ADD CONSTRAINT uk_overseas_kline_day_review UNIQUE (market_code, trade_date);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;

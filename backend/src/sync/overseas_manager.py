@@ -49,12 +49,20 @@ class OverseasManager:
                 if q.get('close') is None:
                     stats['missing'].append(q['market_code'])
                     continue
+                change_pct = q.get('change_pct')
+                # hf_ 外盘期货（T20）：快照无昨结/昨收字段，change_pct 用本地昨收自算；
+                # 首条入库无昨收 → 如实留空（数据真实性原则）
+                if change_pct is None and q['market_code'].startswith('hf_'):
+                    prev = self._fetch_prev_close(q['market_code'], trade_date)
+                    if prev:
+                        change_pct = round((float(q['close']) - prev) / prev * 100, 4)
+                        stats.setdefault('self_calc_pct', []).append(q['market_code'])
                 rows.append({
                     'trade_date': trade_date,
                     'market_code': q['market_code'],
                     'market_name': q.get('market_name'),
                     'close': q.get('close'),
-                    'change_pct': q.get('change_pct'),
+                    'change_pct': change_pct,
                 })
             stats['rows'] = len(rows)
             stats['markets_ok'] = len(rows)
@@ -67,6 +75,16 @@ class OverseasManager:
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = self._write_report(result)
         return result
+
+    def _fetch_prev_close(self, market_code: str, trade_date: str) -> Optional[float]:
+        """同市场最近一条已入库收盘价（trade_date < 当前），无则 None（首条留空）"""
+        rows = self.db.execute_query(
+            "SELECT close FROM overseas_market_daily WHERE market_code = %s "
+            "AND trade_date < %s AND close IS NOT NULL ORDER BY trade_date DESC LIMIT 1",
+            (market_code, trade_date))
+        if rows and rows[0].get('close') is not None:
+            return float(rows[0]['close'])
+        return None
 
     def _write_report(self, result: Dict[str, Any]) -> Optional[str]:
         stats = result['stats']

@@ -3,11 +3,14 @@
 
 口径（写入表注释与报告说明）：
 - 总市值 = 当日收盘价 × 总股本（his_kline_day 当日 total_share 快照优先，
-  回退 base_fundamentals_info 最新披露 total_share）
+  回退 base_fundamentals_info as-of 已披露 total_share）
 - PE(TTM) = 总市值 ÷ 近四季归母净利之和（累计口径换算单季：
   TTM = 最新累计 + 上年年报累计 − 上年同期累计；最新期即年报时 = 该年报累计）
 - PB(LF) = 总市值 ÷ 最新一期净资产（net_assets = THS 每股净资产 × 总股本 折算入库）
 - 数据真实性原则：任一输入缺失 → 对应字段空 + insufficient_note，不硬造
+
+历史回填（开发项 A）：execute(start_date, end_date) 按交易日历逐日跑单日 as-of 口径；
+前置依赖开发项 K（披露日回补）——否则 as-of 过滤把历史财报全部筛空（X-6）。
 """
 
 import logging
@@ -32,8 +35,17 @@ class ValuationCalcManager:
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_review_tables()
 
-    def execute(self, trade_date: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+    def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
+                start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+        """单日模式（trade_date 缺省当日）或历史回填模式（start_date/end_date 同给）。
+
+        单日取数统一走 as-of 方法（对当日 as-of=当日，行为与旧"最新时点"口径等价）。
+        """
         started = datetime.now()
+        if start_date or end_date:
+            if not (start_date and end_date):
+                raise ValueError('--start-date 与 --end-date 必须同时给出（回填模式）')
+            return self._execute_backfill(start_date, end_date, dry_run=dry_run, started=started)
         trade_date = trade_date or datetime.now().strftime('%Y%m%d')
         stats: Dict[str, Any] = {
             'trade_date': trade_date, 'stocks': 0, 'mv_ok': 0, 'pe_ok': 0, 'pb_ok': 0,
@@ -45,8 +57,8 @@ class ValuationCalcManager:
             if not snapshot:
                 result['errors'].append(f'当日 {trade_date} 日K快照为空——先跑 sync-kline-day')
                 return result
-            rows = self.compute(snapshot, self.db.fetch_recent_financial_reports(8),
-                                self.db.fetch_latest_total_shares())
+            rows = self.compute(snapshot, self.db.fetch_financial_reports_asof(trade_date, 8),
+                                self.db.fetch_total_shares_asof(trade_date))
             stats['stocks'] = len(rows)
             stats['mv_ok'] = sum(1 for r in rows if r['total_mv'] is not None)
             stats['pe_ok'] = sum(1 for r in rows if r['pe_ttm'] is not None)
@@ -59,6 +71,71 @@ class ValuationCalcManager:
         finally:
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = self._write_report(result)
+        return result
+
+    # ---------- 历史回填模式（开发项 A） ----------
+
+    def _execute_backfill(self, start_date: str, end_date: str, dry_run: bool,
+                          started: datetime) -> Dict[str, Any]:
+        """按 base_trade_calendar 交易日循环单日 as-of 口径逐日回填。
+
+        - 断点续跑（幂等可中断重跑）：该日 stock_valuation_daily 行数 >= 当日K线行数 × 0.8
+          视为已完成，跳过（停牌因素留 20% 容差）；
+        - 当日无日K快照（非交易日/未同步）跳过并计数，不视为失败；
+        - 进度：每 50 日输出一行日志。
+        """
+        start = _parse_date(start_date)
+        end = _parse_date(end_date)
+        if start is None or end is None or start > end:
+            raise ValueError(f'回填区间非法: {start_date!r} ~ {end_date!r}')
+        stats: Dict[str, Any] = {
+            'start_date': start.strftime('%Y%m%d'), 'end_date': end.strftime('%Y%m%d'),
+            'days_total': 0, 'days_done': 0, 'days_skipped_done': 0, 'days_no_kline': 0,
+            'stocks': 0, 'mv_ok': 0, 'pe_ok': 0, 'pb_ok': 0,
+            'insufficient': 0, 'rows': 0, 'last_completed_date': None,
+        }
+        result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
+                                  'blocked': False, 'backfill': True}
+        try:
+            calendar = self.db.fetch_trade_calendar(start.isoformat(), end.isoformat())
+            trade_days = [_to_yyyymmdd(r.get('calendar_date')) for r in calendar]
+            trade_days = [d for d in trade_days if d]
+            stats['days_total'] = len(trade_days)
+            if not trade_days:
+                result['errors'].append(f'区间 {stats["start_date"]}~{stats["end_date"]} '
+                                        f'交易日历为空——检查 base_trade_calendar')
+                return result
+            for idx, t in enumerate(trade_days, start=1):
+                snapshot = self.db.fetch_day_kline_snapshot(t)
+                if not snapshot:
+                    stats['days_no_kline'] += 1
+                    continue
+                existing = 0 if dry_run else self.db.fetch_valuation_row_count(t)
+                if existing >= len(snapshot) * 0.8:
+                    stats['days_skipped_done'] += 1
+                    stats['last_completed_date'] = t
+                    continue
+                rows = self.compute(snapshot, self.db.fetch_financial_reports_asof(t, 8),
+                                    self.db.fetch_total_shares_asof(t))
+                if not dry_run and rows:
+                    self.db.upsert_stock_valuations(rows)
+                stats['days_done'] += 1
+                stats['stocks'] += len(rows)
+                stats['mv_ok'] += sum(1 for r in rows if r['total_mv'] is not None)
+                stats['pe_ok'] += sum(1 for r in rows if r['pe_ttm'] is not None)
+                stats['pb_ok'] += sum(1 for r in rows if r['pb'] is not None)
+                stats['insufficient'] += sum(1 for r in rows if r['insufficient_note'])
+                stats['rows'] += len(rows)
+                stats['last_completed_date'] = t
+                if idx % 50 == 0:
+                    elapsed = (datetime.now() - started).total_seconds()
+                    logger.info(f'估值回填进度 {idx}/{stats["days_total"]} 日'
+                                f'（已完成 {stats["days_done"]}，跳过 {stats["days_skipped_done"]}，'
+                                f'无K线 {stats["days_no_kline"]}；已用 {elapsed / 60:.1f} 分钟）')
+            result['success'] = True
+        finally:
+            result['duration'] = (datetime.now() - started).total_seconds()
+            result['report_path'] = self._write_backfill_report(result)
         return result
 
     # ---------- 计算核心（拆分便于单测） ----------
@@ -179,6 +256,47 @@ class ValuationCalcManager:
         status = '成功' if result['success'] else '失败'
         return write_review_report('个股PE/PB自算报告', 'stock_valuation_calc_report',
                                    status, lines, result.get('duration'))
+
+    def _write_backfill_report(self, result: Dict[str, Any]) -> Optional[str]:
+        """历史回填汇总报告（含口径说明，方案 4.1 要求写入报告）"""
+        stats = result['stats']
+        lines = [
+            f"- 区间：{stats['start_date']}~{stats['end_date']}（交易日 "
+            f"{stats['days_total']}：回填 {stats['days_done']}、断点跳过 "
+            f"{stats['days_skipped_done']}、无K线 {stats['days_no_kline']}）",
+            f"- 累计：{stats['rows']} 行（市值可算 {stats['mv_ok']}，PE 可算 {stats['pe_ok']}，"
+            f"PB 可算 {stats['pb_ok']}，输入不足 {stats['insufficient']}）",
+            "- 口径：总市值=当日收盘（前复权）× as-of 已披露总股本；前复权价×现股本在除权日"
+            "附近与真实市值有偏差，分位统计用途下可接受（同一股票时间序列自洽）",
+            "- 口径：PE(TTM) 分子分母均点时（as-of 股本 ÷ as-of 已披露近四季净利）；"
+            "8 期窗口不足的股票 TTM 留空不硬造",
+            "- 口径：取数过滤 disclosure_date <= 数据日（杜绝前视偏差）；前置依赖开发项 K 披露日回补",
+        ]
+        if result['errors']:
+            lines.append(f"- 错误：{result['errors']}")
+        status = '成功' if result['success'] else '失败'
+        return write_review_report('个股PE/PB历史回填报告', 'stock_valuation_backfill_report',
+                                   status, lines, result.get('duration'))
+
+
+def _parse_date(value: Optional[str]):
+    """yyyyMMdd / yyyy-mm-dd -> date；非法返回 None"""
+    from datetime import date as _date
+    if not value:
+        return None
+    s = str(value).replace('-', '')[:8]
+    try:
+        return datetime.strptime(s, '%Y%m%d').date()
+    except ValueError:
+        return None
+
+
+def _to_yyyymmdd(value: Any) -> Optional[str]:
+    """交易日历 calendar_date（date/str）-> yyyyMMdd"""
+    if value is None:
+        return None
+    s = str(value).replace('-', '')[:8]
+    return s if len(s) == 8 and s.isdigit() else None
 
 
 def _safe_div(a: pd.Series, b: pd.Series) -> pd.Series:

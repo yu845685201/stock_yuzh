@@ -8,6 +8,10 @@
 - 前置校验：日K依赖源（factor/money_flow/valuation_calc）要求当日 his_kline_day
   已同步（行数 vs base_stock_info 股数），未同步则中止并提示先跑 sync-kline-day
   （分笔子集、涨跌幅筛选都依赖日K；不自动触发，与现有流程正交）
+- **一键模式**（execute(include_kline=True)，供 sync-review-all 使用）：全市场日K当日
+  增量作为"波1伪源"与不依赖日K的源并发执行；日K依赖源顺延到波2/波3，在日K完成后
+  按其结果+行数阈值门控（未通过标"跳过"）；缺省源集在 weekly_refresh_weekday（0=周一）
+  当天自动并入周频源 concept/unlock
 - 风控急停：ReviewBlockedError → 该源冷却 sleep 后重试 1 次（可配置）→ 仍失败标"待补"
 - 幂等重跑：upsert + 游标设计，晚间子集补抓（如 --sources=lhb,announcement）安全
 - 汇总报告：源名/状态(成功|失败|待补|跳过)/行数/耗时/失败摘要 → data/reports/
@@ -28,29 +32,37 @@ logger = logging.getLogger(__name__)
 # 默认每日盘后全流程（方案 2.5 顺序 + 行业分类日更——全量仅 ~150 请求、2s 限速约 4 分钟，
 # 日更顺带覆盖当日新股的行业归属，避免新股最多缺席一周行业榜）
 DEFAULT_SOURCES = [
-    'index', 'factor', 'overseas', 'valuation_idx', 'announcement',
+    'index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
     'disclosure', 'lhb', 'margin', 'ths_finance', 'money_flow', 'valuation_calc',
-    'industry',
+    'sentiment_metrics', 'industry', 'bj_kline',
 ]
-# 周频任务（周末执行，--sources 显式指定）
-WEEKLY_SOURCES = ['concept', 'unlock']
+# 周频任务（周末执行，--sources 显式指定；ths_l2=申万二级增量，N3 2026-10-04 挂载）
+WEEKLY_SOURCES = ['concept', 'unlock', 'ths_l2']
 ALL_SOURCES = DEFAULT_SOURCES + WEEKLY_SOURCES
 # 依赖当日全市场日K的源
-KLINE_DEPENDENT_SOURCES = {'factor', 'money_flow', 'valuation_calc'}
+KLINE_DEPENDENT_SOURCES = {'factor', 'money_flow', 'valuation_calc', 'sentiment_metrics'}
+# 一键模式内置的全市场日K伪源（仅 include_kline=True 时编入波次，不接受 --sources 指定）
+KLINE_SOURCE = 'kline'
 # 波次划分：波内并行，波间顺序（后者依赖前者产出）
 SOURCE_WAVES = [
-    ['index', 'factor', 'overseas', 'valuation_idx', 'announcement',
-     'disclosure', 'lhb', 'margin', 'money_flow', 'industry', 'concept', 'unlock'],
+    ['index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
+     'disclosure', 'lhb', 'margin', 'money_flow', 'industry', 'concept', 'unlock',
+     'ths_l2', 'bj_kline'],
     ['ths_finance'],          # 依赖 announcement/disclosure 的当日披露清单
-    ['valuation_calc'],       # 依赖 ths_finance 财报 + 日K
+    ['valuation_calc', 'sentiment_metrics'],   # 依赖 ths_finance 财报 + 日K
 ]
 
 SOURCE_LABELS = {
+    'kline': '全市场日K',
     'index': '指数日K', 'factor': '复权因子', 'overseas': '外围市场',
+    'overseas_kline': '外围日K',
     'valuation_idx': '指数估值', 'announcement': '公告清单+业绩预告',
     'disclosure': '披露日历', 'lhb': '龙虎榜', 'margin': '两融',
     'ths_finance': 'THS财报', 'money_flow': '分笔资金流', 'valuation_calc': 'PE/PB自算',
+    'sentiment_metrics': '情绪指标日频',
     'industry': '行业分类', 'concept': '概念板块', 'unlock': '解禁日历',
+    'ths_l2': '申万二级行业',
+    'bj_kline': '北交所日K',
 }
 
 
@@ -68,7 +80,7 @@ class ReviewSyncOrchestrator:
         self.parallel_enabled = bool(review.get('parallel_sources', True))
 
     def execute(self, sources: Optional[str] = None, as_of: Optional[str] = None,
-                dry_run: bool = False) -> Dict[str, Any]:
+                dry_run: bool = False, include_kline: bool = False) -> Dict[str, Any]:
         started = datetime.now()
         requested = self._parse_sources(sources)
         as_of_date = self._parse_as_of(as_of)
@@ -79,23 +91,43 @@ class ReviewSyncOrchestrator:
             'errors': [], 'kline_check': None, 'duration': 0.0, 'report_path': None,
         }
 
-        kline_needed = bool(KLINE_DEPENDENT_SOURCES & set(requested))
-        if kline_needed:
-            ok, detail = self._check_kline_ready(as_of_str)
-            result['kline_check'] = detail
-            if not ok:
-                result['errors'].append(
-                    f'当日全市场日K未同步（{detail}）。请先执行 sync-kline-day：'
-                    f'分笔子集、涨跌幅筛选与估值自算都依赖日K。'
-                    f'或使用 --sources 排除日K依赖源（如 index,overseas,announcement,lhb,margin）。')
-                result['report_path'] = self._write_report(result, started)
-                return result
+        if include_kline:
+            # 一键模式：缺省源集在周频日自动并入 concept/unlock（显式 --sources 以显式为准）
+            explicit_sources = bool(sources and sources.strip() != 'all')
+            if not explicit_sources:
+                weekly_weekday = int(
+                    (self.config.get('review_sync', {}) or {}).get('weekly_refresh_weekday', 6))
+                if as_of_date.weekday() == weekly_weekday:
+                    requested = requested + [s for s in WEEKLY_SOURCES if s not in requested]
+                    result['sources'] = requested
+        else:
+            kline_needed = bool(KLINE_DEPENDENT_SOURCES & set(requested))
+            if kline_needed:
+                ok, detail = self._check_kline_ready(as_of_str)
+                result['kline_check'] = detail
+                if not ok:
+                    result['errors'].append(
+                        f'当日全市场日K未同步（{detail}）。请先执行 sync-kline-day：'
+                        f'分笔子集、涨跌幅筛选与估值自算都依赖日K。'
+                        f'或使用 --sources 排除日K依赖源（如 index,overseas,announcement,lhb,margin）。')
+                    result['report_path'] = self._write_report(result, started)
+                    return result
 
         runners = self._build_runners(as_of_str)
-        summary_by_source = self._run_waves(requested, runners, dry_run)
-        # 汇总按方案 2.5 固定顺序呈现
-        result['summary'] = [summary_by_source[s] for s in DEFAULT_SOURCES if s in summary_by_source]
-        result['summary'] += [summary_by_source[s] for s in WEEKLY_SOURCES if s in summary_by_source]
+        wave_requested = list(requested) + ([KLINE_SOURCE] if include_kline else [])
+        summary_by_source, kline_gate_detail = self._run_waves(
+            wave_requested, runners, dry_run,
+            waves=self._build_waves(include_kline),
+            include_kline=include_kline, as_of_str=as_of_str)
+        if include_kline:
+            result['kline_check'] = kline_gate_detail
+        # 汇总按方案 2.5 固定顺序呈现（一键模式日K在最前）
+        summary: List[Dict[str, Any]] = []
+        if include_kline and KLINE_SOURCE in summary_by_source:
+            summary.append(summary_by_source[KLINE_SOURCE])
+        summary += [summary_by_source[s] for s in DEFAULT_SOURCES if s in summary_by_source]
+        summary += [summary_by_source[s] for s in WEEKLY_SOURCES if s in summary_by_source]
+        result['summary'] = summary
 
         result['success'] = any(e['status'] == '成功' for e in result['summary']) \
             and not all(e['status'] in ('失败', '跳过') for e in result['summary'])
@@ -132,13 +164,30 @@ class ReviewSyncOrchestrator:
         return entry
 
     def _run_waves(self, requested: List[str], runners: Dict[str, Callable[[bool], Dict[str, Any]]],
-                   dry_run: bool) -> Dict[str, Dict[str, Any]]:
-        """按波次执行：波内并行（parallel_workers 上限），波间顺序"""
+                   dry_run: bool, waves: Optional[List[List[str]]] = None,
+                   include_kline: bool = False,
+                   as_of_str: Optional[str] = None) -> tuple:
+        """按波次执行：波内并行（parallel_workers 上限），波间顺序。
+
+        一键模式（include_kline=True）：kline 所在波结束后评估日K门控，未通过则
+        后续波中的日K依赖源标"跳过"（dry_run 不门控，预检清单全展开）。
+        返回 (summary, kline_gate_detail)。
+        """
         summary: Dict[str, Dict[str, Any]] = {}
-        for wave in SOURCE_WAVES:
+        kline_gate_detail: Optional[str] = None
+        kline_ok: Optional[bool] = None
+        for wave in (waves or SOURCE_WAVES):
             names = [s for s in wave if s in requested]
             if not names:
                 continue
+            if kline_ok is False:
+                gated = [s for s in names if s in KLINE_DEPENDENT_SOURCES]
+                names = [s for s in names if s not in gated]
+                for s in gated:
+                    summary[s] = {'source': s, 'label': SOURCE_LABELS.get(s, s), 'status': '跳过',
+                                  'rows': 0, 'duration': 0.0, 'detail': kline_gate_detail}
+                if not names:
+                    continue
             if self.parallel_enabled and len(names) > 1:
                 logger.info(f'波次并行开始: {names}（并发上限 {self.parallel_workers}）')
                 with ThreadPoolExecutor(max_workers=min(self.parallel_workers, len(names))) as executor:
@@ -153,18 +202,32 @@ class ReviewSyncOrchestrator:
                     if s in runners:
                         entry = self._run_source(s, runners[s], dry_run)
                         summary[entry['source']] = entry
+            if include_kline and KLINE_SOURCE in wave:
+                kline_ok, kline_gate_detail = self._evaluate_kline_gate(
+                    as_of_str, summary.get(KLINE_SOURCE), dry_run)
         # runner 未注册的源补"跳过"
         for s in requested:
             if s not in summary:
                 summary[s] = {'source': s, 'label': SOURCE_LABELS.get(s, s), 'status': '跳过',
                               'rows': 0, 'duration': 0.0, 'detail': 'runner 未注册'}
-        return summary
+        return summary, kline_gate_detail
+
+    @staticmethod
+    def _build_waves(include_kline: bool) -> List[List[str]]:
+        """一键模式波次重排：日K编入波1与独立源并发，日K依赖源（factor/money_flow）
+        顺延到波2（与依赖公告/披露清单的 ths_finance 同波），valuation_calc 仍在波3"""
+        if not include_kline:
+            return SOURCE_WAVES
+        head = [s for s in SOURCE_WAVES[0] if s not in KLINE_DEPENDENT_SOURCES]
+        tail = [s for s in SOURCE_WAVES[0] if s in KLINE_DEPENDENT_SOURCES]
+        return [[KLINE_SOURCE] + head, tail + SOURCE_WAVES[1]] + list(SOURCE_WAVES[2:])
 
     # ---------- 各源 runner ----------
 
     def _build_runners(self, as_of: str) -> Dict[str, Callable[[bool], Dict[str, Any]]]:
         from .adjust_factor_manager import AdjustFactorManager
         from .announcement_manager import AnnouncementManager
+        from .bj_kline_manager import BjKlineManager
         from .concept_manager import ConceptManager
         from .disclosure_manager import DisclosureManager
         from .index_kline_manager import IndexKlineManager
@@ -173,16 +236,22 @@ class ReviewSyncOrchestrator:
         from .lhb_manager import LhbManager
         from .margin_manager import MarginManager
         from .money_flow_manager import MoneyFlowManager
+        from .overseas_kline_manager import OverseasKlineManager
         from .overseas_manager import OverseasManager
+        from .sentiment_metrics_manager import SentimentMetricsManager
         from .ths_finance_manager import ThsFinanceManager
+        from .ths_industry_l2_manager import ThsIndustryL2Manager
         from .unlock_manager import UnlockManager
         from .valuation_calc_manager import ValuationCalcManager
 
         cm = self.config_manager
         return {
+            'kline': lambda dry: self._run_kline_sync(dry, as_of),
             'index': lambda dry: IndexKlineManager(cm).execute(dry_run=dry),
             'factor': lambda dry: AdjustFactorManager(cm).execute(trade_date=as_of, dry_run=dry),
             'overseas': lambda dry: OverseasManager(cm).execute(trade_date=as_of, dry_run=dry),
+            # 外围日K（ifzq，技术方案 20261004）：对外围快照无依赖，波 1 并发，互拍在采集器内部
+            'overseas_kline': lambda dry: OverseasKlineManager(cm).execute(dry_run=dry),
             'valuation_idx': lambda dry: IndexValuationManager(cm).execute(dry_run=dry),
             'announcement': lambda dry: AnnouncementManager(cm).execute(as_of=as_of, dry_run=dry),
             'disclosure': lambda dry: DisclosureManager(cm).execute(dry_run=dry),
@@ -192,10 +261,51 @@ class ReviewSyncOrchestrator:
             'money_flow': lambda dry: MoneyFlowManager(cm).execute(trade_date=as_of, dry_run=dry),
             'valuation_calc': lambda dry: ValuationCalcManager(cm).execute(
                 trade_date=as_of, dry_run=dry),
+            # 开发项 B：缺省增量模式（最近 10 个交易日补齐，~40s；历史用 review backfill-sentiment）
+            'sentiment_metrics': lambda dry: SentimentMetricsManager(cm).execute(dry_run=dry),
             'concept': lambda dry: ConceptManager(cm).execute(dry_run=dry),
             'industry': lambda dry: IndustryManager(cm).execute(dry_run=dry),
             'unlock': lambda dry: UnlockManager(cm).execute(dry_run=dry),
+            'ths_l2': lambda dry: ThsIndustryL2Manager(cm).execute(dry_run=dry),
+            'bj_kline': lambda dry: BjKlineManager(cm).execute(trade_date=as_of, dry_run=dry),
         }
+
+    # ---------- 一键模式：内置日K ----------
+
+    def _run_kline_sync(self, dry_run: bool,
+                        trade_date: Optional[str] = None) -> Dict[str, Any]:
+        """全市场日K增量（sync-review-all 内置）：缺省当日，指定 trade_date 时回补该
+        交易日；把 SyncManager 顶层返回（db_rows/records/failed_stocks）重塑为编排器
+        源契约（stats.rows）"""
+        if dry_run:
+            return {'success': False, 'skipped_dry_run': True, 'stats': {'rows': 0},
+                    'errors': [], 'blocked': False}
+        from .sync_manager import SyncManager
+        raw = SyncManager(self.config_manager).sync_kline_day(
+            init_mode=False, start_date=trade_date, end_date=trade_date,
+            save_to_csv=True, save_to_db=True)
+        stats = {'rows': int(raw.get('db_rows') or raw.get('records') or 0)}
+        errors = list(raw.get('errors') or [])
+        failed = int(raw.get('failed_stocks') or 0)
+        if failed:
+            errors.append(f'{failed} 只个股同步失败（明细见日K报告）')
+        return {'success': bool(raw.get('success')), 'stats': stats, 'errors': errors,
+                'blocked': False, 'report_path': raw.get('report_path')}
+
+    def _evaluate_kline_gate(self, as_of_str: Optional[str],
+                             kline_entry: Optional[Dict[str, Any]],
+                             dry_run: bool) -> tuple:
+        """一键模式日K门控：kline 结果 + 行数阈值复检（防节假日/部分同步误放行）。
+        dry_run 只记录不门控。返回 (ok, detail)。"""
+        if dry_run:
+            return True, 'dry-run：日K门控不生效'
+        if kline_entry and kline_entry.get('status') != '成功':
+            return False, (f'日K同步未成功（{kline_entry.get("detail") or kline_entry.get("status")}），'
+                           f'日K依赖源跳过，可重跑本命令或先执行 sync-kline-day')
+        ok, detail = self._check_kline_ready(as_of_str)
+        if not ok:
+            return False, f'日K行数校验未过（{detail}），日K依赖源跳过'
+        return True, f'内置日K已同步：{detail}'
 
     # ---------- 工具 ----------
 
@@ -244,6 +354,10 @@ class ReviewSyncOrchestrator:
         if not isinstance(src_result, dict):
             entry['status'] = '失败'
             entry['detail'] = '无效返回值'
+            return
+        if src_result.get('skipped_dry_run'):
+            entry['status'] = '跳过'
+            entry['detail'] = 'dry-run 跳过日K同步'
             return
         if src_result.get('skipped_disabled'):
             entry['status'] = '待补'

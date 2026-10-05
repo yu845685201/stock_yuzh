@@ -36,16 +36,29 @@ def adjust_trigger_path(trade_date: str) -> Any:
 
 
 def read_adjust_trigger(trade_date: str) -> List[str]:
-    """读取当日除权触发清单（ts_code 列表；文件缺失/损坏返回空——增量不硬抓）"""
-    path = adjust_trigger_path(trade_date)
-    if not path.exists():
-        return []
+    """读取当日除权触发清单（ts_code 列表；文件缺失/损坏返回空——增量不硬抓）。
+
+    跨零点兜底：清单缺失时回看前一日（凌晨补跑前一交易日盘后数据的场景，见 P-10）。
+    """
+    import datetime as _dt
+    dates = [trade_date]
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-        return [str(c) for c in (data.get('ts_codes') or [])]
-    except Exception as e:
-        logger.warning(f'除权触发清单读取失败，忽略: {e}')
-        return []
+        prev = (_dt.datetime.strptime(trade_date, '%Y%m%d') - _dt.timedelta(days=1)).strftime('%Y%m%d')
+        dates.append(prev)
+    except ValueError:
+        pass
+    for d in dates:
+        path = adjust_trigger_path(d)
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+            codes = [str(c) for c in (data.get('ts_codes') or [])]
+            if codes:
+                return codes
+        except Exception as e:
+            logger.warning(f'除权触发清单读取失败，忽略: {e}')
+    return []
 
 
 class AdjustFactorManager:

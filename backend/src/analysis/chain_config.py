@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .env_assembly import ENV_A_SHARE_CANDIDATES
 from .lookback import Lookback
 
 CHAINS_DIR = Path(__file__).resolve().parent / "chains"
@@ -34,6 +35,11 @@ class ChainConfig:
     #: 分析窗口：锚定日往前加载多久的日 K 线。默认 1 年（见 lookback.py）
     lookback: Lookback = field(default_factory=Lookback.default)
     modules: List[ModuleSpec] = field(default_factory=list)
+    #: 数据域（整合方案 §1.3）：a_share（默认） / overseas_indices / overseas_stocks
+    domain: str = "a_share"
+    #: 截面环境装配（env_assembly.assemble_env）：None（默认，不装配）/
+    #: a_share_candidates（转天候选链：封板/概念/聚集/机构截面查表）
+    env: Optional[str] = None
     source_path: Optional[Path] = None
 
 
@@ -64,8 +70,21 @@ def load_chain(name: str, chains_dir: Path = CHAINS_DIR) -> ChainConfig:
         chain=str(raw.get("chain") or name),
         description=str(raw.get("description") or ""),
         lookback=Lookback.parse(raw["lookback"]) if "lookback" in raw else Lookback.default(),
+        domain=str(raw.get("domain") or "a_share"),
+        env=str(raw["env"]) if raw.get("env") else None,
         source_path=path,
     )
+    # domain 非法值加载即报错（整合方案 §1.3，防拼错静默落回 A 股域）
+    if chain.env is not None and chain.env != ENV_A_SHARE_CANDIDATES:
+        raise ValueError(
+            f"链配置 {path} 的 env 非法: {chain.env}"
+            f"（可用: {ENV_A_SHARE_CANDIDATES} 或不配置）"
+        )
+    if chain.domain not in ("a_share", "overseas_indices", "overseas_stocks"):
+        raise ValueError(
+            f"链配置 {path} 的 domain 非法: {chain.domain}"
+            f"（可用: a_share / overseas_indices / overseas_stocks）"
+        )
 
     modules = raw.get("modules")
     if not isinstance(modules, list) or not modules:

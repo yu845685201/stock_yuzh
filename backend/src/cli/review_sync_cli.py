@@ -2,6 +2,7 @@
 每日复盘数据采集 CLI 子命令（方案 2.6；注册方式照 sync-financial-pdf，延迟 import manager）
 
 命令清单：
+  sync-review-all           盘后一键快捷接口（全市场日K增量 + 全部复盘源波次并发，2026-09-29 新增）
   sync-review-data          盘后编排器（默认 11 源串行，单源失败不阻塞）
   sync-index-kline          指数日K（tdx-api）
   sync-adjust-factor        复权因子（tdx-api /api/ths-factor；全量 --init / 增量读触发清单）
@@ -15,17 +16,44 @@
   sync-industry             行业分类（新浪行业板块，2026-09-28 新增）
   sync-concept              概念板块成分（新浪概念接口，2026-09-28 换源）
   sync-unlock-calendar      解禁日历（巨潮公告+PDF 解析，2026-09-28 换源）
+  sync-ths-industry-l2      申万二级行业成分（THS 公司概况页，2026-10-04 新增）
   sync-overseas-market      外围市场（新浪）
+  sync-overseas-kline       外围日K（腾讯 ifzq：港美股指数+港股个股池，2026-10-04 新增）
   calc-stock-valuation      个股 PE/PB 自算（本地计算）
+  sync-bj-kline             北交所日K（通达信官网盘后包，P0-2 方案 B，2026-09-30 新增）
+  review generate           复盘报告生成（六维 MD+HTML，复盘报告层方案 §5.5）
 """
+
+import fcntl
+import os
+import sys
 
 import click
 
 
+def _acquire_szse_backfill_lock():
+    """深交所回补互斥锁：多客户端并发请求会触发官网 IP 级封禁（2026-10-04 实测）。
+
+    仅历史回补模式使用；日常增量为编排器进程内串行调用，不经过此入口。
+    拿不到锁以退出码 2 结束；fd 保持打开，进程退出时锁自动释放。
+    """
+    fd = os.open('/tmp/szse_backfill.lock', os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        click.echo("✗ 已有深交所回补进程在运行（/tmp/szse_backfill.lock）；"
+                   "并发请求会触发官网封 IP，请等待其完成后再试")
+        sys.exit(2)
+    return fd
+
+
 @click.command('sync-review-data')
 @click.option('--sources', default='all',
-              help='逗号分隔子集：index,factor,overseas,valuation_idx,announcement,'
-                   'disclosure,lhb,margin,ths_finance,money_flow,valuation_calc'
+              help='逗号分隔子集：index,factor,overseas,overseas_kline,valuation_idx,'
+                   'announcement,'
+                   'disclosure,lhb,margin,ths_finance,money_flow,valuation_calc,'
+                   'sentiment_metrics'
                    '（周频 concept/unlock 显式指定；默认 all）')
 @click.option('--as-of', default=None, help='yyyyMMdd，缺省当日')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行：只做前置校验与目标清单')
@@ -43,6 +71,45 @@ def sync_review_data(ctx, sources, as_of, dry_run):
 
     if result['kline_check']:
         click.echo(f"  - 日K前置校验: {result['kline_check']}")
+    if result['errors'] and not result['summary']:
+        click.echo("\n✗ 编排中止:")
+        for err in result['errors']:
+            click.echo(f"  - {err}")
+    else:
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 编排完成（"
+                   f"{result['duration'] / 60:.1f} 分钟）:")
+        for e in result['summary']:
+            click.echo(f"  - {e['label']}: {e['status']}（行数 {e['rows']}，"
+                       f"{e['duration']}s）{(' ' + e['detail']) if e['detail'] else ''}")
+    if result.get('report_path'):
+        click.echo(f"  - 汇总报告: {result['report_path']}")
+
+
+@click.command('sync-review-all')
+@click.option('--sources', default='all',
+              help='逗号分隔子集，缺省 all=全市场日K+12 日频源（周日缺省自动并入周频 '
+                   'concept/unlock；显式指定则以显式为准）')
+@click.option('--as-of', default=None, help='yyyyMMdd，缺省当日')
+@click.option('--skip-kline', is_flag=True, default=False,
+              help='日K已单独跑过时跳过日K同步（行为同 sync-review-data）')
+@click.option('--dry-run', is_flag=True, default=False,
+              help='试运行：日K不同步、门控不生效，只展示执行计划')
+@click.pass_context
+def sync_review_all(ctx, sources, as_of, skip_kline, dry_run):
+    """盘后一键采集：全市场日K增量 + 全部复盘数据源（源间波次并发，日K依赖源后置门控）"""
+    from src.sync.review_sync_orchestrator import ReviewSyncOrchestrator
+    try:
+        orchestrator = ReviewSyncOrchestrator(ctx.obj['config_manager'])
+    except ValueError as e:
+        click.echo(f"\n✗ 参数错误: {e}")
+        return
+    kline_mode = '跳过（--skip-kline）' if skip_kline else '内置同步（与独立源并发）'
+    click.echo(f"开始盘后一键采集（as_of={as_of or '当日'}, sources={sources}, 日K={kline_mode}）...")
+    result = orchestrator.execute(sources=sources, as_of=as_of, dry_run=dry_run,
+                                  include_kline=not skip_kline)
+
+    if result['kline_check']:
+        click.echo(f"  - 日K门控: {result['kline_check']}")
     if result['errors'] and not result['summary']:
         click.echo("\n✗ 编排中止:")
         for err in result['errors']:
@@ -134,12 +201,38 @@ def sync_money_flow(ctx, trade_date, codes, dry_run):
 @click.command('sync-announcement')
 @click.option('--as-of', default=None, help='yyyyMMdd（缺省当日；窗口下界取游标/昨日）')
 @click.option('--days-back', type=int, default=1, help='无游标时回看天数（默认 1）')
+@click.option('--start-date', default=None, help='回补区间起 yyyyMMdd（与 --end-date 同给走回补模式）')
+@click.option('--end-date', default=None, help='回补区间止 yyyyMMdd（含当日）')
+@click.option('--category', default='', help="巨潮分类过滤：periodic=四类定期报告（披露日回补），空=全量")
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库不推游标')
 @click.pass_context
-def sync_announcement(ctx, as_of, days_back, dry_run):
-    """同步公告清单 + 业绩预告（巨潮全市场窗口检索，同请求双用途）"""
+def sync_announcement(ctx, as_of, days_back, start_date, end_date, category, dry_run):
+    """同步公告清单 + 业绩预告（巨潮全市场窗口检索，同请求双用途）
+
+    显式区间模式（开发项 K 披露日回补）：--start-date/--end-date 同给时按周切窗回补，
+    不推进游标、只写一份汇总报告，结束后触发披露日 COALESCE 回填。
+    """
     from src.sync.announcement_manager import AnnouncementManager
     manager = AnnouncementManager(ctx.obj['config_manager'])
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        result = manager.backfill_range(start_date, end_date, category=category, dry_run=dry_run)
+        stats = result['stats']
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 公告历史回补"
+                   f"（{stats['range']}，category={stats['category']}）")
+        click.echo(f"  - 窗口 {stats['windows_done']}/{stats['windows_total']} 完成，"
+                   f"公告检索 {stats['announcements']} 条入库 {stats['announcements_new']}，"
+                   f"业绩预告 {stats['forecast_rows']} 条")
+        if stats.get('disclosure_backfill_rows') is not None:
+            click.echo(f"  - 披露日 COALESCE 回填: {stats['disclosure_backfill_rows']} 行")
+        if result['blocked']:
+            click.echo("  - ⚠ 巨潮风控急停（已完成窗口已入库，重跑自动续）")
+        if result['errors']:
+            click.echo(f"  - 错误 {len(result['errors'])} 条（详见回补报告）")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+        return
     result = manager.execute(as_of=as_of, days_back=days_back, dry_run=dry_run)
     stats = result['stats']
     click.echo(f"\n{'✓' if result['success'] else '✗'} 公告采集（窗口 {stats['window']}）")
@@ -147,6 +240,24 @@ def sync_announcement(ctx, as_of, days_back, dry_run):
                f"业绩预告 {stats['forecast_rows']} 条")
     if result['blocked']:
         click.echo("  - ⚠ 巨潮风控急停（游标未推进，稍后重跑自动补）")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('reclassify-announcement')
+@click.option('--days-back', type=int, default=7, help='重分类近 N 日已入库行（默认 7）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，只统计变更不写库')
+@click.pass_context
+def reclassify_announcement(ctx, days_back, dry_run):
+    """按当前词表重跑近 N 日公告分类（开发项 H；纯本地仅 update ann_type，幂等可重跑）"""
+    from src.sync.announcement_manager import AnnouncementManager
+    manager = AnnouncementManager(ctx.obj['config_manager'])
+    result = manager.reclassify(days_back=days_back, dry_run=dry_run)
+    stats = result['stats']
+    other = stats['other_ratio']
+    other_txt = f"{other:.1%}" if other is not None else '—'
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 公告重分类（{stats['window']}）"
+               f"行数 {stats['rows']}，变更 {stats['changed']} 行，\"其他\"占比 {other_txt}")
     if result.get('report_path'):
         click.echo(f"  - 报告: {result['report_path']}")
 
@@ -170,17 +281,36 @@ def sync_disclosure_calendar(ctx, year, dry_run):
 
 @click.command('sync-index-valuation')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.option('--init-perf', is_flag=True, default=False,
+              help='历史回补：index-perf API 按年切窗拉全历史日K（N2，分钟级；'
+                   '缺省模式含每日 perf 增量，无需手动回补）')
 @click.pass_context
-def sync_index_valuation(ctx, dry_run):
-    """同步指数估值 PE（中证官网每日 indicator 文件）"""
+def sync_index_valuation(ctx, dry_run, init_perf):
+    """同步指数估值 PE（中证官网每日 indicator 文件）+ 指数历史日K增量（index-perf）"""
     from src.sync.index_valuation_manager import IndexValuationManager
     manager = IndexValuationManager(ctx.obj['config_manager'])
-    result = manager.execute(dry_run=dry_run)
+    if init_perf:
+        if not manager.perf_indices:
+            click.echo("\n✗ config review_sync.csindex_perf_indices 未配置，无可回补指数")
+            return
+        click.echo(f"开始指数历史日K回补（指数 "
+                   f"{[i.get('name') or i['code'] for i in manager.perf_indices]}）...")
+    result = manager.execute(dry_run=dry_run, init_perf=init_perf)
     stats = result['stats']
-    click.echo(f"\n{'✓' if result['success'] else '✗'} 指数估值"
-               f"（成功 {stats['indices_ok']}/{stats['indices_total']}，行数 {stats['rows']}）")
-    if stats['missing']:
-        click.echo(f"  - 未发布: {stats['missing']}")
+    if init_perf:
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 指数历史日K回补"
+                   f"（成功 {stats['perf_ok']}/{stats['perf_indices_total']}，"
+                   f"行数 {stats['perf_rows']}）")
+        if result['errors']:
+            click.echo(f"  - 错误: {result['errors']}")
+    else:
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 指数估值"
+                   f"（成功 {stats['indices_ok']}/{stats['indices_total']}，行数 {stats['rows']}）")
+        if stats['missing']:
+            click.echo(f"  - 未发布: {stats['missing']}")
+        if stats.get('perf_rows') is not None and stats.get('perf_indices_total'):
+            click.echo(f"  - 指数日K增量: 成功 {stats['perf_ok']}/"
+                       f"{stats['perf_indices_total']}，行数 {stats['perf_rows']}")
     if result.get('report_path'):
         click.echo(f"  - 报告: {result['report_path']}")
 
@@ -212,12 +342,39 @@ def sync_ths_finance(ctx, init_mode, as_of, codes, dry_run):
 
 @click.command('sync-lhb')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省当日；17:30 后发布）')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--daily-reports', is_flag=True, default=False,
+              help='调试用：回填模式逐日落盘报告（默认抑制，只写一份汇总，X-19）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
 @click.pass_context
-def sync_lhb(ctx, trade_date, dry_run):
-    """同步龙虎榜（沪深交易所官网，含席位明细）"""
+def sync_lhb(ctx, trade_date, start_date, end_date, daily_reports, dry_run):
+    """同步龙虎榜（沪深交易所官网，含席位明细）
+
+    历史回填模式（开发项 C）：--start-date/--end-date 同给时按交易日历逐日回填，
+    断点续跑只信查库；上交所回补限速提至 3s（X-5，config lhb_backfill_interval 可覆盖）。
+    """
     from src.sync.lhb_manager import LhbManager
     manager = LhbManager(ctx.obj['config_manager'])
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        if not dry_run:
+            _acquire_szse_backfill_lock()
+        result = manager.backfill_range(start_date, end_date, dry_run=dry_run,
+                                        suppress_report=not daily_reports)
+        stats = result['stats']
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 龙虎榜回填（{stats['range']}）"
+                   f"交易日 {stats['days_total']}：回填 {stats['days_done']}、"
+                   f"跳过 {stats['days_skipped']}、失败 {len(stats['days_failed'])}；"
+                   f"榜单 {stats['lhb_rows']} 行 / 席位 {stats['detail_rows']} 行")
+        if result['blocked']:
+            click.echo("  - ⚠ 风控急停（已完成日已入库，重跑自动续）")
+        if stats['days_failed']:
+            click.echo(f"  - 失败日期: {[f['date'] for f in stats['days_failed'][:30]]}")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+        return
     result = manager.execute(trade_date=trade_date, dry_run=dry_run)
     stats = result['stats']
     click.echo(f"\n{'✓' if result['success'] else '✗'} 龙虎榜（{stats['trade_date']}）"
@@ -231,18 +388,75 @@ def sync_lhb(ctx, trade_date, dry_run):
 
 @click.command('sync-margin-trade')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省 T-1，交易所次日盘前发布）')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--daily-reports', is_flag=True, default=False,
+              help='调试用：回填模式逐日落盘报告（默认抑制，只写一份汇总，X-19）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
 @click.pass_context
-def sync_margin_trade(ctx, trade_date, dry_run):
-    """同步融资融券（沪深交易所官网，T-1 全市场明细）"""
+def sync_margin_trade(ctx, trade_date, start_date, end_date, daily_reports, dry_run):
+    """同步融资融券（沪深交易所官网，T-1 全市场明细）
+
+    历史回填模式（开发项 C）：--start-date/--end-date 同给时按交易日历逐日回填，
+    断点续跑只信查库（X-14：回看机制会静默采到 d-1，不信任单次 stats）。
+    """
     from src.sync.margin_manager import MarginManager
     manager = MarginManager(ctx.obj['config_manager'])
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        if not dry_run:
+            _acquire_szse_backfill_lock()
+        result = manager.backfill_range(start_date, end_date, dry_run=dry_run,
+                                        suppress_report=not daily_reports)
+        stats = result['stats']
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 两融回填（{stats['range']}）"
+                   f"交易日 {stats['days_total']}：回填 {stats['days_done']}、"
+                   f"跳过 {stats['days_skipped']}、失败 {len(stats['days_failed'])}；"
+                   f"累计 {stats['rows']} 行")
+        if stats['date_notes']:
+            click.echo(f"  - 数据日期核对（请求日≠数据日，回看行为）{len(stats['date_notes'])} 日"
+                       f"（详见回填报告）")
+        if result['blocked']:
+            click.echo("  - ⚠ 风控急停（已完成日已入库，重跑自动续）")
+        if stats['days_failed']:
+            click.echo(f"  - 失败日期: {[f['date'] for f in stats['days_failed'][:30]]}")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+        return
     result = manager.execute(trade_date=trade_date, dry_run=dry_run)
     stats = result['stats']
     click.echo(f"\n{'✓' if result['success'] else '✗'} 两融（数据日期 {stats['data_date']}，T-1）"
-               f"深 {stats['szse_rows']}/沪 {stats['sse_rows']} 行")
+               f"深 {stats['szse_rows']}/沪 {stats['sse_rows']} 行"
+               f"（实际数据日 深 {stats.get('szse_date')} / 沪 {stats.get('sse_date')}）")
     for err in result['errors']:
         click.echo(f"  - {err}")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('sync-seal-stats')
+@click.option('--start-date', required=True, help='回填区间起 yyyyMMdd（如 20251001）')
+@click.option('--end-date', required=True, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.pass_context
+def sync_seal_stats(ctx, start_date, end_date, dry_run):
+    """封板指标历史回补（开发项 F：涨停∪炸板∪跌停子集，分笔自算首封/开板）
+
+    断点续跑按 limit_seal_stats_daily 逐股粒度跳过；历史抓取含 X-4 预热重试与
+    X-9 断连等待；约 250 交易日 × ~90 只/日 ≈ 2.2 万次请求，分晚执行。
+    """
+    from src.sync.money_flow_manager import MoneyFlowManager
+    manager = MoneyFlowManager(ctx.obj['config_manager'])
+    result = manager.backfill_seal_stats(start_date, end_date, dry_run=dry_run)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 封板指标回补（{stats['range']}）"
+               f"交易日 {stats['days_total']}：回填 {stats['days_done']}、"
+               f"无子集/已完成 {stats['days_no_subset']}；"
+               f"seal {stats['seal_rows']} 行 / money_flow {stats['money_rows']} 行，"
+               f"个股失败 {stats['stocks_failed']}")
+    if result['errors']:
+        click.echo(f"  - 错误: {result['errors']}")
     if result.get('report_path'):
         click.echo(f"  - 报告: {result['report_path']}")
 
@@ -320,6 +534,34 @@ def sync_unlock_calendar(ctx, as_of, days_back, dry_run):
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+@click.command('sync-ths-industry-l2')
+@click.option('--init', 'init_mode', is_flag=True, default=False,
+              help='全量初始化（全市场 ~5,300 只 × 2s 限速 ≈ 3 小时，建议 nohup；'
+                   '缺省增量：仅新上市 + 在册缺失）')
+@click.option('--codes', default=None, help='指定股票，逗号分隔（调试用）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，只列目标清单不写库')
+@click.pass_context
+def sync_ths_industry_l2(ctx, init_mode, codes, dry_run):
+    """同步申万二级行业成分（THS 公司概况页"所属申万行业"，N3；当前快照口径）"""
+    from src.sync.ths_industry_l2_manager import ThsIndustryL2Manager
+    manager = ThsIndustryL2Manager(ctx.obj['config_manager'])
+    code_list = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
+    result = manager.execute(init_mode=init_mode, codes=code_list, dry_run=dry_run)
+    if result.get('skipped_disabled'):
+        click.echo(f"\n⚠ 申万二级行业配置停用: {result['errors']}")
+        return
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 申万二级行业（{stats['mode']}）"
+               f"目标 {stats['targets']} 只，成功 {stats['ok']}"
+               f"（二级 {stats['concepts']} 个），无申万分类 {len(stats['missing'])}")
+    if stats['failed']:
+        click.echo(f"  - 失败 {len(stats['failed'])} 只（次轮增量自动补）: {stats['failed'][:20]}")
+    if result['blocked']:
+        click.echo("  - ⚠ 同花顺风控急停（已完成批次已入库，重跑自动续）")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 @click.command('sync-overseas-market')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省当日，美股为 T-1 收盘）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
@@ -338,17 +580,84 @@ def sync_overseas_market(ctx, trade_date, dry_run):
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+@click.command('sync-overseas-kline')
+@click.option('--init', 'init_mode', is_flag=True, default=False,
+              help='全量初始化：近 10 年分窗拉历史（4 请求/代码，~5 分钟，建议 nohup）')
+@click.option('--codes', default=None, help='指定代码，逗号分隔（如 hkHSI,hk00700；调试/补采）')
+@click.option('--start-date', default=None, help='区间补采起 yyyyMMdd（与 --end-date 同给走回补模式）')
+@click.option('--end-date', default=None, help='区间补采止 yyyyMMdd（含当日）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行：只列目标清单与请求计划')
+@click.pass_context
+def sync_overseas_kline(ctx, init_mode, codes, start_date, end_date, dry_run):
+    """同步外围日K（腾讯 ifzq：港股3指数+美股3指数+港股个股池；市场自身交易日历）"""
+    from src.sync.overseas_kline_manager import OverseasKlineManager
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    manager = OverseasKlineManager(ctx.obj['config_manager'])
+    code_list = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
+    try:
+        result = manager.execute(init_mode=init_mode, codes=code_list,
+                                 start_date=start_date, end_date=end_date, dry_run=dry_run)
+    except ValueError as e:
+        click.echo(f"\n✗ 参数错误: {e}")
+        return
+    if dry_run:
+        plan = result.get('plan') or {}
+        click.echo(f"\n✓ 试运行计划（{plan.get('plan', {}).get('mode')}，"
+                   f"预计请求 {plan.get('plan', {}).get('requests')} 次）:")
+        for t in plan.get('targets', []):
+            a = f"，a_code={t['a_code']}" if t.get('a_code') else ''
+            click.echo(f"  - {t['code']} {t['name']}（{t['type']}，{t['adj_type']}{a}）"
+                       f"库内最新: {t['latest_in_db'] or '无'}")
+        for w in plan.get('plan', {}).get('windows', []):
+            click.echo(f"  - 窗口: {w}")
+        return
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 外围日K（{stats['mode']}）"
+               f"代码 {stats['codes_ok']}/{stats['codes_total']} 成功，入库 {stats['rows']} 行"
+               f"（解析跳过 {stats['skipped_rows']}）")
+    if stats['failed']:
+        click.echo(f"  - 失败: {stats['failed']}")
+    if stats['qfq_refresh']:
+        click.echo(f"  - qfq 重述全历史重拉: {stats['qfq_refresh']}")
+    if stats['frozen_suspect']:
+        click.echo(f"  - ⚠ 疑似冻结: {stats['frozen_suspect']}")
+    for w in result.get('warnings', []):
+        click.echo(f"  - ⚠ {w}")
+    if result['blocked']:
+        click.echo("  - ⚠ 风控急停（已完成代码已入库，稍后重跑自动续）")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 @click.command('calc-stock-valuation')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省当日）')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走历史回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
 @click.pass_context
-def calc_stock_valuation(ctx, trade_date, dry_run):
-    """自算个股 PE/PB（本地计算：财报+股本+收盘价，无网络请求）"""
+def calc_stock_valuation(ctx, trade_date, start_date, end_date, dry_run):
+    """自算个股 PE/PB（本地计算：财报+股本+收盘价，无网络请求）
+
+    历史回填模式（开发项 A）：--start-date/--end-date 同给时按交易日历逐日 as-of 回填；
+    前置依赖开发项 K（披露日回补），否则 as-of 过滤会筛空历史财报。
+    """
     from src.sync.valuation_calc_manager import ValuationCalcManager
     manager = ValuationCalcManager(ctx.obj['config_manager'])
-    result = manager.execute(trade_date=trade_date, dry_run=dry_run)
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    result = manager.execute(trade_date=trade_date, dry_run=dry_run,
+                             start_date=start_date, end_date=end_date)
     stats = result['stats']
-    if result['success']:
+    if result.get('backfill'):
+        if result['success']:
+            click.echo(f"\n✓ PE/PB 历史回填（{stats['start_date']}~{stats['end_date']}）: "
+                       f"交易日 {stats['days_total']}，回填 {stats['days_done']}、"
+                       f"断点跳过 {stats['days_skipped_done']}、无K线 {stats['days_no_kline']}；"
+                       f"累计 {stats['rows']} 行（PE 可算 {stats['pe_ok']}）")
+        else:
+            click.echo(f"\n✗ PE/PB 历史回填失败: {result['errors']}")
+    elif result['success']:
         click.echo(f"\n✓ PE/PB 自算（{stats['trade_date']}）: 全市场 {stats['stocks']} 只，"
                    f"PE 可算 {stats['pe_ok']}，PB 可算 {stats['pb_ok']}，输入不足 {stats['insufficient']}")
     else:
@@ -357,13 +666,142 @@ def calc_stock_valuation(ctx, trade_date, dry_run):
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+@click.command('sync-bj-kline')
+@click.option('--trade-date', default=None, help='yyyyMMdd（缺省当日）')
+@click.option('--days-back', default=0, type=int, help='自起始日再向前回补的交易日数（回补历史用）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行：只解析目标交易日清单，不取包不写库')
+@click.pass_context
+def sync_bj_kline(ctx, trade_date, days_back, dry_run):
+    """北交所日K（通达信官网盘后包，P0-2 方案 B）+ 沪深对拍审计"""
+    from src.sync.bj_kline_manager import BjKlineManager
+    manager = BjKlineManager(ctx.obj['config_manager'])
+    if dry_run:
+        dates = manager._resolve_trade_dates(trade_date, days_back)
+        click.echo(f"dry-run：目标交易日（{len(dates)} 天）: {dates}")
+        click.echo("  - 每交易日 1 次盘后包请求（间隔见 review_sync.tdx_official_interval）")
+        return
+    click.echo(f"开始北交所日K同步（trade_date={trade_date or '当日'}, days_back={days_back}）...")
+    result = manager.execute(trade_date=trade_date, days_back=days_back, dry_run=False)
+    stats = result['stats']
+    if result['success']:
+        click.echo(f"\n✓ 北交所日K同步完成: {stats['days']} 天入库 {stats['rows']} 行，"
+                   f"包未发布跳过 {stats['unpublished']} 天")
+    else:
+        click.echo(f"\n✗ 北交所日K同步失败: {result['errors']}")
+    click.echo(f"  - 对拍差异股数: {stats['diff_stocks']}，僵尸码疑似: {stats['zombie_stocks']}")
+    if result.get('report_path'):
+        click.echo(f"  - 审计报告: {result['report_path']}")
+
+
+# ------------------------------------------------ 复盘报告生成命令组（§5.5）
+@click.group('review')
+def review_group():
+    """复盘报告层（report generate：六维报告 MD+HTML，只读）"""
+
+
+@review_group.command('generate')
+@click.option('--as-of', default=None, help='锚定日 yyyyMMdd，默认取库内最新交易日')
+@click.option('--output-dir', default=None, help='输出目录（覆盖配置 review.output_dir）')
+@click.pass_context
+def review_generate(ctx, as_of, output_dir):
+    """生成每日复盘报告（MD+HTML；取数→六维聚合→渲染→落盘）"""
+    from src.review import ReviewReportGenerator
+    click.echo(f"开始生成复盘报告（as_of={as_of or '库内最新交易日'}）...")
+    generator = ReviewReportGenerator(ctx.obj['config_manager'])
+    try:
+        result = generator.generate(as_of=as_of, output_dir=output_dir)
+    except ValueError as e:
+        click.echo(f"\n✗ 生成失败: {e}")
+        sys.exit(1)
+    except Exception as e:  # 未预期异常保持退出码非 0
+        click.echo(f"\n✗ 生成异常: {e!r}")
+        sys.exit(1)
+    click.echo(f"\n✓ 报告已生成（耗时 {result['duration_seconds']:.1f} 秒）:")
+    click.echo(f"  - MD  : {result['md_path']}")
+    click.echo(f"  - HTML: {result['html_path']}")
+    click.echo(f"  - 元信息: {result['meta_path']}")
+
+
+@review_group.command('digest')
+@click.option('--as-of', default=None, help='锚定日 yyyyMMdd，默认取库内最新交易日')
+@click.option('--interpretation', 'interpretation', default=None,
+              help='解读文本 md 路径（复盘 agent 撰写；缺省先试约定路径 '
+                   '<output_dir>/daily_review_<锚定日>_digest_note.md）')
+@click.option('--output-dir', default=None, help='输出目录（覆盖配置 review.output_dir）')
+@click.pass_context
+def review_digest(ctx, as_of, interpretation, output_dir):
+    """生成图文并茂复盘解读 HTML（SVG 图表+解读文本，自包含可离线打开）"""
+    from src.review.digest import build_digest
+    click.echo(f"开始生成复盘解读 HTML（as_of={as_of or '库内最新交易日'}）...")
+    try:
+        result = build_digest(ctx.obj['config_manager'], as_of=as_of,
+                              interpretation_path=interpretation,
+                              output_dir=output_dir)
+    except ValueError as e:
+        click.echo(f"\n✗ 生成失败: {e}")
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"\n✗ 生成异常: {e!r}")
+        sys.exit(1)
+    interp = '已装配解读文本' if result['has_interpretation'] else '未附解读文本（占位）'
+    click.echo(f"\n✓ 解读 HTML 已生成（耗时 {result['duration_seconds']:.1f} 秒，{interp}）:")
+    click.echo(f"  - HTML: {result['html_path']}")
+
+
+@review_group.command('backfill-sentiment')
+@click.option('--start', 'start_date', default=None,
+              help='回填区间起 yyyyMMdd（全量历史如 20210101；缺省=最近 10 个交易日增量）')
+@click.option('--end', 'end_date', default=None, help='回填区间止 yyyyMMdd（缺省=库内最新）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.pass_context
+def review_backfill_sentiment(ctx, start_date, end_date, dry_run):
+    """回填情绪指标日频表（开发项 B；与报告层逐字节同口径，幂等可重跑）"""
+    from src.sync.sentiment_metrics_manager import SentimentMetricsManager
+    manager = SentimentMetricsManager(ctx.obj['config_manager'])
+    result = manager.execute(start_date=start_date, end_date=end_date, dry_run=dry_run)
+    stats = result['stats']
+    mode = '显式区间' if start_date else '缺省增量（最近 10 个交易日）'
+    if result['success']:
+        click.echo(f"\n✓ 情绪指标回填（{mode}，{stats['range']}）: "
+                   f"交易日 {stats['days_total']}，回填 {stats['days_done']}，"
+                   f"无K线 {stats['days_no_kline']}")
+    else:
+        click.echo(f"\n✗ 情绪指标回填失败: {result['errors']}")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@review_group.command('calibrate-sentiment')
+@click.option('--start', 'start_date', required=True, help='样本区间起 yyyyMMdd（须已回填，如 20210101）')
+@click.option('--end', 'end_date', required=True, help='样本区间止 yyyyMMdd')
+@click.pass_context
+def review_calibrate_sentiment(ctx, start_date, end_date):
+    """情绪判据校准（开发项 B；只读产出阈值提案，定稿由用户改 config）"""
+    from src.review.sentiment_calibration import run_calibration
+    click.echo(f"开始校准（{_plain(start_date)}~{_plain(end_date)}，只读）...")
+    try:
+        result = run_calibration(ctx.obj['config_manager'], start_date, end_date)
+    except ValueError as e:
+        click.echo(f"\n✗ 校准失败: {e}")
+        sys.exit(1)
+    click.echo(f"\n✓ 校准提案已产出（样本 {result['samples']} 天；只读，未改配置）:")
+    click.echo(f"  - 报告: {result['report_path']}")
+
+
+def _plain(v):
+    return str(v).replace('-', '')[:8]
+
+
 # CLI 注册清单（main.py 汇总 add_command）
 review_commands = [
+    sync_review_all,
     sync_review_data,
     sync_index_kline,
     sync_adjust_factor,
     sync_money_flow,
+    sync_seal_stats,
     sync_announcement,
+    reclassify_announcement,
     sync_disclosure_calendar,
     sync_index_valuation,
     sync_ths_finance,
@@ -372,6 +810,9 @@ review_commands = [
     sync_industry,
     sync_concept,
     sync_unlock_calendar,
+    sync_ths_industry_l2,
     sync_overseas_market,
+    sync_overseas_kline,
     calc_stock_valuation,
+    sync_bj_kline,
 ]

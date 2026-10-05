@@ -26,6 +26,11 @@ logger = logging.getLogger(__name__)
 INDICATOR_URL = ('https://oss-ch.csindex.com.cn/static/html/csindex/public/'
                  'uploads/file/autofile/indicator/{code}indicator.xls')
 
+# 指数历史行情 API（延后项补齐方案 N2，2026-10-04 实测锁定）：
+# 仅 GET + yyyyMMdd 可用（POST -> code:500、yyyy-MM-dd -> data:[]，已实测排除）；
+# 000985 单请求可回溯 2005 全历史（5284 行），932000 有 2020 起基日回溯
+PERF_API = 'https://www.csindex.com.cn/csindex-home/perf/index-perf'
+
 # 列名按前缀匹配（表头含中英双语，避免整串匹配脆弱）
 _COL_DATE_PREFIX = '日期'
 _COL_CODE_PREFIX = '指数代码'
@@ -84,6 +89,41 @@ class CsindexSource(HttpCollectorBase):
         """取文件内最新一条估值记录"""
         rows = self.fetch_indicator_file(index_code)
         return self.to_row(rows[-1], index_code, index_name) if rows else None
+
+    def fetch_perf_history(self, index_code: str, start: str, end: str) -> List[Dict[str, Any]]:
+        """指数历史行情（index-perf API；start/end 为 yyyyMMdd，实测 000985 可回溯 2005 全历史）。
+
+        单位换算：tradingValue 亿元 -> 元；preclose = close - change。
+        实测（2026-10-04）：基日回溯历史（指数发布日前，如中证全指 2011-08-02、
+        中证2000 2023-08-11 之前）的 change 为 null——此时 preclose 取 API 返回顺序中
+        前一行的 close（首行留空），不再丢弃整行（初版曾因此丢掉全部回溯历史）。
+        返回行与 index_kline_manager 的 trade_index_info 行同构（ts_code/index_code/
+        index_name 由调用方补齐，up_count/down_count 留空——中证 API 无涨跌家数）。
+        """
+        data = self.get_json(PERF_API, params={
+            'indexCode': index_code, 'startDate': start, 'endDate': end})
+        rows: List[Dict[str, Any]] = []
+        prev_close: Optional[float] = None
+        for item in (data or {}).get('data') or []:
+            try:
+                close = float(item['close'])
+                open_ = float(item['open'])
+                high = float(item['high'])
+                low = float(item['low'])
+            except (TypeError, ValueError, KeyError):
+                continue
+            change = item.get('change')
+            preclose = round(close - float(change), 4) if change is not None else prev_close
+            rows.append({
+                'trade_date': str(item.get('tradeDate') or ''),
+                'open': open_, 'high': high, 'low': low, 'close': close,
+                'preclose': preclose,
+                'volume': float(item.get('tradingVol') or 0),
+                'amount': round(float(item.get('tradingValue') or 0) * 1e8, 2),
+                'change_rate': float(item.get('changePct') or 0),
+            })
+            prev_close = close
+        return rows
 
     # ---------- 解析 ----------
 

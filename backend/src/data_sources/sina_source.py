@@ -1,11 +1,17 @@
 """
 新浪财经数据源 —— 外围市场（方案 4.14，M1）
 
-接口事实（2026-09-27 实测锁定）：
+接口事实（2026-09-27 实测锁定；gb_ 分支 2026-10-04 补充）：
 - GET https://hq.sinajs.cn/list={codes逗号拼接}，必须带 Referer https://finance.sina.com.cn/（否则 403）
 - 响应 GBK 编码，形如 var hq_str_int_dji="道琼斯,46247.29,299.97,0.65";
 - int_* 指数（道指/纳指/标普等）字段：[0]名称, [1]当前点位, [2]涨跌额, [3]涨跌幅(%)
-- rt_hk* 港股指数（恒生等，2026-09-27 实测）：[1]中文名, [2]当前点位, [8]涨跌幅(%)
+  ⚠ int_* 三大美指接口数值已冻结（20260927~0930 四日同值，10-04 实测仍冻结），
+  已弃用换 gb_ 前缀（见 config review_sync.sina_markets 注释）
+- gb_ 美股个股/指数（O4 2026-10-04 实测）：[0]名称, [1]最新价, [2]涨跌幅%,
+  [3]报价时间, [26]昨收——与腾讯 qt/usfqkline 双源对拍一致
+- rt_hk* 港股指数（恒生等；字段布局 2026-10-04 实测修正，P0）：[0]代码, [1]中文名,
+  [2]今开, [3]昨收, [4]最高, [5]最低, [6]最新/收盘, [7]涨跌额, [8]涨跌幅(%), …[17]日期
+  ⚠ close 取 [6]；原取 [2]（今开）自 09-27 上线起恒生"收盘"一直为开盘价，已修复回补
 - fx_* 汇率字段为另一种布局（2026-09 实测）：[1]最新价，日期由尾部 yyyy-MM-dd 扫描定位；
   涨跌幅字段暂无可靠定位 → 按数据真实性原则留空，补充代码启用前需人工核对
 - 口径注意：北京时间盘后取到的美股为昨夜收盘（T-1），汇率/美元指数为最新值
@@ -76,6 +82,10 @@ class SinaSource(HttpCollectorBase):
             elif parsed.get('family') == 'fx':
                 row['close'] = parsed.get('close')
                 row['quote_date'] = parsed.get('date')
+            elif parsed.get('family') == 'hf':
+                # 外盘期货：现价入库；change_pct 留空由 manager 本地昨收自算（T20）
+                row['close'] = parsed.get('close')
+                row['quote_date'] = parsed.get('date')
             else:
                 row['close'] = parsed.get('close')
                 row['change_pct'] = parsed.get('change_pct')
@@ -107,13 +117,39 @@ class SinaSource(HttpCollectorBase):
                     'date': date_str,
                     'name': fields[0] if fields else None,
                 }
+            elif code.startswith('hf_'):
+                # 外盘期货（hf_，I-2；2026-10-03 实测 CHA50CFD 布局）：
+                # [4]最高 [5]最低 [6]时间 [7]最新价 [9]持仓量 [12]日期 [13]中文名 [14]成交量
+                # 快照无昨结/昨收可靠字段（T20 双时段采样）→ change_pct 一律留空，
+                # 由 OverseasManager 用 overseas_market_daily 本地昨收自算（首条留空）
+                result[code] = {
+                    'family': 'hf',
+                    'close': _to_float(fields[7]) if len(fields) > 7 else None,
+                    'high': _to_float(fields[4]) if len(fields) > 4 else None,
+                    'low': _to_float(fields[5]) if len(fields) > 5 else None,
+                    'time': fields[6] if len(fields) > 6 else None,
+                    'date': fields[12] if len(fields) > 12 else None,
+                    'name': fields[13] if len(fields) > 13 else None,
+                    'change_pct': None,
+                }
             elif code.startswith('rt_hk'):
-                # 港股指数（rt_hkHSI 等，2026-09-27 实测）：[1]中文名 [2]点位 [8]涨跌幅%
+                # 港股指数（rt_hkHSI 等）：[1]中文名 [2]今开 [3]昨收 [4]最高 [5]最低
+                # [6]最新/收盘 [8]涨跌幅% [17]日期——close 取 [6]，勿取 [2]（今开，
+                # 前车之鉴：09-27~10-04 库内恒生"收盘"一直是开盘价）
                 result[code] = {
                     'family': 'index',
-                    'close': _to_float(fields[2]) if len(fields) > 2 else None,
+                    'close': _to_float(fields[6]) if len(fields) > 6 else None,
                     'change_pct': _to_float(fields[8]) if len(fields) > 8 else None,
                     'name': fields[1] if len(fields) > 1 else (fields[0] if fields else None),
+                }
+            elif code.startswith('gb_'):
+                # 美股个股/指数（gb_，O4 2026-10-04 实测）：[0]名称 [1]最新价 [2]涨跌幅%
+                # [3]报价时间（北京时间）[26]昨收；替代冻结的 int_* 三大美指
+                result[code] = {
+                    'family': 'index',
+                    'close': _to_float(fields[1]) if len(fields) > 1 else None,
+                    'change_pct': _to_float(fields[2]) if len(fields) > 2 else None,
+                    'name': fields[0] if fields else None,
                 }
             else:
                 result[code] = {

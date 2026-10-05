@@ -1,0 +1,29 @@
+# 分析链：每日复盘（方案《每日复盘系统方案-V1.0-20260927》阶段1）
+#
+# 串起复盘所需的个股截面模块，覆盖方案六维中的「市场情绪」与「个股异动」两维：
+#   情绪：涨停 / 连板 / 跌停 / 炸板 / 昨日涨停今日溢价（晋级率、平均溢价由报告层聚合）
+#   异动：大涨大跌 / 放量倍数 / 60日新高新低
+# 大盘环境、板块主线、业绩估值等维度的截面统计由复盘报告生成器（backend/src/review/，
+# 已于 2026-10-03 落地；CLI：`review generate`，六维 MD+HTML）计算。
+# 与本链的关系：报告层基于库内日 K 独立重算同口径指标，不依赖当日链运行；
+# 本链 CSV 提供个股截面明细（Excel 可开）与交叉校验（报告 meta 的重算涨停家数与链 CSV 一致）。
+#
+# 运行：backend/run_cli.py analyze run --chain daily_review [--as-of yyyyMMdd]
+
+chain: daily_review
+description: 每日复盘链：涨停、连板、跌停、炸板、昨日涨停溢价、大涨大跌、放量倍数、60日新高新低
+
+# 复盘指标最多回看 60 交易日（60日新高新低）；引擎按各模块回看需求自动扩展窗口。
+lookback: 60d
+
+modules:
+  - name: limit_up_today          # 是否涨停（锚定日）
+  - name: consecutive_limit_up    # 连板数
+    params: {max_lookback: 60}
+  - name: limit_down_today        # 是否跌停（锚定日）
+  - name: burst_limit             # 是否炸板（盘中触板未封住）
+  - name: limit_up_premium        # 昨日涨停今日溢价（%）
+  - name: big_mover               # 大涨大跌（±5% 阈值）
+  - name: volume_surge            # 放量倍数（当日量/前5日均量）
+  - name: new_high_low            # 60日新高新低
+    params: {window: 60}

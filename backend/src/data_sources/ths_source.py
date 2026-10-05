@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 FINANCE_URL = 'http://basic.10jqka.com.cn/api/stock/finance/{code}_main.json'
 THS_REFERER = 'http://basic.10jqka.com.cn/'
+# 公司概况页（延后项补齐方案 N3，2026-10-04 实测锁定）：服务端渲染、GBK 编码、
+# 无 hexin-v 强制；"所属申万行业：</strong><span>{一级} — {二级}</span>"（4 样本格式统一）
+COMPANY_URL = 'http://basic.10jqka.com.cn/{code}/company.html'
+_SW_RE = re.compile(r'所属申万行业[：:]\s*</strong>\s*<span>([^<]+)</span>')
 
 # 指标名 -> (base_financial_report 列, 是否每股类需乘总股本)
 METRIC_MAP = {
@@ -73,6 +77,21 @@ class ThsSource(HttpCollectorBase):
             referer=THS_REFERER,
             blocked_error_class=ThsBlockedError,
         )
+
+    def fetch_sw_industry(self, code: str) -> Optional[Tuple[str, str]]:
+        """公司概况页 -> (申万一级, 申万二级)。页面服务端渲染、GBK 编码（2026-10-04 实测）。
+
+        无命中返回 None（无申万分类/页面缺失，调用方如实计缺）。
+        """
+        content = self.get_content(COMPANY_URL.format(code=code))
+        text = content.decode('gbk', errors='replace')
+        m = _SW_RE.search(text)
+        if not m:
+            return None
+        parts = [p.strip() for p in m.group(1).split('—')]
+        if len(parts) != 2 or not all(parts):
+            return None
+        return parts[0], parts[1]
 
     def _check_risk_control(self, resp) -> None:
         """验证码页特征串识别：HTTP 200 但内容为验证码/拦截页"""

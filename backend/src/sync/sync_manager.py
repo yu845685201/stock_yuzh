@@ -337,8 +337,11 @@ class SyncManager:
                 if is_explicit_range:
                     trade_dates = self._get_trade_dates(start_date, end_date)
                 else:
-                    today_str = date.today().strftime('%Y-%m-%d')
-                    trade_dates = self._get_trade_dates(today_str, today_str)
+                    # 增量目标日：交易日历中 ≤ 今天的最近交易日；若为"今天"且未收盘
+                    # （<15:30）再退一日。直接用 date.today() 会在跨零点补跑时把
+                    # 全市场数据过滤丢弃（见问题记录 P-11）
+                    target = self._latest_closed_trade_date()
+                    trade_dates = self._get_trade_dates(target, target)
 
                 if not trade_dates:
                     result['success'] = True
@@ -432,10 +435,12 @@ class SyncManager:
 
             result['success'] = True
             # 除权触发清单落盘（方案 4.2）：日常增量检出 qfq_rebase 的股票清单，
-            # 供复权因子增量同步（adjust_factor_manager）读取；与当日已有清单合并，幂等
+            # 供复权因子增量同步（adjust_factor_manager）读取；与当日已有清单合并，幂等。
+            # 文件名用本次同步的目标交易日（非 wall clock，跨零点补跑防错位，见 P-10）
             if not init_mode and not is_explicit_range and ctx.xdxr_hit_codes:
                 try:
-                    self._write_adjust_trigger(ctx.xdxr_hit_codes)
+                    self._write_adjust_trigger(ctx.xdxr_hit_codes,
+                                               trade_date=max(trade_dates) if trade_dates else None)
                 except Exception as e:
                     self.logger.warning(f"除权触发清单落盘失败（不影响日K同步）: {e}")
         except Exception as e:
@@ -503,8 +508,36 @@ class SyncManager:
             row['RawClose'] = item.get('Close')
         return [merged[key] for key in sorted(merged.keys())]
 
-    def _write_adjust_trigger(self, ts_codes: List[str]) -> str:
-        """落当日除权触发清单（tmp/adjust_trigger_YYYYMMDD.json，与已有清单合并幂等）。
+    def _latest_closed_trade_date(self) -> str:
+        """增量目标日：交易日历中 ≤ 今天的最近交易日；若为"今天"且未收盘（15:30 前）再退一日。
+
+        目的是让"今天"语义收敛为"最近已收盘的数据交易日"（问题记录 P-11：
+        date.today() 在跨零点补跑/盘中误跑时会导致增量数据被允许日期过滤丢弃）。
+        """
+        today_str = date.today().strftime('%Y-%m-%d')
+        rows = self.db_conn.execute_query(
+            "SELECT calendar_date FROM base_trade_calendar "
+            "WHERE calendar_date <= %s AND is_trading_day = 1 "
+            "ORDER BY calendar_date DESC LIMIT 1", (today_str,))
+        if not rows:
+            return today_str
+        latest = rows[0]['calendar_date']
+        latest_str = latest.strftime('%Y-%m-%d') if hasattr(latest, 'strftime') else str(latest)
+        if latest_str == today_str and datetime.now().time() < datetime.strptime('15:30', '%H:%M').time():
+            prev = self.db_conn.execute_query(
+                "SELECT calendar_date FROM base_trade_calendar "
+                "WHERE calendar_date < %s AND is_trading_day = 1 "
+                "ORDER BY calendar_date DESC LIMIT 1", (latest_str,))
+            if prev:
+                p = prev[0]['calendar_date']
+                return p.strftime('%Y-%m-%d') if hasattr(p, 'strftime') else str(p)
+        return latest_str
+
+    def _write_adjust_trigger(self, ts_codes: List[str], trade_date: Optional[str] = None) -> str:
+        """落除权触发清单（tmp/adjust_trigger_YYYYMMDD.json，与已有清单合并幂等）。
+
+        trade_date 用本次同步的目标交易日（跨零点补跑时 wall clock 会错位一天，
+        见问题记录 P-10）；缺省回退系统当日。
 
         消费方：adjust_factor_manager.read_adjust_trigger（复权因子增量，方案 4.2）。
         """
@@ -512,7 +545,7 @@ class SyncManager:
         from .adjust_factor_manager import adjust_trigger_path
         from .review_common import save_manifest, tmp_dir
 
-        trade_date = date.today().strftime('%Y%m%d')
+        trade_date = trade_date or date.today().strftime('%Y%m%d')
         path = adjust_trigger_path(trade_date)
         merged: List[str] = list(dict.fromkeys(ts_codes))
         try:

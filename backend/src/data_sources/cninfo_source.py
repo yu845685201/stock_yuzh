@@ -234,16 +234,19 @@ class CninfoSource:
     # ---------- 全市场窗口检索（每日复盘方案 4.6/4.13 增量方法，不影响既有按股检索） ----------
 
     def query_market_window(self, start_date: str, end_date: str,
-                            searchkey: str = '') -> List[Dict[str, Any]]:
+                            searchkey: str = '', category: str = '') -> List[Dict[str, Any]]:
         """全市场窗口检索：不指定 stock，返回窗口内全部公告（按 announcementId 去重）。
 
         searchkey：标题关键词过滤（2026-09-28 实测可用，如"限售股上市流通"→近30日 180 条），
         缺省空串保持全量行为不变（公告清单路径不受影响）。
+        category：分号分隔的巨潮分类码（如 ';'.join(PERIODIC_CATEGORIES)），缺省空串保持
+        全量行为不变（开发项 K 披露日回补用，探路 T18：必须带过滤，否则披露季单窗口超上限）。
         分页数超上限时对半拆窗递归（巨潮窗口检索可回溯任意历史，失败窗口次日并抓安全）。
         实测（2026-09-27）：stock='' + column='szse' 返回全市场（沪深北），column 对检索不敏感。
         """
         try:
-            results = self._query_market_window(start_date, end_date, searchkey=searchkey)
+            results = self._query_market_window(start_date, end_date,
+                                                searchkey=searchkey, category=category)
         except CninfoWindowTooLarge:
             s = date.fromisoformat(start_date)
             e = date.fromisoformat(end_date)
@@ -251,8 +254,10 @@ class CninfoSource:
                 raise
             mid = s + (e - s) / 2
             logger.info(f'全市场窗口 {start_date}~{end_date} 超分页上限，对半拆分')
-            results = (self.query_market_window(start_date, mid.isoformat())
-                       + self.query_market_window((mid + timedelta(days=1)).isoformat(), end_date))
+            results = (self.query_market_window(start_date, mid.isoformat(),
+                                                searchkey=searchkey, category=category)
+                       + self.query_market_window((mid + timedelta(days=1)).isoformat(), end_date,
+                                                  searchkey=searchkey, category=category))
 
         merged: Dict[str, Dict[str, Any]] = {}
         for a in results:
@@ -262,7 +267,7 @@ class CninfoSource:
         return list(merged.values())
 
     def _query_market_window(self, start_date: str, end_date: str,
-                             searchkey: str = '') -> List[Dict[str, Any]]:
+                             searchkey: str = '', category: str = '') -> List[Dict[str, Any]]:
         announcements: List[Dict[str, Any]] = []
         page_num = 1
         while True:
@@ -275,7 +280,7 @@ class CninfoSource:
                 'stock': '',
                 'searchkey': searchkey,
                 'secid': '',
-                'category': '',
+                'category': category,
                 'trade': '',
                 'seDate': f'{start_date}~{end_date}',
                 'sortName': '',

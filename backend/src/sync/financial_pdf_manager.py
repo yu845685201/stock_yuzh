@@ -5,6 +5,8 @@
 - PDF 只落 data/financial_pdf/{stock_code}_{stock_name}/{yyyy}_{NN}.pdf，不落数据库
 - 数据库仅维护 sync_financial_pdf_progress（股票编码 + 最后财报期），支撑增量
 - 默认=增量：有进度记录只采报告期 > last_stat_date 的新财报；无记录回补近 N 年（默认5）
+- 报告期窗口：cninfo.pdf_recent_years（用户决策 2026-10-01=近 10 年）——全模式生效
+  （含 init），显式 --year-from 优先；存量早年文件用 scripts/prune_financial_pdf.py 清理
 - 幂等三层：进度表（增量下界）、文件存在校验（%PDF头，跳过重复下载）、manifest 失败清单（次轮重试）
 - 同报告期多版本：manifest.files 记录每份文件对应的 announcementId，巨潮出现更新/修订版
   时 announcementId 变化 -> 覆盖重下，保留最新披露版本（manifest.replaced 审计）
@@ -36,7 +38,13 @@ class FinancialPdfManager:
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_financial_pdf_progress_table()
         self.pdf_dir = self._resolve_pdf_dir()
-        self.backfill_years = int(self.config.get('cninfo.backfill_years', 5))
+        cninfo_cfg = self.config.get('cninfo', {}) or {}
+        self.backfill_years = int(cninfo_cfg.get('backfill_years', 5))
+        # 近 N 个报告年度滚动窗口（用户决策 2026-10-01：仅采集/保留近 10 年财报；
+        # 0 = 关闭全历史）。显式 --year-from 优先于本窗口。
+        # 注意必须用嵌套 dict 取值——self.config 是普通 dict，点路径 get 恒落默认值
+        # （backfill_years 的同款写法因默认值恰好等于配置值而从未暴露）
+        self.recent_years = int(cninfo_cfg.get('pdf_recent_years', 0) or 0)
         self.manifest_path = Path(manifest_path) if manifest_path else DEFAULT_MANIFEST
 
     def _resolve_pdf_dir(self) -> Path:
@@ -235,17 +243,20 @@ class FinancialPdfManager:
                 continue
             year, nn, _revision = parsed
             period_end = self.source.period_end_date(year, nn)
-            if not init_mode:
-                if year_from is not None:
-                    # 显式年份窗口优先于增量/回补逻辑
-                    if year < year_from or (year_to and year > year_to):
-                        continue
-                elif last_stat is not None:
+            # 近 N 年滚动窗口（cninfo.pdf_recent_years；显式 --year-from 优先）——
+            # 全模式生效（含 init 全历史），存量同步由 prune_financial_pdf.py 清理
+            floor = year_from if year_from is not None else self._window_floor()
+            if floor is not None and year < floor:
+                continue
+            if year_to and year > year_to:
+                continue
+            if not init_mode and year_from is None:
+                if last_stat is not None:
                     # 增量：只采报告期晚于进度的新财报
                     if period_end <= last_stat:
                         continue
-                else:
-                    # 无进度回补：报告期年份 >= 当前年 - backfill_years
+                elif self.recent_years <= 0:
+                    # 无进度回补（仅在未启用近N年窗口时按 backfill_years 收窄）
                     if year < datetime.now().year - self.backfill_years:
                         continue
             key = (year, nn)
@@ -311,15 +322,25 @@ class FinancialPdfManager:
             logger.warning(f'以下代码不在巨潮A股映射中，跳过: {missing}')
         return wanted
 
+    def _window_floor(self) -> Optional[int]:
+        """近 N 年滚动窗口的报告期年份下限（2026 年 + 近 10 年 → 2017）；未启用返回 None"""
+        if self.recent_years <= 0:
+            return None
+        return datetime.now().year - self.recent_years + 1
+
     def _resolve_se_start(self, init_mode: bool, year_from: Optional[int],
                           last_stat: Optional[date]) -> str:
         """披露时间窗起点（seDate 左端）：报告期不会早于其披露，取各模式最保守值"""
-        if init_mode:
-            return '1990-01-01'
         if year_from is not None:
             return f'{year_from}-01-01'
+        floor = self._window_floor()
+        if init_mode:
+            # 近N年窗口下无需回溯 1990：报告期≥floor 的披露必不早于 floor 年初
+            return f'{floor}-01-01' if floor else '1990-01-01'
         if last_stat is not None:
             return last_stat.isoformat()
+        if floor:
+            return f'{floor}-01-01'
         # 无进度回补：报告期最早可能在上一年末后披露，多留一年缓冲
         return f'{datetime.now().year - self.backfill_years}-01-01'
 
@@ -330,7 +351,9 @@ class FinancialPdfManager:
     def _describe_mode(self, init_mode: bool, year_from: Optional[int],
                        year_to: Optional[int]) -> str:
         if init_mode:
-            return '全历史初始化'
+            floor = year_from or self._window_floor()
+            return f'全历史初始化（近{self.recent_years}年窗口：报告期{floor}年起）' \
+                if floor else '全历史初始化'
         if year_from and year_to:
             return f'指定报告期年份（{year_from}~{year_to}）'
         if year_from:

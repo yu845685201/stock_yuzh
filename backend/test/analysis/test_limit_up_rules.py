@@ -1,4 +1,4 @@
-"""涨停规则单测：板块识别、制度分段阈值、向量化判定。"""
+"""涨停/跌停规则单测：板块识别、制度分段阈值、向量化判定。"""
 
 import pandas as pd
 import pytest
@@ -9,6 +9,7 @@ from src.analysis.limit_up_rules import (
     BOARD_MAIN,
     BOARD_STAR,
     BOARD_UNKNOWN,
+    annotate_limit_down,
     annotate_limit_up,
     board_of,
     limit_pct,
@@ -141,3 +142,78 @@ class TestAnnotateLimitUp:
         out = annotate_limit_up(df, "300750", BOARD_GEM)
         assert bool(out.loc[0, "_limit_up"]) is True
         assert bool(out.loc[1, "_limit_up"]) is False
+
+
+class TestAnnotateLimitDown:
+    def test_main_board_threshold_with_guard(self):
+        df = _frame(
+            [
+                # 跌停：-10.00%，收于最低价
+                {"trade_date": "20260922", "change_rate": -10.0, "close": 9.0, "low": 9.0, "is_st": 0},
+                # 未跌停：-9.89%，未达 -9.90 阈值
+                {"trade_date": "20260923", "change_rate": -9.89, "close": 9.01, "low": 9.0, "is_st": 0},
+            ]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down"]) is True
+        assert bool(out.loc[1, "_limit_down"]) is False
+
+    def test_close_not_low_is_not_limit_down(self):
+        """跌幅达标但收盘价不是当日最低价 → 不可能收于跌停价，判否（护栏）。"""
+        df = _frame(
+            [{"trade_date": "20260923", "change_rate": -10.02, "close": 9.0, "low": 8.8, "is_st": 0}]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down"]) is False
+
+    def test_st_uses_5pct_threshold(self):
+        df = _frame(
+            [
+                {"trade_date": "20260923", "change_rate": -5.0, "close": 9.5, "low": 9.5, "is_st": 1},
+                {"trade_date": "20260922", "change_rate": -4.85, "close": 9.61, "low": 9.5, "is_st": 1},
+            ]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down"]) is True      # 5% 档达标（阈值 -4.90）
+        assert bool(out.loc[1, "_limit_down"]) is False     # -4.85 未达阈值
+
+    def test_gem_20pct(self):
+        df = _frame(
+            [
+                {"trade_date": "20260923", "change_rate": -19.95, "close": 8.0, "low": 8.0, "is_st": 0},
+                {"trade_date": "20260922", "change_rate": -10.05, "close": 9.0, "low": 8.8, "is_st": 0},
+            ]
+        )
+        out = annotate_limit_down(df, "300750", BOARD_GEM)
+        assert bool(out.loc[0, "_limit_down"]) is True
+        assert bool(out.loc[1, "_limit_down"]) is False
+
+    def test_before_limit_system_is_unknown(self):
+        df = _frame(
+            [{"trade_date": "19960102", "change_rate": -15.0, "close": 9.0, "low": 9.0, "is_st": 0}]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down_known"]) is False
+        assert bool(out.loc[0, "_limit_down"]) is False
+
+    def test_missing_change_rate_is_unknown(self):
+        df = _frame(
+            [{"trade_date": "20260923", "change_rate": None, "close": 9.0, "low": 9.0, "is_st": 0}]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down_known"]) is False
+
+    def test_low_missing_does_not_block_detection(self):
+        """low 缺失时不启用护栏，退化为纯阈值法。"""
+        df = _frame(
+            [{"trade_date": "20260923", "change_rate": -10.0, "close": 9.0, "low": None, "is_st": 0}]
+        )
+        out = annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert bool(out.loc[0, "_limit_down"]) is True
+
+    def test_does_not_modify_input(self):
+        df = _frame(
+            [{"trade_date": "20260923", "change_rate": -10.0, "close": 9.0, "low": 9.0, "is_st": 0}]
+        )
+        annotate_limit_down(df, "600375", BOARD_MAIN)
+        assert "_limit_down" not in df.columns

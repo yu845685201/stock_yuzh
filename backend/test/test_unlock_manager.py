@@ -54,6 +54,9 @@ class FakeDB:
     def upsert_share_unlocks(self, rows):
         self.unlock_rows.extend(rows)
 
+    def backfill_unlock_ratios(self):
+        return 0
+
 
 class FakeCninfo:
     def __init__(self, windows=None, blocked=False):
@@ -141,11 +144,12 @@ def test_parse_text_ignores_disclosure_date():
 
 
 def test_parse_text_relaxed_fallback():
-    """无标准关键词时，从'上市流通'出现处取日期"""
+    """无标准关键词时，从'上市流通'出现处取日期；V4.1 起 44 字符间隔窗口
+    顺带覆盖'上市流通，共 X 股'句式（旧词表漏、V4.1 正确捕获该真实股数）"""
     text = '本次限售股份上市流通安排如下：自2026年10月20日起上市流通，共100,000股。'
     parsed = UnlockManager.parse_unlock_text(text)
     assert parsed['unlock_date'] == date(2026, 10, 20)
-    assert parsed['unlock_shares'] is None  # 数量词表未命中 -> 如实留空
+    assert parsed['unlock_shares'] == pytest_approx(100000)
 
 
 def test_parse_text_skips_historical_dates():
@@ -165,6 +169,146 @@ def test_parse_text_scanned_pdf_returns_none():
     assert parsed['unlock_date'] is None
     no_date = UnlockManager.parse_unlock_text('本公司股东减持计划公告 12345')
     assert no_date['unlock_date'] is None
+
+
+# ---------- V4/V4.1 新增用例（2026-10-04 探路实测：存量 18 份 + 样本外 45 份） ----------
+
+def test_parse_text_keyword_variants():
+    """关键词变体：'解除限售的股份数量' / '归属的股票数量'（冒号夹层）"""
+    text = '本次解除限售的股份数量为 41,977,976 股，占公司总股本的 23.2526%。'
+    assert UnlockManager.parse_unlock_text(text)['unlock_shares'] == pytest_approx(41977976)
+    text2 = '本次归属的股票数量：1,061,000 股。'
+    assert UnlockManager.parse_unlock_text(text2)['unlock_shares'] == pytest_approx(1061000)
+
+
+def test_parse_text_linebreak_truncation():
+    """关键词/单位被 PDF 换行从中间截断：'解除限⏎售' 与 '557,071⏎股'"""
+    text = '解除限\n售数量为 18,078,510 股。'
+    assert UnlockManager.parse_unlock_text(text)['unlock_shares'] == pytest_approx(18078510)
+    text2 = '解除限售数量为557,071\n股。'
+    assert UnlockManager.parse_unlock_text(text2)['unlock_shares'] == pytest_approx(557071)
+
+
+def test_parse_text_long_gap():
+    """关键词与数字间填充过长（旧 16 字符窗漏，44 字符窗命中）"""
+    text = ('本次解除限售数量为控股股东重庆财信房地产开发集团\n'
+            '有限公司所持有的46,696,315\n股。')
+    assert UnlockManager.parse_unlock_text(text)['unlock_shares'] == pytest_approx(46696315)
+
+
+def test_parse_text_ratio_nearest_to_shares():
+    """占比取与股数位置最近的命中：同文含限售股占比 77.4538% 与解禁占比 23.2526%"""
+    text = ('公司限售股占发行后总股本的比例为 77.4538%；'
+            '本次解除限售的股份数量为 41,977,976 股，'
+            '占公司总股本的 23.2526%。')
+    parsed = UnlockManager.parse_unlock_text(text)
+    assert parsed['unlock_shares'] == pytest_approx(41977976)
+    assert parsed['unlock_ratio'] == pytest_approx(23.2526)
+
+
+def test_parse_text_bse_tradeable_date():
+    """北交所版式：'可交易时间为 X 年 X 月 X 日'（旧词表整行丢失的根因）"""
+    text = '本次解除限售股份可交易时间为 2026 年 10 月 9 日。'
+    assert UnlockManager.parse_unlock_text(text)['unlock_date'] == date(2026, 10, 9)
+
+
+def test_parse_text_listing_date_and_filter_history():
+    """'上市日期'关键词 + 历史批次日期滤除"""
+    text = ('公司此前一批限售股上市流通日为2018年9月28日。'
+            '本次流通股上市日期为2026 年9月30 日。')
+    parsed = UnlockManager.parse_unlock_text(text, not_before=date(2026, 9, 28))
+    assert parsed['unlock_date'] == date(2026, 9, 30)
+
+
+def test_keep_title_excludes_not_yet_listed(monkeypatch):
+    """'归属结果但股票暂不上市流通'属非解禁事件，排除词'暂不'拦截"""
+    monkeypatch.setattr(unlock_module, 'DatabaseConnection', lambda cm: FakeDB())
+    manager = UnlockManager(FakeConfigManager(CONFIG))
+    assert manager.keep_title(
+        '关于2024年限制性股票激励计划归属结果但股票暂不上市流通的公告') is False
+    assert manager.keep_title('关于解除限售股票上市流通的提示性公告') is True
+
+
+def test_parse_text_wan_unit_decimal():
+    """'共计192.4646万股' 万股换算（含小数）"""
+    text = '本次上市流通的限售股共计192.4646万股，占公司总股本的0.48%。'
+    parsed = UnlockManager.parse_unlock_text(text)
+    assert parsed['unlock_shares'] == pytest_approx(1924646)
+    assert parsed['unlock_ratio'] == pytest_approx(0.48)
+
+
+def test_parse_text_v41_out_of_sample_variants():
+    """V4.1 样本外实测补的变体族：总数/解锁/数⏎量/合计为/上市股数"""
+    # 科创板首发公告标准模板："本次股票上市流通总数为 X 股"
+    assert UnlockManager.parse_unlock_text(
+        '本次股票上市流通总数为1,923,024股，占公司股本总数的1.20%。')['unlock_shares'] \
+        == pytest_approx(1923024)
+    # "数⏎量"两字被换行拆开
+    assert UnlockManager.parse_unlock_text(
+        '可解除限售的限制性股票数\n量为 100,900 股，占公司总股本的0.0069%。')['unlock_shares'] \
+        == pytest_approx(100900)
+    # "解锁"动词
+    assert UnlockManager.parse_unlock_text(
+        '本次解锁的第一类限制性股票数量：31万股，占目前公司总股本的0.0031%。')['unlock_shares'] \
+        == pytest_approx(310000)
+    # "可上市流通股份的总数"
+    assert UnlockManager.parse_unlock_text(
+        '2、本次可上市流通股份的总数为 5,886,199 股，占公司总股本1.0978%。')['unlock_shares'] \
+        == pytest_approx(5886199)
+    # "上市股数为" + 万股小数（日联科技）
+    assert UnlockManager.parse_unlock_text(
+        '上市股数为\n5,081.5112 万股。')['unlock_shares'] == pytest_approx(50815112)
+    # "限制⏎性股票"名词换行 + "合计为"替代数量
+    assert UnlockManager.parse_unlock_text(
+        '解除限售的限制\n性股票合计为 8,731,507 股，占目前公司总股本的0.67%。')['unlock_shares'] \
+        == pytest_approx(8731507)
+
+
+def test_execute_ratio_strategy_prefers_derived(monkeypatch):
+    """ratio 口径统一：股数解析成功时不写 PDF 占比（由推导管道回填）；股数失败时 PDF 占比兜底"""
+    windows = {'k1': [_ann('a1', '关于部分限售股份上市流通的公告'),
+                      _ann('a2', '关于部分限售股份上市流通的公告', sec_code='600000')],
+               'k2': []}
+    texts = {'a1': '上市流通日为2026年10月9日，解除限售股份数量为100万股，占总股本比例1.00%。',
+             'a2': '上市流通日为2026年10月9日，占总股本比例2.00%。'}
+
+    def fake_extract(path, n):
+        return texts[path.stem]
+
+    monkeypatch.setattr(UnlockManager, '_extract_pdf_text', staticmethod(fake_extract))
+    manager, db = _build(windows, monkeypatch=monkeypatch)
+    result = manager.execute(days_back=5)
+
+    assert result['success'] is True
+    assert len(db.unlock_rows) == 2
+    by_code = {r['ts_code']: r for r in db.unlock_rows}
+    # a1 有股数 -> PDF 占比不写（推导管道统一回填）
+    assert by_code['sz.000001']['unlock_ratio'] is None
+    assert by_code['sz.000001']['unlock_shares'] == 100 * 10000
+    # a2 股数失败 -> PDF 占比兜底保留
+    assert by_code['sh.600000']['unlock_ratio'] == pytest_approx(2.00)
+    assert by_code['sh.600000']['unlock_shares'] is None
+
+
+def test_execute_six_page_retry(monkeypatch):
+    """日期解析失败时以 max_pages+3 页重解一次（多批次公告解禁日排中后部）"""
+    calls = []
+    windows = {'k1': [_ann('a1', '关于部分限售股份上市流通的公告')], 'k2': []}
+
+    def fake_extract(path, n):
+        calls.append(n)
+        if n <= 3:
+            return '解禁安排详见后文。'
+        return '本次解除限售股份上市流通日为2026年10月13日。'
+
+    monkeypatch.setattr(UnlockManager, '_extract_pdf_text', staticmethod(fake_extract))
+    manager, db = _build(windows, monkeypatch=monkeypatch)
+    result = manager.execute(days_back=5)
+
+    assert calls == [3, 6]
+    assert result['success'] is True
+    assert result['stats']['rows'] == 1
+    assert db.unlock_rows[0]['unlock_date'] == '20261013'
 
 
 # ---------- 执行漏斗 ----------

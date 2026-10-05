@@ -9,6 +9,21 @@
 |---|---|---|---|---|
 | limit_up_today | 是否涨停 | 锚定日是否涨停。按 `change_rate` 阈值法判定，阈值随板块与制度分段（主板 10% / 创业板 20% / 科创板 20% / 北交所 30% / ST 5%），并以 `close ≥ high` 作为逻辑必要条件剔除伪命中；1996-12-16 前无涨跌停制度、板块未知、新股上市首日（`trade_date == list_date`）均返回 `数据不足` | 是 / 否 / 数据不足 | 无 |
 | consecutive_limit_up | 连续涨停数 | 以锚定日为终点向过去数连续涨停天数，锚定日本身未涨停则为 0；涨停判定规则同 limit_up_today。回看窗口内数据不足（如次新股）以实际可得数据计算；若锚定日之前不足 1 个交易日返回 `数据不足`。连板数用满回看窗口时返回窗口上限值 | 整数（≥0）/ 数据不足 | max_lookback=60 |
+| limit_down_today | 是否跌停 | 锚定日是否跌停。与涨停判定镜像：`change_rate ≤ -(制度上限−0.10)`（主板 -9.90 / 创业板·科创板 -19.90 / 北交所 -29.90 / 主板ST -4.90），并以 `close ≤ low` 作为逻辑必要条件（收于跌停 ⟹ 收盘价即当日最低价）剔除伪命中；1996-12-16 前无涨跌停制度、板块未知、新股上市首日均返回 `数据不足`。科创板/创业板上市初期无涨跌幅限制期间未特判，与涨停模块口径一致 | 是 / 否 / 数据不足 | 无 |
+| burst_limit | 是否炸板 | 锚定日是否炸板（盘中触及涨停价但收盘未封住）。触板按盘中最高价相对昨收的涨幅 `(high−preclose)/preclose×100` 达到涨停判定阈值（制度上限−0.10）判定，未封住按涨停判定（change_rate 阈值法 + close ≥ high）判否；收于涨停不算炸板。前复权口径下 high 与 preclose 同基准，比值不受复权影响。缺 preclose/high 或 preclose≤0、制度前、板块未知、上市首日返回 `数据不足` | 是 / 否 / 数据不足 | 无 |
+| limit_up_premium | 昨日涨停今日溢价 | 前一交易日涨停的股票今日涨跌幅（溢价，%）。以前一可得交易日是否涨停为基准（判定规则同 limit_up_today），未涨停返回 `否`，涨停返回今日 change_rate（保留 2 位）。前一交易日不可判定、锚定日停牌或无成交、锚定日之前无数据返回 `数据不足` | 数值（%，2位小数）/ 否 / 数据不足 | 无 |
+| big_mover | 大涨大跌 | 锚定日涨跌幅异动标记：change_rate ≥ up_pct（默认 5.0）记 `大涨`，≤ down_pct（默认 -5.0）记 `大跌`，其余记 `否`。纯涨跌幅阈值、与涨跌停制度无关，不跳过新股上市首日；锚定日停牌、无成交或缺 change_rate 返回 `数据不足` | 大涨 / 大跌 / 否 / 数据不足 | up_pct=5.0, down_pct=-5.0 |
+| volume_surge | 放量倍数 | 锚定日成交量 ÷ 前 N 个交易日均量（N 由 window 控制，默认 5；基数不含当日，避免放量日抬高自身基数）。基数窗口剔除无量行（停牌标记行 volume=0），有效天数不足 N、锚定日无成交或均量为 0 返回 `数据不足`。倍数保留 4 位小数（保证 ≥2 倍等截面阈值筛选不受舍入失真） | 数值（倍，4位小数）/ 数据不足 | window=5 |
+| new_high_low | 60日新高新低 | 锚定日收盘价相对前 N 个交易日（不含当日）前复权收盘区间：严格创新高记 `新高`、严格创新低记 `新低`（持平不算），其余记 `否`。N 由 window 控制（默认 60）；有效基准不足 N 天（次新股/长期停牌）、锚定日停牌或无成交返回 `数据不足`，不降窗口计算以保证截面口径可比 | 新高 / 新低 / 否 / 数据不足 | window=60 |
+| chg_5d | 5日累计% | 锚定日 5 日累计涨跌幅 = close[-1]/close[-6]−1（尾部 6 行首尾比，**市场自身日历**），与报告层外围指数块同构同口径；不足 6 行或锚定日无行返回「数据不足」，不降窗口。外围域模块（qfq/指数均可，比值口径不受复权基准影响） | 数值（%，2位小数）/ 数据不足 | 无 |
+| chg_20d | 20日累计% | 锚定日 20 日累计涨跌幅 = close[-1]/close[-21]−1，同上口径；不足 21 行返回「数据不足」 | 数值（%，2位小数）/ 数据不足 | 无 |
+| position_60d | 60日位置% | 锚定日收盘在尾部 61 行（市场自身日历）高低区间中的位置 = (收盘−最低)/(最高−最低)×100，与 A 股指数章、报告层外围指数块同构同口径；样本不足 30 行、窗口无波动或锚定日无行返回「数据不足」 | 数值（%，1位小数）/ 数据不足 | 无 |
+| ah_5d_diff | AH 5日差 | A-H 两地 5 日累计涨跌幅差值（A 侧−H 侧，百分点，正=A 强于 H）。H 侧取 close 尾 6 行首尾比（qfq），A 侧取引擎回挂的 a_close（his_kline_day 前复权，as-of ≤行日最近）尾 6 行首尾比。a_close 整列空记 `无A股映射`（仅港股的结构性事实，区别于数据不足）；A 侧对照不足 6 行记 `数据不足`；预检尾部滞后（>3 个市场交易日）记 `未对齐`。**参考口径**：两侧复权基准独立滚动 | 数值（百分点，2位小数）/ 未对齐 / 无A股映射 / 数据不足 | 无 |
+| ah_premium | AH溢价% | A-H 溢价率 = a_close[-1]/(close[-1]×fx)−1。fx 为引擎装配的 overseas_market_daily fx_shkdcny 最新快照（upstream 键 fx_hkdcny，缺记 `汇率待补`）；a_close 整列空记 `无A股映射`；尾部滞后记 `未对齐`。**参考口径**：A 15:00 / H 16:00 / 汇率采集时点三者错位，只作观察不作结论 | 数值（%，2位小数）/ 未对齐 / 无A股映射 / 汇率待补 / 数据不足 | 无 |
+| r1_ladder_relay | R1梯队接力 | 转天买入候选 R1（观察池，非推荐）：连板 ≥ r1_min_streak(2) 且 非 ST 且 开板 ≤ r1_max_reopen(2) 次（封板质量，`limit_seal_stats_daily` 开板数据缺失视为通过并标注「封板数据缺失」）。连板数读前置模块「连续涨停数」，开板次数读环境装配 `cand_seal_open_map`（链须配 `env: a_share_candidates`）；判定谓词与报告层第六章预案共用（`candidate_rules`），同数据同结果 | 理由串（如「7板/开板0次」）/ 否 / 数据不足 | r1_min_streak=2, r1_max_reopen=2 |
+| r2_mainline_follow | R2主线跟随 | 转天买入候选 R2：首板涨停（连续涨停数=1）且 非 ST 且 概念成分（sina_gn 全部成分，时点匹配）命中涨停聚集前列概念（概念内当日涨停家数降序前 3，宽基黑名单剔除，与报告层概念聚集同口径）；R1 命中股不重复入选。概念与聚集前列读环境装配 `cand_theme_map` / `cand_top_concepts` | 理由串（如「首板/创新药」）/ 否 / 数据不足 | 无 |
+| r3_trend_new_high | R3趋势新高 | 转天买入候选 R3：60 日新高（前置模块）且 放量 ≥ r3_volume_min(2.0) 倍 且 当日涨幅 ≥ r3_change_min(3.0)% 且 非 ST；R1/R2 命中股不重复入选 | 理由串（如「新高/+7.2%/3.1x」）/ 否 / 数据不足 | r3_volume_min=2.0, r3_change_min=3.0 |
+| r4_institution_seat | R4机构席位 | 转天买入候选 R4：龙虎榜机构净买为正（`lhb_detail` 席位名含「机构专用」归并，净买降序前 5，与报告层机构榜同 SQL 同 LIMIT）且 非 ST（名称近似 + is_st 列双保险）；R1/R2/R3 命中股不重复入选。机构净买读环境装配 `cand_institution_net_map` | 理由串（如「机构净买+2.20亿」）/ 否 / 数据不足 | 无 |
 
 ---
 
@@ -116,11 +131,12 @@ PY=../.venv/bin/python
 
 $PY run_cli.py analyze run --chain limit_up_scan
 $PY run_cli.py analyze run --chain limit_up_scan --lookback 6m   # 临时覆盖分析窗口
+$PY run_cli.py analyze run --chain daily_review                  # 每日复盘链（阶段1）
 $PY run_cli.py analyze list-chains
 $PY run_cli.py analyze list-modules
 $PY run_cli.py analyze progress --chain limit_up_scan
 
-$PY -m pytest test/analysis -q                      # 单测（109 例）
+$PY -m pytest test/analysis -q                      # 单测（175 例）
 ANALYSIS_GOLDEN=1 $PY -m pytest test/analysis/test_golden_sample.py -q   # 黄金样本回归（需数据库）
 ```
 

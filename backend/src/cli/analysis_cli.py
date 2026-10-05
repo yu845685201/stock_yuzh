@@ -138,6 +138,8 @@ def list_chains_cmd():
         click.echo(f"\n  链名: {chain.chain}")
         if chain.description:
             click.echo(f"    说明: {chain.description}")
+        click.echo(f"    数据域: {chain.domain}"
+                   + ("（A 股）" if chain.domain == "a_share" else "（外围·市场自身日历）"))
         click.echo(f"    分析窗口: {chain.lookback}")
         click.echo(f"    模块: {', '.join(s.name_en + (f' {s.params}' if s.params else '') for s in chain.modules)}")
         click.echo(f"    文件: {chain.source_path}")

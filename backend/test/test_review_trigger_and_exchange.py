@@ -48,34 +48,38 @@ def test_adjust_trigger_write_and_read(tmp_path, monkeypatch):
 
 
 class FakeSource:
+    """汇总接口桩（X-1 修复后格式：席位打包在 branchNameB/S + branchTxAmtB/S）"""
+
     def __init__(self, rows):
         self.rows = rows
 
-    def fetch_sse_lhb(self, trade_date):
+    def fetch_sse_lhb_summary(self, trade_date):
         return self.rows
 
 
 def test_lhb_sse_aggregation():
-    """上交所龙虎榜：按 个股×原因 聚合买卖金额 + 席位明细展开"""
+    """上交所龙虎榜（汇总接口，X-1 修复）：refType 文案映射 + 打包席位金额 Σ + 席位明细展开"""
     from src.sync.lhb_manager import LhbManager
     mgr = LhbManager.__new__(LhbManager)
     mgr.source = FakeSource([
-        {'secCode': '600815', 'secAbbr': '厦工股份', 'refType': '1', 'bsType': 'B',
-         'branchName': '沪股通专用', 'branchTxAmt': '160910625.17'},
-        {'secCode': '600815', 'secAbbr': '厦工股份', 'refType': '1', 'bsType': 'B',
-         'branchName': '开源证券西安西大街', 'branchTxAmt': '128416895.57'},
-        {'secCode': '600815', 'secAbbr': '厦工股份', 'refType': '1', 'bsType': 'S',
-         'branchName': '沪股通专用', 'branchTxAmt': '516702.00'},
+        {'secCode': '600815', 'secAbbr': '厦工股份', 'refType': '1',
+         'secTxAmount': 289378223.0,
+         'branchNameB': '沪股通专用,开源证券西安西大街',
+         'branchTxAmtB': '160910625.17,128416895.57',
+         'branchNameS': '沪股通专用',
+         'branchTxAmtS': '516702.00'},
     ])
     stocks, details = mgr._collect_sse('20260924')
     assert len(stocks) == 1
     row = stocks[0]
     assert row['ts_code'] == 'sh.600815'
+    assert row['reason'] == '涨幅偏离累计达20%'
     assert row['buy_amt'] == pytest.approx(160910625.17 + 128416895.57)
     assert row['sell_amt'] == pytest.approx(516702.0)
     assert row['net_amt'] == pytest.approx(row['buy_amt'] - row['sell_amt'])
+    assert row['sec_tx_amount'] == 289378223.0
     assert len(details) == 3
-    assert {d['side'] for d in details} == {'买', '卖'}
+    assert {d['side'] for d in details} == {'买1', '买2', '卖1'}
 
 
 class FakeMarginSource:

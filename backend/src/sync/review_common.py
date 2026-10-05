@@ -24,15 +24,35 @@ class ReviewSyncError(RuntimeError):
 
 
 def code6_to_ts_code(code: str) -> str:
-    """6 位股票/指数代码 -> ts_code 前缀（60/68 开头 sh.，0/3 开头 sz.，4/8/92 开头 bj.）"""
+    """6 位股票/指数代码 -> ts_code 前缀。
+
+    码段表：60/68（沪 A 股/科创）、5（沪基金/ETF）、10/11（沪转债）→ sh.；
+    0/3（深 A 股/创业）、12（深转债）、15/16/18（深基金）→ sz.（后三段走兜底）；
+    4/8/92（北交所）→ bj.；其余兜底 sz.。
+    5 开头=沪市基金/ETF（探路 X-15：原兜底分支错标 sz.，两融表曾污染 2135 行）；
+    10/11 开头=沪市可转债（两融标的含转债，防御性）。
+    """
     c = str(code).strip()
-    if c.startswith(('60', '68')):
+    if c.startswith(('60', '68', '5', '10', '11')):
         return f'sh.{c}'
     if c.startswith(('0', '3')):
         return f'sz.{c}'
     if c.startswith(('4', '8', '92')):
         return f'bj.{c}'
     return f'sz.{c}'
+
+
+_HTML_NAME_CLEAN = __import__('re').compile(r'<[^>]+>|&[a-z]+;')
+
+
+def clean_stock_name(name: Any) -> Optional[str]:
+    """股票名称清洗：剥除来源页残留的 HTML 标签与实体（探路 X-17：巨潮 <em> 高亮、
+    深交所 &nbsp;）。空白压为单空格后去首尾；清洗后为空返回 None。"""
+    if name is None:
+        return None
+    s = _HTML_NAME_CLEAN.sub('', str(name)).replace('\u00a0', ' ')
+    s = ' '.join(s.split())
+    return s or None
 
 
 def ts_code_to_code6(ts_code: str) -> str:
@@ -45,6 +65,85 @@ def ts_code_to_code6(ts_code: str) -> str:
         if c.endswith(suffix):
             return c[:-3].upper()
     return c.upper()
+
+
+# 北交所 6 位代码白名单前缀（P0-4：43x/83x/87x 老段 + 920 新段；920 尚未全启用、921 未启用）
+_BJ_ALLOWED_PREFIXES = ('43', '83', '87', '920')
+
+
+def validate_bj_stock_code(code6: str) -> str:
+    """北交所 6 位代码白名单校验（P0-4，复盘报告层与 P0 修复技术方案 §四）。
+
+    老号段（43/83/87 段）已批量迁移 920xxx，且在外部接口普遍返回**僵尸数据且
+    HTTP 200**——静默入库会污染日K，故命中 921+ 或其他形态一律抛 ValueError
+    （宁抛错不入库）。返回归一化后的 6 位代码。
+    """
+    c = str(code6).strip()
+    if not (len(c) == 6 and c.isdigit()):
+        raise ValueError(f'北交所代码非 6 位数字: {code6!r}')
+    if not c.startswith(_BJ_ALLOWED_PREFIXES):
+        raise ValueError(f'北交所代码号段越界（白名单 43x/83x/87x/920x）: {c}')
+    return c
+
+
+def detect_zombie_bj_codes(rows: List[Dict[str, Any]],
+                           min_consecutive_days: int = 5) -> List[str]:
+    """北交所僵尸码检测（P0-4 数据审计规则，纯函数）。
+
+    判据：某代码**连续 ≥ ``min_consecutive_days`` 个交易日**的行满足
+    ``volume == 0 且 close == preclose``（全市场有行情而该股无成交、价格定格）
+    → 疑似僵尸码（号段迁移后旧码定格数据的典型形态）。连续性按该股自己的
+    交易日序列走查：恢复成交或自然日断裂（>12 天，长假容差）均打断累计。
+
+    Args:
+        rows: 该批北交所日K行（至少含 stock_code/trade_date/volume/close/preclose）
+        min_consecutive_days: 连续交易日数阈值
+
+    Returns:
+        疑似僵尸码的 6 位代码清单（升序）；无则为空表。
+    """
+    # {code: {date: 是否定格}}——定格 = 无成交且价格未动（疑似停牌的 close != preclose 不算）
+    zeroed: Dict[str, Dict[str, bool]] = {}
+    for r in rows:
+        code = str(r.get('stock_code') or '')
+        d = str(r.get('trade_date') or '')
+        if not code or not d:
+            continue
+        try:
+            vol = float(r.get('volume') or 0)
+            close = float(r.get('close'))
+            preclose = float(r.get('preclose'))
+        except (TypeError, ValueError):
+            continue
+        zeroed.setdefault(code, {})[d] = (vol == 0 and close == preclose)
+
+    zombies = []
+    for code, flags in zeroed.items():
+        ordered = sorted(flags)
+        run = 0
+        max_run = 0
+        prev = None
+        for d in ordered:
+            if prev is None or not _is_next_trading_day(prev, d):
+                run = 0
+            run = run + 1 if flags[d] else 0
+            max_run = max(max_run, run)
+            prev = d
+        if max_run >= min_consecutive_days:
+            zombies.append(code)
+    return sorted(zombies)
+
+
+def _is_next_trading_day(a: str, b: str) -> bool:
+    """b 是否紧邻 a 的下一交易日（自然日差 1~12 天内视为连续，覆盖国庆+中秋
+    最长连休的自然日跨度；更长断裂不计连续——审计规则宁可少报不误报）。"""
+    from datetime import datetime
+    try:
+        da = datetime.strptime(a, '%Y%m%d')
+        db = datetime.strptime(b, '%Y%m%d')
+    except ValueError:
+        return False
+    return 1 <= (db - da).days <= 12
 
 
 def load_manifest(path: Path) -> Dict[str, Any]:
@@ -81,3 +180,31 @@ def write_review_report(title: str, file_prefix: str, status: str, lines: List[s
 def tmp_dir() -> Path:
     """仓库根 tmp/（manifest 与触发清单所在）"""
     return resolve_repo_root() / 'tmp'
+
+
+def expand_trade_days(db: Any, start_date: str, end_date: str) -> List[str]:
+    """按 base_trade_calendar 展开回填区间交易日（is_trading_day=1，yyyyMMdd 升序）。
+
+    开发项 C：回填循环的统一入口——非交易日自动跳过（区别于 shell 逐日循环）。
+    db 须有 fetch_trade_calendar(start_iso, end_iso)（DaoFundamentals）。
+    """
+    start = _parse_date_arg(start_date)
+    end = _parse_date_arg(end_date)
+    if start is None or end is None or start > end:
+        raise ValueError(f'回填区间非法: {start_date!r} ~ {end_date!r}')
+    rows = db.fetch_trade_calendar(start.isoformat(), end.isoformat())
+    out = []
+    for r in rows:
+        s = str(r.get('calendar_date') or '').replace('-', '')
+        if len(s) == 8 and s.isdigit():
+            out.append(s)
+    return out
+
+
+def _parse_date_arg(value: str):
+    from datetime import datetime as _dt
+    s = str(value).replace('-', '')[:8]
+    try:
+        return _dt.strptime(s, '%Y%m%d').date()
+    except ValueError:
+        return None

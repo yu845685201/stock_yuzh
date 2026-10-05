@@ -93,8 +93,13 @@ cninfo:
   query_interval: 0.5      # 检索接口请求间隔（秒）
   download_interval: 0.5   # PDF下载间隔（秒）
   page_size: 30
-  max_pages_per_window: 40 # 单检索窗口分页上限（超过自动对半拆窗）
-  backfill_years: 5        # 无进度股票的默认回补年数（报告期口径）
+  max_pages_per_window: 120 # 单检索窗口分页上限（超过自动对半拆窗；单日窗口无法拆分。
+                           # 80 不够：探路 T18 实测年报截止日 4-30 单日 2703 条≈91 页，
+                           # K 回补实测这些窗口全部失败→年报期披露日缺口（2026-10-03 修）
+  backfill_years: 5        # 无进度股票的默认回补年数（报告期口径；pdf_recent_years>0 时被其取代）
+  pdf_recent_years: 10     # 仅采集/保留近 N 个报告年度（滚动窗口，2026 → 报告期 2017 起；0=全历史。
+                           # 用户决策 2026-10-01：磁盘余量不足 150G，缩范围至近 10 年；
+                           # 存量早年文件由 scripts/prune_financial_pdf.py 清理）
   pdf_dir: data/financial_pdf  # PDF落盘根目录（相对仓库根 stock_yuzh/，或绝对路径）
 
 # 技术分析链配置（doc/技术分析链方案设计.MD）
@@ -119,6 +124,38 @@ analysis:
 # （CSV 文件管理模式配置段已随 RK-3 方案A 删除：CsvFileManager 模式体系零消费，
 #  实际行为恒为 _write_csv_file 硬编码"存在即删除"）
 
+# ---- 每日复盘报告层配置（复盘报告层与 P0 修复技术方案-V1.0-20260930 §5.6）----
+review:
+  output_dir: doc/reports       # 报告输出目录（相对仓库根 stock_yuzh/，或绝对路径）
+  top_n: 20                     # 明细表行数上限
+  volume_surge_min: 2.0         # 放量大涨入选倍数
+  industry_sources: [sw_2021, sina_hy]   # 行业映射优先级（sw_2021 缺失股回退 sina_hy）
+  # E 项题材归因黑名单（宽基属性/非题材概念，子串匹配剔除；方案 4.5 降噪）
+  theme_exclude_concepts: ['融资融券', '深股通', '沪股通', 'MSCI', '标普道琼斯', '富时罗素',
+                           '转融券', '预盈预增', '预亏预减', '机构重仓', '基金重仓',
+                           '社保重仓', 'QFII重仓']
+  # 情绪判据：2026-10-03 校准定稿（依据 data/reports/sentiment_calibration_20261003_002902.md，
+  # 1149 对样本；高潮由 ≥6板/≥5% 降档为 ≥5板/≥4%——命中 39→109 天、区分度保持，
+  # 解决兜底态占 66.8% 的过严问题；冰点/退潮维持；判据定位=情绪状态描述而非次日预测）
+  sentiment_calibrated: true
+  sentiment_rules:              # 命中顺序：高潮 → 冰点 → 退潮 → 回暖/震荡（复盘框架.MD §3）
+    ice: {max_streak_lte: 2, burst_rate_gte: 0.5}      # 冰点：高度≤2 或 炸板率≥50%
+    ebb: {premium_mean_lte: 0}                          # 退潮：昨日涨停溢价均值≤0
+    climax: {max_streak_gte: 5, premium_mean_gte: 4.0}  # 高潮：高度≥5 且 溢价≥4%
+  # 转天交易预案（第六章子节）判据初版：2026-10-05 新增，阈值待用户校准定稿
+  # （流程同情绪判据 §3；用途=条件-动作参考框架，非次日涨跌预测）
+  tomorrow_plan:
+    overseas_gap_pct: 1.5       # 盘前外围情景分档：恒指/纳指较锚定日收盘 ±1.5% 触发 P1/P3
+    volume_band_pct: 20         # 盘中量能验证分档：转天成交额较今日基准 ±20%
+    # 买入候选规则（判据初版；R1 梯队接力 / R2 主线跟随 / R3 趋势新高 / R4 机构席位，
+    # 与情绪周期联动开放：高潮仅 R1，冰点/退潮不开放；每类带确认/否决/风控决策树）
+    buy_rules:
+      r1_min_streak: 2          # R1：连板高度下限
+      r1_max_reopen: 2          # R1：开板次数上限（封板质量；分笔缺失视为通过并标注）
+      r3_volume_min: 2.0        # R3：放量倍数下限
+      r3_change_min: 3.0        # R3：当日涨幅下限（%）
+      top_n: 5                  # 每类候选上限
+
 # ---- 每日复盘数据采集配置（每日复盘数据采集技术方案-V1.0-20260927）----
 # 合规红线：串行限速、正常 UA/Referer、不破解任何技术措施（含同花顺 hexin-v）、
 # 风控识别即退避冷却、仅自用不分发。频率预算见方案 §8.1，全部参数来自本段，无硬编码。
@@ -133,12 +170,13 @@ review_sync:
   index_interval: 0.2
   factor_interval: 2.0
   cninfo_interval: 0.5            # 沿用现有 cninfo.query_interval 口径
-  sse_szse_interval: 1.5
+  sse_szse_interval: 3.0                    # 20261004 深夜 1.5→3.0：回补重启降风控力度（szse 曾 IP 拒绝）
   csindex_interval: 2.0
   ths_interval: 2.0
   sina_interval: 1.0
   sina_sector_interval: 2.0     # 新浪 vip 板块接口（行业分类/概念成分，缺失数据采集方案 20260928）
   sw_interval: 5.0              # 申万一级行业分类文件（swsresearch 下载中心，31+1 请求/次）
+  tdx_official_interval: 2.0    # 通达信官网盘后包（北交所日K/全市场对拍，每交易日仅 1 请求）
   # 源间并发（用户决策 2026-09-27）：独立源波次并行，各源内部仍串行限速
   parallel_sources: true
   parallel_workers: 4            # 波内并发源数上限
@@ -151,6 +189,11 @@ review_sync:
     pct_threshold: 0.07           # 涨跌幅异动阈值（|change_rate|≥7%，百分点 7 对应 7%）
     gray_limit: 200               # 灰度期子集上限（稳定后放开 500）
     throttle_on_timeout_pct: 0.05 # 超时率阈值，触发自动降速（间隔×2）
+    include_burst: true           # F：日常子集纳入炸板（触板未封），封板指标对炸板股全覆盖（约 +20 只/日）
+  # 龙虎榜回补限速：默认 1.5s（与日常增量同速，实测安全——回补模式下沪市汇总请求
+  # 天然被深市逐行席位请求间隔数分钟，X-5 的"连续快请求空响应"场景不存在；
+  # 如需保守可调 3.0）
+  lhb_backfill_interval: 3.0                # 20261004 深夜同步降为 3.0
   margin_lookback_days: 5        # 两融发布滞后回看天数（深所周末期间周中数据延迟可见）
   # THS 财报（探路结论为"不可行"时置 false，报告章节标待补；三项 THS 源共用探路结论）
   ths_finance:
@@ -162,20 +205,31 @@ review_sync:
   industry:
     enabled: true
     sw_enabled: true            # 申万 2021 一级增强口径 source=sw_2021（下载中心探路已通过）
+  # 北交所日K（P0-2 方案 B，通达信官网盘后包；T1 探路 2026-09-30 证实中间件
+  # 前复权链路对 920xxx 不可靠，故北交所走盘后包独立通道）
+  bj_kline:
+    enabled: true
   unlock:
     enabled: true
     # 巨潮解禁公告路径（缺失数据采集方案 20260928 §5）：searchkey 窗口检索 -> 标题过滤 -> PDF 解析
     searchkeys: ['限售股上市流通', '解除限售']
     pdf_extract_max_pages: 3    # 解禁日一般在首页，向后多翻 2 页兜底
     days_back: 3                # 日频增量回看天数（游标存在时取更近下界）
+  # 申万二级行业（延后项补齐方案 N3，2026-10-04：THS basic 公司概况页
+  # "所属申万行业：一级 — 二级"，服务端渲染无 hexin-v；首次全量 sync-ths-industry-l2 --init，
+  # 此后周频增量挂编排器 WEEKLY_SOURCES。口径局限：THS 为当前快照，二级成分无历史时点）
+  ths_l2:
+    enabled: true
   weekly_refresh_weekday: 6       # 周日（0=周一）跑概念/解禁
   # 指数清单（code: 6位指数代码, ts_code: 库内主键, name: 简称, exchange: 所属所）
+  # I-1（补全方案 4.9）：中证1000 加入（探路 X-2/X-3：中证全指/中证2000 tdx 不可达，决策 2 接受现状）
   indices:
     - {code: "000001", ts_code: sh.000001, name: 上证指数, exchange: sse}
     - {code: "399001", ts_code: sz.399001, name: 深证成指, exchange: szse}
     - {code: "399006", ts_code: sz.399006, name: 创业板指, exchange: szse}
     - {code: "000688", ts_code: sh.000688, name: 科创50, exchange: sse}
     - {code: "000300", ts_code: sh.000300, name: 沪深300, exchange: sse}
+    - {code: "000852", ts_code: sh.000852, name: 中证1000, exchange: sse}
     - {code: "899050", ts_code: bj.899050, name: 北证50, exchange: bse}
   # 中证指数估值关注清单（官网每日 indicator 文件；中证仅发布其管理指数，
   # 深交所指数（创业板指 399006 等）无文件 → 不入清单，实施时已实测）
@@ -185,19 +239,100 @@ review_sync:
     - {code: "000852", name: 中证1000}
     - {code: "000001", name: 上证指数}
     - {code: "000688", name: 科创50}
+  # 指数历史日K清单（延后项补齐方案 N2，2026-10-04：csindex index-perf API，
+  # 仅 GET + yyyyMMdd 可用；日常随 sync-index-valuation 增量（10 自然日窗口），
+  # 历史回补用 --init-perf（按年切窗+manifest 断点续跑）。init_start_year——000985
+  # 实测 2005 起全历史；932000 实有 2020 起基日回溯（方案原按 2023-08 起估）。
+  # WAF 实测：连续 ~10 请求/小时触发 403 临时封禁 → 回补限速 10s，封禁退避后重跑自动续）
+  csindex_perf_indices:
+    - {code: "000985", ts_code: sh.000985, name: 中证全指, init_start_year: 2005}
+    - {code: "932000", ts_code: sh.932000, name: 中证2000, init_start_year: 2020}
+  csindex_perf_interval: 10.0    # --init-perf 请求间隔（秒；日常增量仍用 csindex_interval）
   # 新浪外围市场清单（补充代码确认返回格式后增删，配置化）
+  # I-2（补全方案 4.9）：A50 期货（hf_ 新解析分支，change_pct 本地昨收自算）+ 离岸人民币（fx_ 复用）
+  # O4（skill与复盘链优化方案 2026-10-04）：美股三大指数 int_dji/int_nasdaq/int_sp500 接口数值
+  # 冻结（0927~0930 四日 close+涨跌幅完全相同，10-04 实测仍冻结、采集却报成功），弃用换
+  # sina gb_ 前缀代码（解析分支 [0]名称[1]最新价[2]涨跌幅%）；冻结区间已删并按
+  # 「A 股日 D → D 前最近美股交易日收盘」回补（scripts/backfill_overseas_frozen.py）
   sina_markets:
-    - {code: int_dji, name: 道琼斯}
-    - {code: int_nasdaq, name: 纳斯达克}
-    - {code: int_sp500, name: 标普500}
+    # 8 码（阶段 2 V2.0 §3.1）：gb_*/rt_hkHSI 转为双源对拍源（报告外围指数改由
+    # overseas_kline_day 渲染，快照表仅渲染 A50/汇率）；fx_shkdcny 为 A-H 溢价分母
+    - {code: gb_dji, name: 道琼斯}
+    - {code: gb_ixic, name: 纳斯达克}
+    - {code: "gb_$inx", name: 标普500}
     - {code: rt_hkHSI, name: 恒生指数}
+    - {code: hf_CHA50CFD, name: 富时A50期货}
+    - {code: fx_susdcnh, name: 离岸人民币}
     - {code: fx_susdcny, name: 美元兑人民币}
+    - {code: fx_shkdcny, name: 港元兑人民币}
+  # 外围日K（腾讯 ifzq fqkline，技术方案 V1.0 20261004）：6 指数 + 港股个股池 33 只
+  # trade_date 为市场自身交易日（非 A 股日历）；指数 adj_type=raw、个股 qfq（滚动口径）；
+  # 指数与 gb_*/rt_hkHSI 快照双源互备；A-H 两地公司 a_code 仅供消费层映射 join his_kline_day，
+  # A 股侧不采集（避免双表双口径）；池子由用户定稿增删
+  overseas_kline_interval: 1.5   # 串行限速（init 全量 ~170 请求约 5 分钟）
+  overseas_kline_init_years: 10
+  overseas_kline_indices:
+    - {code: hkHSI, name: 恒生指数}
+    - {code: hkHSCEI, name: 国企指数}
+    - {code: hkHSTECH, name: 恒生科技}   # 2020-07-27 发布，历史短属正常
+    - {code: usDJI, name: 道琼斯}
+    - {code: usIXIC, name: 纳斯达克}
+    - {code: usINX, name: 标普500}
+  overseas_kline_stocks:
+    # —— A-H 两地上市（15 只，H 股采集 + a_code 映射；A 股侧不入外围表） ——
+    - {code: hk01211, name: 比亚迪股份, a_code: sz.002594}
+    - {code: hk03968, name: 招商银行, a_code: sh.600036}
+    - {code: hk01288, name: 农业银行, a_code: sh.601288}
+    - {code: hk02359, name: 药明康德, a_code: sh.603259}
+    - {code: hk02196, name: 复星医药, a_code: sh.600196}
+    - {code: hk01880, name: 中国中免, a_code: sh.601888}
+    - {code: hk02333, name: 长城汽车, a_code: sh.601633}
+    - {code: hk00168, name: 青岛啤酒, a_code: sh.600600}
+    - {code: hk06030, name: 中信证券, a_code: sh.600030}
+    - {code: hk00857, name: 中国石油, a_code: sh.601857}
+    - {code: hk00883, name: 中国海洋石油, a_code: sh.600938}
+    - {code: hk00386, name: 中国石化, a_code: sh.600028}
+    - {code: hk02628, name: 中国人寿, a_code: sh.601628}
+    - {code: hk01766, name: 中国中车, a_code: sh.601766}
+    - {code: hk00981, name: 中芯国际, a_code: sh.688981}
+    # —— 仅港股（18 只，恒生科技权重为主） ——
+    - {code: hk00700, name: 腾讯控股}
+    - {code: hk03690, name: 美团}
+    - {code: hk09988, name: 阿里巴巴}
+    - {code: hk01810, name: 小米}
+    - {code: hk09618, name: 京东}
+    - {code: hk01024, name: 快手}
+    - {code: hk09999, name: 网易}
+    - {code: hk09888, name: 百度}
+    - {code: hk06618, name: 京东健康}
+    - {code: hk00241, name: 阿里健康}
+    - {code: hk02015, name: 理想}
+    - {code: hk09868, name: 小鹏}
+    - {code: hk09866, name: 蔚来}
+    - {code: hk09961, name: 携程}
+    - {code: hk09626, name: 哔哩哔哩}
+    - {code: hk00175, name: 吉利汽车}
+    - {code: hk01109, name: 华润置地}
+    - {code: hk00688, name: 中国海外发展}
   # 巨潮公告 ann_type 标题分类词表（供复盘按类筛选，不做全文解析）
+  # H 项（补全方案 4.8，决策 6 推荐 B 增补）：顺序敏感先专后泛，新类别置于"增减持/重大事项"前；
+  # 实测词表增补后"其他"占比约 42~52%（原 6 类仅降至 70.8%，验收线 ≤60%）
   announcement_types:
     定期报告: ['年度报告', '半年度报告', '中期报告', '季度报告', '一季度报告', '三季度报告']
     业绩预告: ['业绩预告', '预增', '预减', '扭亏', '首亏', '续盈', '续亏', '略增', '略减']
     业绩快报: ['业绩快报']
     解禁: ['上市流通', '解除限售']
     分红送转: ['分红', '派息', '送转', '权益分派', '利润分配']
+    股权融资: ['非公开发行', '向特定对象发行', '定增', '可转债', '配股', '发行H股']
+    回购: ['回购', '回购股份']
+    股权激励: ['股权激励', '员工持股', '限制性股票', '股票期权']
+    监管问询: ['问询函', '关注函', '监管函', '警示函']
+    风险警示: ['立案', '处罚', '退市风险', '实施其他风险警示', '违规']
+    股权变动: ['协议转让', '控制权', '实际控制人', '易主', '质押', '解除质押']
     增减持: ['增持', '减持', '增持计划', '减持计划']
-    重大事项: ['重大资产重组', '停牌', '复牌', '收购', '发行股份', '要约收购', '重大合同', '中标']
+    公司治理: ['董事会', '监事会', '独立董事', '董事', '监事', '选举', '辞职', '聘任', '股东大会', '高级管理人员']
+    担保: ['担保']
+    募集资金: ['募集资金', '募投']
+    关联交易: ['关联交易']
+    诉讼仲裁: ['诉讼', '仲裁']
+    重大事项: ['重大资产重组', '停牌', '复牌', '收购', '发行股份', '要约收购', '重大合同', '中标', '子公司']
