@@ -8,7 +8,8 @@ from typing import Any, Dict, List
 from ..renderer import missing_note
 
 
-def build(fundamentals: Dict[str, Any], announcement: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+def build(fundamentals: Dict[str, Any], announcement: Dict[str, Any] = None,
+          valuation_digest: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """维度5 章节块；announcement 为开发项 D5 公告摘要聚合结果。"""
     blocks: List[Dict[str, Any]] = [
         {'type': 'heading', 'level': 2,
@@ -66,6 +67,14 @@ def build(fundamentals: Dict[str, Any], announcement: Dict[str, Any] = None) -> 
     else:
         blocks.append(missing_note('个股估值', 'stock_valuation_daily 为空或当日未自算'))
 
+    # 估值消化能力（P0-4 §3.3.3：与链 valuation_digest 模块同一装配入口）
+    if valuation_digest is not None and valuation_digest.get('available', True):
+        blocks.extend(_valuation_digest_blocks(valuation_digest['data']))
+        emitted = True
+    elif valuation_digest is not None:
+        blocks.append(missing_note('估值消化能力',
+                                   valuation_digest.get('reason', '装配失败')))
+
     # 指数估值
     if data.get('index_valuation'):
         rows = data['index_valuation']
@@ -106,4 +115,46 @@ def _announcement_blocks(announcement: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks.append({'type': 'table',
                        'headers': ['类别', '代码', '名称', '标题（截断 40 字）'],
                        'rows': rows})
+    return blocks
+
+
+def _valuation_digest_blocks(d: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """估值消化能力子块（P0-4 §3.3.3）：年化 PE 分位 + 消化年数中位数 + 判读 bullets。
+
+    口径注记：PE-TTM 为 sync 自算归母口径；年化 PE 为归母单季×4 降级口径
+    （库内无扣非列，spike 结论 2026-10-20，含一次性损益放大风险）；前瞻口径
+    未采集（消化年数按历史 TTM CAGR 推算，非一致预期）。
+    """
+    def _row(name: str, dist: Dict[str, Any]) -> List[Any]:
+        if not dist or not dist.get('sample'):
+            return [name, '—', '—', '—', '—', '—']
+        return [name, dist.get('p25'), dist.get('p50'), dist.get('p75'),
+                dist['sample'], '']
+
+    blocks: List[Dict[str, Any]] = [
+        {'type': 'heading', 'level': 3, 'text': '估值消化能力（P0-4）'},
+        {'type': 'table',
+         'headers': ['指标', 'P25', 'P50', 'P75', '可算只数', ''],
+         'rows': [
+             _row('年化 PE（归母单季×4）', d.get('annualized_pe')),
+             _row('消化年数（至 25x 锚）', d.get('digestion_years')),
+             _row('PE 历史分位（近1年，%）', d.get('pe_percentile')),
+         ]},
+    ]
+    fastest = d.get('fastest') or []
+    slowest = d.get('slowest') or []
+    bullets = [
+        f"全市场 {d.get('stocks', 0)} 只装配，CAGR 可算 {d.get('cagr_available', 0)} 只"
+        f"（3 年 TTM CAGR；前瞻一致预期未采集，消化年数按历史增速推算）",
+    ]
+    if fastest:
+        bullets.append('消化最快（PE, 年）：' + ' / '.join(
+            f'{p}x→{y}年' for p, y in fastest if p is not None))
+    if slowest:
+        bullets.append('消化最慢（PE, 年）：' + ' / '.join(
+            f'{p}x→{y}年' for p, y in slowest if p is not None))
+    bullets.append('口径：PE-TTM=总市值÷近四季归母净利（自算）；年化 PE 为归母单季×4'
+                   '降级口径（非扣非，含一次性损益放大风险）；负增长股票不输出消化'
+                   '年数（无法消化）；PEG 低≠安全，只算数不背书')
+    blocks.append({'type': 'bullets', 'items': bullets})
     return blocks

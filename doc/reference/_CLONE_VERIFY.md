@@ -1,0 +1,145 @@
+# Clone 验证报告
+
+- 生成时间：2026-10-11 22:56:48
+- git.md 项目数：127
+- ✅ 已验证（远程匹配）：127
+- ❌ 缺失/未验证：0
+- ⚠️ 多余（doc/reference 下有但 git.md 未列）：0
+
+## 一、已验证成功（远程地址匹配）
+
+- `HKUDS__Vibe-Trading` (HEAD `8e430079fdbd`) — https://github.com/HKUDS/Vibe-Trading.git
+- `hsliuping__TradingAgents-CN` (HEAD `51060a7682cf`) — https://github.com/hsliuping/TradingAgents-CN.git
+- `HKUDS__AI-Trader` (HEAD `d03ff6c056b3`) — https://github.com/HKUDS/AI-Trader.git
+- `AI4Finance-Foundation__FinGPT` (HEAD `fdb04c9a273d`) — https://github.com/AI4Finance-Foundation/FinGPT.git
+- `xbtlin__ai-berkshire` (HEAD `a221a20def75`) — https://github.com/xbtlin/ai-berkshire.git
+- `OpenByteInc__QuantDinger` (HEAD `ba8cd667acca`) — https://github.com/OpenByteInc/QuantDinger.git
+- `ValueCell-ai__valuecell` (HEAD `9793e9c0563f`) — https://github.com/ValueCell-ai/valuecell.git
+- `AI4Finance-Foundation__FinRobot` (HEAD `2717499b8e30`) — https://github.com/AI4Finance-Foundation/FinRobot.git
+- `simonlin1212__TradingAgents-astock` (HEAD `e3981af1e4c9`) — https://github.com/simonlin1212/TradingAgents-astock.git
+- `oficcejo__aiagents-stock` (HEAD `f31c44ddbe18`) — https://github.com/oficcejo/aiagents-stock.git
+- `virattt__ai-financial-agent` (HEAD `836d30b28ff5`) — https://github.com/virattt/ai-financial-agent.git
+- `ginlix-ai__LangAlpha` (HEAD `86a846da9a60`) — https://github.com/ginlix-ai/LangAlpha.git
+- `KylinMountain__TradingAgents-AShare` (HEAD `63b25eda4443`) — https://github.com/KylinMountain/TradingAgents-AShare.git
+- `YoungCan-Wang__WyckoffTradingAgent` (HEAD `0eee0f118f8c`) — https://github.com/YoungCan-Wang/WyckoffTradingAgent.git
+- `jason8745__llm-agent-trader` (HEAD `68b2741077b6`) — https://github.com/jason8745/llm-agent-trader.git
+- `x-pai__AlphaBot` (HEAD `23ad5232504e`) — https://github.com/x-pai/AlphaBot.git
+- `FeiCoder__BreadFree-Simu` (HEAD `6e5d9dde2047`) — https://github.com/FeiCoder/BreadFree-Simu.git
+- `ArvinLovegood__go-stock` (HEAD `73d4dcf95b85`) — https://github.com/ArvinLovegood/go-stock.git
+- `shy3130__tick-stock-panel` (HEAD `c5ffe38c7543`) — https://github.com/shy3130/tick-stock-panel.git
+- `jundizhou__easy-stock` (HEAD `dc7f64d3ec4f`) — https://github.com/jundizhou/easy-stock.git
+- `simonlin1212__Vibe-Research` (HEAD `d643728e79b9`) — https://github.com/simonlin1212/Vibe-Research.git
+- `TNT-Likely__PanWatch` (HEAD `1ebec29a494b`) — https://github.com/TNT-Likely/PanWatch.git
+- `simonlin1212__vibe-astock` (HEAD `d5bf80d2ed16`) — https://github.com/simonlin1212/vibe-astock.git
+- `Austin-Patrician__eastmoney` (HEAD `e293bf7effad`) — https://github.com/Austin-Patrician/eastmoney.git
+- `agentpit-io__hunter-community` (HEAD `4e369531b172`) — https://github.com/agentpit-io/hunter-community.git
+- `stock-programmer__limit-up-review` (HEAD `0d1606d55bd8`) — https://github.com/stock-programmer/limit-up-review.git
+- `myhhub__stock` (HEAD `b6e0ca2268cf`) — https://github.com/myhhub/stock.git
+- `sngyai__Sequoia-X` (HEAD `444c0db69ff3`) — https://github.com/sngyai/Sequoia-X.git
+- `wangshub__RL-Stock` (HEAD `22d2cbf88f62`) — https://github.com/wangshub/RL-Stock.git
+- `axiaoxin-com__investool` (HEAD `2323bfdd2ba7`) — https://github.com/axiaoxin-com/investool.git
+- `tkfy920__qstock` (HEAD `d710191e9318`) — https://github.com/tkfy920/qstock.git
+- `wkingnet__stock-analysis` (HEAD `814f1d4db3a7`) — https://github.com/wkingnet/stock-analysis.git
+- `ling-0729__KHunter` (HEAD `9b2e8f0b179c`) — https://github.com/ling-0729/KHunter.git
+- `Dzy-HW-XD__a-share-quant-selector` (HEAD `9cfbf80305ce`) — https://github.com/Dzy-HW-XD/a-share-quant-selector.git
+- `stlin256__AShare-AI-Stock-Picker` (HEAD `6b296a85a52d`) — https://github.com/stlin256/AShare-AI-Stock-Picker.git
+- `online0001__short-term-stock-picker` (HEAD `91354201b6df`) — https://github.com/online0001/short-term-stock-picker.git
+- `Jesse-J-whu__stock-picker` (HEAD `c7c76a712978`) — https://github.com/Jesse-J-whu/stock-picker.git
+- `meiqinggao__AStock-Trading` (HEAD `3ac0524db5be`) — https://github.com/meiqinggao/AStock-Trading.git
+- `huang1125677925__jingjia-stock-selector-custom-skill` (HEAD `fc9915875006`) — https://github.com/huang1125677925/jingjia-stock-selector-custom-skill.git
+- `pranjal-joshi__Screeni-py` (HEAD `ad1058a3c5b8`) — https://github.com/pranjal-joshi/Screeni-py.git
+- `microsoft__qlib` (HEAD `543552324638`) — https://github.com/microsoft/qlib.git
+- `mementum__backtrader` (HEAD `b853d7c90b67`) — https://github.com/mementum/backtrader.git
+- `QuantConnect__Lean` (HEAD `80e7843f6456`) — https://github.com/QuantConnect/Lean.git
+- `stefan-jansen__machine-learning-for-trading` (HEAD `988cf9715b49`) — https://github.com/stefan-jansen/machine-learning-for-trading.git
+- `quantopian__zipline` (HEAD `014f1fc339dc`) — https://github.com/quantopian/zipline.git
+- `bbfamily__abu` (HEAD `d602d847677e`) — https://github.com/bbfamily/abu.git
+- `UFund-Me__Qbot` (HEAD `f0425ae4ae8b`) — https://github.com/UFund-Me/Qbot.git
+- `yutiansut__QUANTAXIS` (HEAD `232aa7ac9869`) — https://github.com/yutiansut/QUANTAXIS.git
+- `StockSharp__StockSharp` (HEAD `61cc0f169742`) — https://github.com/StockSharp/StockSharp.git
+- `huseinzol05__Stock-Prediction-Models` (HEAD `33266732b0b1`) — https://github.com/huseinzol05/Stock-Prediction-Models.git
+- `polakowo__vectorbt` (HEAD `f54802a5982c`) — https://github.com/polakowo/vectorbt.git
+- `tensortrade-org__tensortrade` (HEAD `d58afba23deb`) — https://github.com/tensortrade-org/tensortrade.git
+- `ricequant__rqalpha` (HEAD `284b78a1975b`) — https://github.com/ricequant/rqalpha.git
+- `charliedream1__ai_quant_trade` (HEAD `a67a217aaea4`) — https://github.com/charliedream1/ai_quant_trade.git
+- `jaungiers__LSTM-Neural-Network-for-Time-Series-Prediction` (HEAD `da44411c9113`) — https://github.com/jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git
+- `nkaz001__hftbacktest` (HEAD `5f3ec40b2afb`) — https://github.com/nkaz001/hftbacktest.git
+- `shashankvemuri__Finance` (HEAD `20799035c34d`) — https://github.com/shashankvemuri/Finance.git
+- `fasiondog__hikyuu` (HEAD `59618dd646df`) — https://github.com/fasiondog/hikyuu.git
+- `edtechre__pybroker` (HEAD `95e00fecb100`) — https://github.com/edtechre/pybroker.git
+- `akfamily__akquant` (HEAD `e86d611dcd77`) — https://github.com/akfamily/akquant.git
+- `achillesrasquinha__bulbea` (HEAD `4caba8f042f1`) — https://github.com/achillesrasquinha/bulbea.git
+- `robertmartin8__MachineLearningStocks` (HEAD `1c3712af741a`) — https://github.com/robertmartin8/MachineLearningStocks.git
+- `qusong0627__QuantMind` (HEAD `7d8019cac06e`) — https://github.com/qusong0627/QuantMind.git
+- `LastAncientOne__Deep_Learning_Machine_Learning_Stock` (HEAD `e31e9fc689cd`) — https://github.com/LastAncientOne/Deep_Learning_Machine_Learning_Stock.git
+- `touhoufan2024__qlibAssistant` (HEAD `77547728eb08`) — https://github.com/touhoufan2024/qlibAssistant.git
+- `jrothschild33__learn_backtrader` (HEAD `de32a182184a`) — https://github.com/jrothschild33/learn_backtrader.git
+- `waditu__czsc` (HEAD `701e480a5450`) — https://github.com/waditu/czsc.git
+- `bukosabino__ta` (HEAD `a890410710a6`) — https://github.com/bukosabino/ta.git
+- `mpquant__MyTT` (HEAD `7cd36ae13cae`) — https://github.com/mpquant/MyTT.git
+- `jones2000__HQChart` (HEAD `73e42a1f786a`) — https://github.com/jones2000/HQChart.git
+- `Vespa314__chan.py` (HEAD `429d6ed3043e`) — https://github.com/Vespa314/chan.py.git
+- `ta4j__ta4j` (HEAD `6448f810d933`) — https://github.com/ta4j/ta4j.git
+- `andredumas__techan.js` (HEAD `434eab99e9cf`) — https://github.com/andredumas/techan.js.git
+- `yijixiuxin__chanlun-pro` (HEAD `d752b651b73e`) — https://github.com/yijixiuxin/chanlun-pro.git
+- `cinar__indicator` (HEAD `18a0b934a565`) — https://github.com/cinar/indicator.git
+- `TA-Lib__ta-lib` (HEAD `481dda1b1035`) — https://github.com/TA-Lib/ta-lib.git
+- `deepentropy__tvscreener` (HEAD `6faf496fa8b2`) — https://github.com/deepentropy/tvscreener.git
+- `shner-elmo__TradingView-Screener` (HEAD `5422d9012752`) — https://github.com/shner-elmo/TradingView-Screener.git
+- `facioquo__stock-indicators-dotnet` (HEAD `009b4c932bb6`) — https://github.com/facioquo/stock-indicators-dotnet.git
+- `femtotrader__pandas_talib` (HEAD `49f773a0d0f2`) — https://github.com/femtotrader/pandas_talib.git
+- `hackingthemarkets__candlestick-screener` (HEAD `2747eab3d310`) — https://github.com/hackingthemarkets/candlestick-screener.git
+- `ibaihuo__chanvis` (HEAD `0608519a6447`) — https://github.com/ibaihuo/chanvis.git
+- `neil-pan-s__one-quant-doc` (HEAD `7231f5d5353c`) — https://github.com/neil-pan-s/one-quant-doc.git
+- `tomcat123a__-chanlun` (HEAD `3bfbdf3483a2`) — https://github.com/tomcat123a/-chanlun.git
+- `SpiralDevelopment__candlestick-patterns` (HEAD `bd7630a4695c`) — https://github.com/SpiralDevelopment/candlestick-patterns.git
+- `xgboosted__pandas-ta-classic` (HEAD `b08a2400242a`) — https://github.com/xgboosted/pandas-ta-classic.git
+- `kldcty__ChanlunX` (HEAD `10ea0b731144`) — https://github.com/kldcty/ChanlunX.git
+- `Fidingks__facecat-kronos` (HEAD `dee5d9f3bd7b`) — https://github.com/Fidingks/facecat-kronos.git
+- `sansan0__TrendRadar` (HEAD `ae6e980f8f51`) — https://github.com/sansan0/TrendRadar.git
+- `666ghj__BettaFish` (HEAD `b67928ff1ce5`) — https://github.com/666ghj/BettaFish.git
+- `shirosaidev__stocksight` (HEAD `580d35876f2d`) — https://github.com/shirosaidev/stocksight.git
+- `kaushikjadhav01__Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis` (HEAD `fcd9b6b98dac`) — https://github.com/kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git
+- `WayneDW__Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction` (HEAD `fcb29fbcde2a`) — https://github.com/WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git
+- `algosenses__Stock_Market_Sentiment_Analysis` (HEAD `86b0b3d74a44`) — https://github.com/algosenses/Stock_Market_Sentiment_Analysis.git
+- `ranaroussi__yfinance` (HEAD `5cae563642b5`) — https://github.com/ranaroussi/yfinance.git
+- `akfamily__akshare` (HEAD `fac1e50ebf9b`) — https://github.com/akfamily/akshare.git
+- `shidenggui__easytrader` (HEAD `def5a8edc5eb`) — https://github.com/shidenggui/easytrader.git
+- `simonlin1212__a-stock-data` (HEAD `29b07d2e3700`) — https://github.com/simonlin1212/a-stock-data.git
+- `goldmansachs__gs-quant` (HEAD `e5b96bf48b1f`) — https://github.com/goldmansachs/gs-quant.git
+- `JerBouma__FinanceDatabase` (HEAD `fe5f75ca72f7`) — https://github.com/JerBouma/FinanceDatabase.git
+- `1nchaos__adata` (HEAD `b14f4e57b217`) — https://github.com/1nchaos/adata.git
+- `shidenggui__easyquotation` (HEAD `7778c1b9f93a`) — https://github.com/shidenggui/easyquotation.git
+- `Micro-sheep__efinance` (HEAD `c8fd370a3109`) — https://github.com/Micro-sheep/efinance.git
+- `mpquant__Ashare` (HEAD `7ef1ce075794`) — https://github.com/mpquant/Ashare.git
+- `openctp__openctp` (HEAD `0a6dce6f0ecd`) — https://github.com/openctp/openctp.git
+- `simonlin1212__global-stock-data` (HEAD `f0b2df07815d`) — https://github.com/simonlin1212/global-stock-data.git
+- `nladuo__THSTrader` (HEAD `fe07e879c619`) — https://github.com/nladuo/THSTrader.git
+- `tickflow-org__tickflow` (HEAD `c27f23c50386`) — https://github.com/tickflow-org/tickflow.git
+- `skyformat99__ths_trade` (HEAD `8c560d4481f6`) — https://github.com/skyformat99/ths_trade.git
+- `openbq-org__OpenBB` (HEAD `ae0268771f76`) — https://github.com/openbq-org/OpenBB.git
+- `Fincept-Corporation__FinceptTerminal` (HEAD `3f444cb7ab71`) — https://github.com/Fincept-Corporation/FinceptTerminal.git
+- `TraderAlice__OpenAlice` (HEAD `87bc415260aa`) — https://github.com/TraderAlice/OpenAlice.git
+- `bklieger-groq__stockbot-on-groq` (HEAD `0ea5de9dad7e`) — https://github.com/bklieger-groq/stockbot-on-groq.git
+- `wbh604__UZI-Skill` (HEAD `650788c54a9b`) — https://github.com/wbh604/UZI-Skill.git
+- `AlphaGBM__skills` (HEAD `b625a392c83d`) — https://github.com/AlphaGBM/skills.git
+- `atilaahmettaner__tradingview-mcp` (HEAD `099090e15fb7`) — https://github.com/atilaahmettaner/tradingview-mcp.git
+- `tradermonty__claude-trading-skills` (HEAD `c8d58f01912c`) — https://github.com/tradermonty/claude-trading-skills.git
+- `guangxiangdebizi__FinanceMCP` (HEAD `04df04cb31c7`) — https://github.com/guangxiangdebizi/FinanceMCP.git
+- `wshobson__maverick-mcp` (HEAD `475899c4363a`) — https://github.com/wshobson/maverick-mcp.git
+- `wshobson__mcp-trader` (HEAD `8b7b96043fed`) — https://github.com/wshobson/mcp-trader.git
+- `yennanliu__InvestSkill` (HEAD `50134bdcdf1d`) — https://github.com/yennanliu/InvestSkill.git
+- `agentii-ai__agentii-investment-intelligence` (HEAD `86980e14fb98`) — https://github.com/agentii-ai/agentii-investment-intelligence.git
+- `kangarooking__buffett-letters-skill` (HEAD `5b1fbe1d93f1`) — https://github.com/kangarooking/buffett-letters-skill.git
+- `wilsonfreitas__awesome-quant` (HEAD `48e48a76b205`) — https://github.com/wilsonfreitas/awesome-quant.git
+- `wangzhe3224__awesome-systematic-trading` (HEAD `0f95a0ee4c6e`) — https://github.com/wangzhe3224/awesome-systematic-trading.git
+- `grananqvist__Awesome-Quant-Machine-Learning-Trading` (HEAD `9b9c3c0fafa7`) — https://github.com/grananqvist/Awesome-Quant-Machine-Learning-Trading.git
+- `LLMQuant__quant-wiki` (HEAD `f08b94e13425`) — https://github.com/LLMQuant/quant-wiki.git
+
+## 二、缺失 / 未验证
+
+_（无）_
+
+## 三、多余仓库（不在 git.md 中）
+
+_（无）_

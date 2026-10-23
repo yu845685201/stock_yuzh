@@ -17,6 +17,8 @@ def make_manager(big_threshold=500000.0, pct_threshold=0.07):
     """不连数据库的构造：绕过 __init__，直接装配计算所需字段"""
     mgr = MoneyFlowManager.__new__(MoneyFlowManager)
     mgr.big_amount_threshold = big_threshold
+    mgr.full_market = False
+    mgr.super_big_threshold = big_threshold * 2
     mgr.pct_threshold = pct_threshold
     mgr.concurrent_workers = 3
     mgr.request_interval = 0.0

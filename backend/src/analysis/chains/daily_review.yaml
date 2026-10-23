@@ -3,18 +3,35 @@
 # 串起复盘所需的个股截面模块，覆盖方案六维中的「市场情绪」与「个股异动」两维：
 #   情绪：涨停 / 连板 / 跌停 / 炸板 / 昨日涨停今日溢价（晋级率、平均溢价由报告层聚合）
 #   异动：大涨大跌 / 放量倍数 / 60日新高新低
-# 大盘环境、板块主线、业绩估值等维度的截面统计由复盘报告生成器（backend/src/review/，
-# 已于 2026-10-03 落地；CLI：`review generate`，六维 MD+HTML）计算。
+#   量价资金（量价资金方案 V1.1 2026-10-06 增补）：量能趋势 / 资金趋势
+#   转天候选（2026-10-18 合入，原 tomorrow_candidates 独立链删除）：R1-R4 四类候选
+# 大盘环境、板块主线、业绩估值、量价四象限/资金锚/板块资金等维度的截面统计由
+# 复盘报告生成器（backend/src/review/，CLI：`review generate`，六维 MD+HTML）计算。
 # 与本链的关系：报告层基于库内日 K 独立重算同口径指标，不依赖当日链运行；
-# 本链 CSV 提供个股截面明细（Excel 可开）与交叉校验（报告 meta 的重算涨停家数与链 CSV 一致）。
+# 本链 CSV 提供个股截面明细（Excel 可开）与交叉校验（报告 meta 的重算涨停家数、
+# 第六章候选池数量均与链 CSV 一致）。
+#
+# env: a_share_candidates 装配截面查表（封板/概念/聚集/机构/资金历史）——
+# money_trend 依赖 mf_history_map（money_flow_daily 最近 10 行，分笔分桶口径）；
+# R1-R4 依赖 seal/theme/top_concepts/institution 四张查表。
+# env: a_share_valuation（P0-4 2026-10-20）——valuation_digest 依赖
+# valuation_map（stock_valuation_daily 当日行 + 近1年分位 + 3年TTM CAGR）。
+#
+# 2026-10-18 结构决策（用户，方案 §2.4）：不再设独立候选链——R 系列的五个前置模块
+# （涨停/连板/放量/量能/新高）本就在本链内，env 亦已装配，合入零额外机制。
+# 候选列即本链 CSV 的 R1-R4 四列；「最终推荐哪些股票」由 skill 对 CSV + 六维
+# 报告做综合研判产出（SKILL.md 路径 A 第三层精选池纪律），链只做确定性计算。
 #
 # 运行：backend/run_cli.py analyze run --chain daily_review [--as-of yyyyMMdd]
 
 chain: daily_review
-description: 每日复盘链：涨停、连板、跌停、炸板、昨日涨停溢价、大涨大跌、放量倍数、60日新高新低
+description: 每日复盘链：涨停、连板、跌停、炸板、昨日涨停溢价、大涨大跌、放量倍数、量能趋势、60日新高新低、资金趋势、R1梯队接力/R2主线跟随/R3趋势新高/R4机构席位（转天候选）、个股估值摘要
 
 # 复盘指标最多回看 60 交易日（60日新高新低）；引擎按各模块回看需求自动扩展窗口。
 lookback: 60d
+env:
+  - a_share_candidates
+  - a_share_valuation
 
 modules:
   - name: limit_up_today          # 是否涨停（锚定日）
@@ -25,5 +42,44 @@ modules:
   - name: limit_up_premium        # 昨日涨停今日溢价（%）
   - name: big_mover               # 大涨大跌（±5% 阈值）
   - name: volume_surge            # 放量倍数（当日量/前5日均量）
+  - name: volume_trend            # 量能趋势档位（连续放量/放量/温和/缩量）
   - name: new_high_low            # 60日新高新低
     params: {window: 60}
+  - name: money_trend             # 资金趋势（今日/5日累计大单净额与连续流入天数）
+  # ---- 转天买入候选 R1-R4（2026-10-18 自 tomorrow_candidates 链合入，方案 §2.4）----
+  # ⚠ 顺序纪律：R 系列读前置模块结果（ctx.upstream 按中文名取），必须排在
+  #   limit_up_today / consecutive_limit_up / volume_surge / new_high_low 之后；
+  #   追加新模块时勿插到它们前面。判定谓词与报告层第六章共用 candidate_rules。
+  - name: r1_ladder_relay         # R1 梯队接力（连板高度 + 封板质量）
+  - name: r2_mainline_follow      # R2 主线跟随（首板 × 聚集前列概念）
+  - name: r3_trend_new_high       # R3 趋势新高（新高 × 放量 × 强势）
+  - name: r4_institution_seat     # R4 机构席位（龙虎榜机构净买前 5）
+  # ---- 技术指标七件套（P0-1，2026-10-18 合入，方案 §3.1）----
+  # ⚠ warmup 纪律：MACD/RSI/OBV/均线四模块 warmup=130（EMA 系，MyTT 源码注释
+  #   「至少 120 周期才精确」），引擎会把本链窗口从 60d 自动扩展到 132d
+  #   （meta.window_expanded_by_modules=true 如实标记，解读时按实际窗口报出）。
+  #   口径：通达信版（indicators 库，与 MyTT 对拍）；状态类模块（MACD/KDJ/RSI/
+  #   OBV/均线）为组合串不计命中，boll_pos/atr_pct 为连续比率显示可算样本数（§2.5）。
+  - name: macd_state              # MACD状态（金叉/死叉/柱变化/零轴上下）
+  - name: kdj_state               # KDJ状态（数值 + 超买超卖/金叉死叉）
+  - name: rsi_state               # RSI状态（三线 + 超买超卖）
+  - name: boll_pos                # BOLL位置%（收盘在带中位置）
+  - name: atr_pct                 # ATR波动%（ATR20 占收盘价比）
+  - name: obv_trend               # OBV趋势（价量方向组合 + 背离待察）
+  - name: ma_arrangement          # 均线排列（MA5/10/20/60 + 上穿 MA60）
+  # ---- K 线形态（P0-2，2026-10-20 合入，方案 §3.2）----
+  # ⚠ max_lookback=3：零窗口扩展（不撑大链窗口）；一字板全部形态不命中
+  #   （A 股涨跌停结构性事实）；同日多命中取优先级首（三根反转>双根反转>
+  #   单根>持续），全部命中在 detail；19 式与 candlestick-patterns 克隆对拍，
+  #   红三兵/三只乌鸦自建（无对拍基线，patterns/README.MD 标注）。
+  - name: candle_pattern          # K线形态（21 式主形态）
+  # ---- 个股估值摘要（P0-4，2026-10-20 合入，方案 §3.3）----
+  # ⚠ 依赖 env: a_share_valuation（valuation_map）；PE-TTM 为 sync 自算归母口径，
+  #   分位样本 <20 显式标注不足（禁小样本分位）；亏损股输出数据不足不硬造。
+  - name: valuation_digest        # 个股估值摘要（PE-TTM/历史分位/消化年数）
+  # ---- 涨停归因（P1-11，2026-10-20 合入，方案 §3.4）----
+  # ⚠ 读前置模块「是否涨停」结果（非涨停 → 否）；公告窗口来自候选 env 的
+  #   cand_announcement_map（前 3 个自然日，config review.attribution.ann_window_days
+  #   可调）；归因是市场叙事非核验因果；锚定日 <20260928 附「公告覆盖不全」
+  #   （非定期报告公告自该日起才有量，2026-10-20 实测）。
+  - name: limit_up_attribution    # 涨停归因（公告 × 利好关键词/类型）

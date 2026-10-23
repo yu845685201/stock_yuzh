@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCES = [
     'index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
     'disclosure', 'lhb', 'margin', 'ths_finance', 'money_flow', 'valuation_calc',
-    'sentiment_metrics', 'industry', 'bj_kline',
+    'sentiment_metrics', 'industry', 'bj_kline', 'news',
 ]
 # 周频任务（周末执行，--sources 显式指定；ths_l2=申万二级增量，N3 2026-10-04 挂载）
 WEEKLY_SOURCES = ['concept', 'unlock', 'ths_l2']
@@ -47,6 +47,7 @@ KLINE_SOURCE = 'kline'
 SOURCE_WAVES = [
     ['index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
      'disclosure', 'lhb', 'margin', 'money_flow', 'industry', 'concept', 'unlock',
+     'hkex_connect', 'etf_scale', 'news',
      'ths_l2', 'bj_kline'],
     ['ths_finance'],          # 依赖 announcement/disclosure 的当日披露清单
     ['valuation_calc', 'sentiment_metrics'],   # 依赖 ths_finance 财报 + 日K
@@ -59,8 +60,10 @@ SOURCE_LABELS = {
     'valuation_idx': '指数估值', 'announcement': '公告清单+业绩预告',
     'disclosure': '披露日历', 'lhb': '龙虎榜', 'margin': '两融',
     'ths_finance': 'THS财报', 'money_flow': '分笔资金流', 'valuation_calc': 'PE/PB自算',
+    'hkex_connect': '互联互通(北向+南向)', 'etf_scale': 'ETF份额',
     'sentiment_metrics': '情绪指标日频',
     'industry': '行业分类', 'concept': '概念板块', 'unlock': '解禁日历',
+    'news': '市场要闻(新浪7x24)',
     'ths_l2': '申万二级行业',
     'bj_kline': '北交所日K',
 }
@@ -229,6 +232,9 @@ class ReviewSyncOrchestrator:
         from .announcement_manager import AnnouncementManager
         from .bj_kline_manager import BjKlineManager
         from .concept_manager import ConceptManager
+        from .etf_scale_manager import EtfScaleManager
+        from .hkex_connect_manager import HkexConnectManager
+        from .news_telegraph_manager import NewsTelegraphManager
         from .disclosure_manager import DisclosureManager
         from .index_kline_manager import IndexKlineManager
         from .index_valuation_manager import IndexValuationManager
@@ -268,6 +274,11 @@ class ReviewSyncOrchestrator:
             'unlock': lambda dry: UnlockManager(cm).execute(dry_run=dry),
             'ths_l2': lambda dry: ThsIndustryL2Manager(cm).execute(dry_run=dry),
             'bj_kline': lambda dry: BjKlineManager(cm).execute(trade_date=as_of, dry_run=dry),
+            # P3 互联互通与 ETF 份额（量价资金方案 V1.1；独立源非日K依赖，失败不阻塞）
+            'hkex_connect': lambda dry: HkexConnectManager(cm).execute(),
+            'etf_scale': lambda dry: EtfScaleManager(cm).execute(),
+            # 市场要闻（四期方案 §4；独立源非日K依赖，失败不阻塞）
+            'news': lambda dry: NewsTelegraphManager(cm).execute(dry_run=dry),
         }
 
     # ---------- 一键模式：内置日K ----------

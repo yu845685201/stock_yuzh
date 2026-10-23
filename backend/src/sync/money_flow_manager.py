@@ -134,6 +134,9 @@ class MoneyFlowManager:
         self.concurrent_workers = max(1, int(mf.get('concurrent_workers', 3)))
         self.request_interval = float(mf.get('request_interval', 0.15))
         self.big_amount_threshold = float(mf.get('big_amount_threshold', 500000))
+        # P2 全市场扩面（量价资金方案 V1.1：用户决策不灰度直接开）+ 超大单阈值
+        self.full_market = bool(mf.get('full_market', False))
+        self.super_big_threshold = float(mf.get('super_big_threshold', 1000000))
         self.top_amount_n = int(mf.get('top_amount_n', 50))
         self.pct_threshold = float(mf.get('pct_threshold', 0.07))
         self.gray_limit = int(mf.get('gray_limit', 200))
@@ -146,15 +149,21 @@ class MoneyFlowManager:
 
     # ---------- 子集计算 ----------
 
-    def select_abnormal_stocks(self, trade_date: str, seal_only: bool = False
+    def select_abnormal_stocks(self, trade_date: str, seal_only: bool = False,
+                               full_market: Optional[bool] = None
                                ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
         """当日异动子集（涨停∪跌停∪|涨跌幅|≥阈值∪成交额TopN，合并去重）。
+
+        full_market=True（P2 全市场扩面，config review_sync.money_flow.full_market）
+        时返回全部有成交行（停牌/无成交排除——分笔可得性与子集口径前提一致）。
 
         seal_only=True（F 封板回填）：仅涨停∪跌停∪炸板（强制含炸板），不带
         涨跌幅/成交额扩充——回补请求量按 ~90 只/日估算的前提。
 
         返回 (子集行 [{ts_code, stock_code, stock_name, amount, close, high, low, change_rate, is_st}], 统计)
         """
+        use_full = self.full_market if full_market is None else bool(full_market)
+
         snapshot = self.db.fetch_day_kline_snapshot(trade_date)
         if not snapshot:
             raise ReviewSyncFailure(f'当日 {trade_date} 全市场日K为空——先跑 sync-kline-day')
@@ -197,6 +206,17 @@ class MoneyFlowManager:
         top_amount = [r for _, r in with_amount[:self.top_amount_n]]
 
         merged: Dict[str, Dict[str, Any]] = {}
+        if use_full and not seal_only:
+            # P2 全市场：全部有成交行（灰度上限与异动扩充均不生效）
+            for row in snapshot:
+                ts_code = row.get('ts_code')
+                if ts_code and (_to_float(row.get('amount')) or 0.0) > 0:
+                    merged[ts_code] = row
+            stats = {
+                'snapshot_total': len(snapshot), 'full_market': len(merged),
+                'selected': len(merged),
+            }
+            return list(merged.values()), stats
         if seal_only:
             base = limit_hits + burst_hits      # 涨停∪跌停∪炸板（F 回填子集）
         elif self.include_burst:
@@ -252,7 +272,11 @@ class MoneyFlowManager:
                 return result
 
             existing = self.db.fetch_money_flow_codes(trade_date)
-            pending = [s for s in stocks if s['ts_code'] not in existing or codes]
+            if self.full_market:
+                # P2 全市场：不跳过已有行（旧行可能缺分桶列，重算幂等覆盖）
+                pending = stocks
+            else:
+                pending = [s for s in stocks if s['ts_code'] not in existing or codes]
             logger.info(f"资金流 {trade_date}：子集 {len(stocks)} 只，待抓 {len(pending)} 只（已入库跳过）")
 
             done_count = 0
@@ -422,7 +446,7 @@ class MoneyFlowManager:
         row.update({
             'trade_date': trade_date,
             'ts_code': stock['ts_code'],
-            'calib_note': '近似口径:分笔分桶',
+            'calib_note': '分笔分桶:全市场' if self.full_market else '分笔分桶:异动子集',
         })
         seal_row = self._seal_row_for(stock, trades, trade_date)
         return row, seal_row, timed_out
@@ -497,6 +521,12 @@ class MoneyFlowManager:
         """
         big_buy = 0.0
         big_sell = 0.0
+        sb_buy = 0.0
+        sb_sell = 0.0
+        mid_buy = 0.0
+        mid_sell = 0.0
+        small_buy = 0.0
+        small_sell = 0.0
         total_trades = 0
         prev_price: Optional[float] = None
         prev_dir = 0  # 0 买 / 1 卖；中性盘平价继承
@@ -532,6 +562,22 @@ class MoneyFlowManager:
                     big_buy += amount
                 else:
                     big_sell += amount
+                # 超大单为大单的子集（≥super_big_threshold），big_* 口径不变
+                if amount >= self.super_big_threshold:
+                    if direction == 0:
+                        sb_buy += amount
+                    else:
+                        sb_sell += amount
+            elif amount >= 100000.0:
+                if direction == 0:
+                    mid_buy += amount
+                else:
+                    mid_sell += amount
+            else:
+                if direction == 0:
+                    small_buy += amount
+                else:
+                    small_sell += amount
 
         big_net = big_buy - big_sell
         if total_amt is None or total_amt <= 0:
@@ -544,6 +590,15 @@ class MoneyFlowManager:
             'big_sell_amt': round(big_sell, 4),
             'big_net_amt': round(big_net, 4),
             'big_net_pct': big_net_pct,
+            'super_big_buy_amt': round(sb_buy, 4),
+            'super_big_sell_amt': round(sb_sell, 4),
+            'super_big_net_amt': round(sb_buy - sb_sell, 4),
+            'mid_buy_amt': round(mid_buy, 4),
+            'mid_sell_amt': round(mid_sell, 4),
+            'mid_net_amt': round(mid_buy - mid_sell, 4),
+            'small_buy_amt': round(small_buy, 4),
+            'small_sell_amt': round(small_sell, 4),
+            'small_net_amt': round(small_buy - small_sell, 4),
             'stock_count': total_trades,
         }
 

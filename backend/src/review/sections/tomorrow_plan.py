@@ -159,6 +159,18 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
             '放量上涨 = 主线确认，可跟随加仓',
             '缩量上涨 = 反弹缺承接，兑现为主；放量下跌 = 防守',
         ])
+    # 量价四象限联动（P1 双锚；量价资金方案 V1.1 §3.3③）
+    vp = (agg.get('volume_price') or {})
+    if vp.get('available'):
+        anchors = (vp.get('data') or {}).get('anchors') or []
+        quads = '；'.join(f"{a['name']} {a.get('quad') or '—'}" for a in anchors)
+        if quads:
+            v_rows.append([
+                'V1.5 量价联动',
+                f'今日四象限（{quads}）——转天象限迁移观察',
+                '缩量涨 → 放量涨 = 背离修复，加验证权重；平稳 → 放量涨 = 健康确认',
+                '放量涨 → 缩量跌 = 恐慌转折信号，立即防守；缩量跌延续 = 阴跌观望',
+            ])
     top_stock = _top_streak_stock(agg)
     if top_stock:
         name, streak = top_stock
@@ -276,7 +288,7 @@ def _direction_watch(agg: Dict[str, Any]) -> List[str]:
 
 def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
     """转天买入候选（观察池）：消费 aggregator._build_candidates 全量候选池
-    （谓词 candidate_rules 与 tomorrow_candidates 链共用，同数据同结果），
+    （谓词 candidate_rules 与 daily_review 链 R 列共用，同数据同结果），
     按情绪开放度过滤视图 + top_n 截断展示 + 每类买入决策树。
 
     候选 = 满足显式规则的观察名单，非推荐；「是否买入」由转天走势对决策树
@@ -323,39 +335,104 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
     else:
         openness = '回暖/震荡：四类候选全开'
         open_types = ('R1', 'R2', 'R3', 'R4')
+    # ADX 闸门（P1-7 §4.6 E）：指数趋势强度挡位，叠加在情绪开放度之上
+    adx_info = cand.get('adx_gate') or {}
+    gate = str(adx_info.get('gate') or 'closed')
+    gate_note = (f"指数 ADX 闸门：{gate}"
+                 + (f"（{adx_info['index']} ADX {adx_info['adx']}"
+                    f"{'↑' if adx_info.get('adx_rising') else '↓'}，"
+                    f"收盘 {adx_info['close']:.0f} vs MA20 {adx_info['ma20']:.0f}）"
+                    if adx_info.get('adx') is not None
+                    else f"（{adx_info.get('reason', '数据不足')}）"))
+    if gate == 'closed':
+        blocks.append({'type': 'para', 'text': gate_note})
+        blocks.append({'type': 'para',
+                       'text': '指数趋势闸门关闭（震荡/下行）：本轮不出买入候选——'
+                               'ADX 闸门与情绪开放度叠加生效（任一层关闭即不出）'})
+        blocks.append({'type': 'note',
+                       'text': '候选为规则筛选的观察名单，非推荐；ADX 口径 = 通达信 '
+                               'SUM+MA 平滑（indicators.adx）；本报告不构成投资建议'})
+        return blocks
+    if gate == 'half':
+        open_types = tuple(t for t in open_types if t in ('R1', 'R2'))
+        openness += '；ADX 半开放（仅 R1/R2）'
+    else:
+        openness += '；ADX 全开放'
     blocks.append({'type': 'para', 'text': f'候选开放度：{openness}'})
+    blocks.append({'type': 'para', 'text': gate_note})
 
     fmt_amt = lambda a: f'成交额 {a / 1e8:.1f} 亿' if a else '—'
+    money_confirm = bool(brules.get('money_confirm'))
+
+    def _money_cell(r):
+        """资金确认列（展示恒开；money_confirm=true 时未确认标 ⚠）"""
+        net = r.get('big_net')
+        if net is None:
+            cell = '—'
+            flag = '⚠未确认' if money_confirm else ''
+            return f'{cell}{flag}'.strip()
+        cell = f'{"净流入" if net > 0 else "净流出"}{abs(net) / 1e8:.2f} 亿'
+        if money_confirm and net <= 0:
+            cell += ' ⚠'
+        return cell
+
     _REMARK = {
         'R1': lambda r: fmt_amt(r.get('amount')),
         'R2': lambda r: fmt_amt(r.get('amount')),
         'R3': lambda r: fmt_amt(r.get('amount')),
         'R4': lambda r: '龙虎榜席位口径（一日榜）',
     }
+    _HAS_MONEY = {'R1', 'R2', 'R3'}  # 资金确认列合并进证据列后不再单独输出
 
     for ctype in open_types:
         label, rule_desc = _CANDIDATE_META[ctype]
         rule_desc = rule_desc.format(**{**DEFAULT_BUY_RULES, **brules})
         pool = cand.get(ctype) or []
+        # 展示排序（P1-7 D）：五维加权评分优先（score 非 None），证据计数降序
+        # 兜底（评分缺失的旧数据/无维度股票）；两者都缺 → 维持原稳定次序
+        ranked = sorted(
+            pool,
+            key=lambda r: (-(r.get('score') if r.get('score') is not None else -1),
+                           -int(r.get('evidence_count') or 0)))
         rows = [[r.get('code') or '—', r.get('name') or '—', r.get('label') or '—',
-                 _REMARK[ctype](r)] for r in pool[:top_n]]
+                 _REMARK[ctype](r),
+                 ('/'.join(r.get('evidence') or []) or '—')
+                 + (f"（{r['evidence_count']}证）" if r.get('evidence') else ''),
+                 (f"{r['score']:.1f}" if r.get('score') is not None else '—')]
+                for r in ranked[:top_n]]
         blocks.append({'type': 'heading', 'level': 3,
-                       'text': f'{label}（{len(pool)} 只，展示前 {min(top_n, len(pool))}，'
+                       'text': f'{label}（{len(pool)} 只，按五维评分展示前 {min(top_n, len(pool))}，'
                                f'规则：{rule_desc}）'})
         if rows:
-            blocks.append({'type': 'table',
-                           'headers': ['代码', '名称', '当日状态', '备注'],
-                           'rows': rows})
+            headers = ['代码', '名称', '当日状态', '备注', '证据（五维计数）', '五维评分']
+            blocks.append({'type': 'table', 'headers': headers, 'rows': rows})
             tree = _DECISION_TREES[ctype]
             blocks.append({'type': 'bullets',
                            'items': [tree['confirm'], tree['veto'], tree['risk']]})
         else:
             blocks.append({'type': 'para', 'text': '无入选（池数据缺失或无满足规则的股票）'})
 
+    # VETO 出池点名（P1-7 §4.6 B：一票否决命中即出池，禁静默缩池）
+    vetoed = cand.get('vetoed') or []
+    if vetoed:
+        items = [f"{v.get('name') or v.get('code')}（{v.get('type')}）："
+                 f"{'、'.join(v.get('reasons') or [])}" for v in vetoed[:10]]
+        blocks.append({'type': 'heading', 'level': 3,
+                       'text': f"一票否决出池（{len(vetoed)} 只，VETO 独立于加权评分）"})
+        blocks.append({'type': 'bullets', 'items': items})
+        blocks.append({'type': 'note',
+                       'text': 'VETO 命中项（ST/*ST、业绩暴雷、大股东减持、龙虎榜卖一占比超限、'
+                               '高位板放量长阴）为规则出池非数据缺失；否决要毙掉的是尾部风险，'
+                               '若被毙的恰是高收益股，否决规则本身需回测复议（P1-6 A/B）'})
+    elif cand.get('vetoed_count') == 0:
+        blocks.append({'type': 'para', 'text': '一票否决出池：本报告期 0 只'})
+
     blocks.append({'type': 'note',
                    'text': '候选为规则筛选的观察名单（判据初版 2026-10-05 新增，阈值 config '
                            'review.tomorrow_plan.buy_rules，待用户校准定稿）；全量底表见链 CSV '
-                           'data/analysis/tomorrow_candidates_<锚定日>.csv（与报告同规则同序）；'
+                           'data/analysis/daily_review_<锚定日>.csv 的 R1-R4 四列'
+                           '（2026-10-18 起候选列合入 daily_review，原独立候选链已删除；'
+                           '与报告同规则同序）；'
                            '「是否买入」由转天走势对决策树的验证决定——确认/否决/风控三分支缺一'
                            '不可；竞价与盘中阈值参数由个人风险偏好校准；本报告不构成投资建议'})
     return blocks

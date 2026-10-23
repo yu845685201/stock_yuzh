@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +28,9 @@ from ..analysis.candidate_rules import (
     is_r2,
     is_r3,
     is_r4,
+    r1_tier,
+    score_candidate,
+    veto_reasons,
 )
 from ..analysis.data_reader import DataReader
 from .cross_section import (
@@ -35,6 +39,8 @@ from .cross_section import (
     sentiment_metrics,
     suppress_first_day,
 )
+from . import money_effect as _money_effect
+from .sentiment_calibration import quantile_calibration, quantile_state
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +77,46 @@ class AggregationResult:
 
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
+
+
+def _values_match(mine: Any, theirs: Any) -> bool:
+    """指标对拍的逐值比较：数值列容忍展示舍入（≤0.05），其余字符串精确匹配。"""
+    try:
+        return abs(float(mine) - float(theirs)) <= 0.05
+    except (TypeError, ValueError):
+        return str(mine) == str(theirs)
+
+
+class _ConfigShim:
+    """dict 配置 → ConfigManager 形态（assemble_valuation 只需 load_config）。"""
+
+    def __init__(self, cfg: Dict[str, Any]):
+        self._cfg = cfg
+
+    def load_config(self) -> Dict[str, Any]:
+        return self._cfg
+
+
+def _cand_score(big_net: Optional[float], volume_surge: Optional[float],
+                cluster_count: Optional[int]) -> Optional[float]:
+    """候选五维评分的可得子集（P1-7 §4.6 D）。
+
+    报告层可得维度：资金（大单净流入）/ 技术（放量倍数）/ 板块（聚集家数）；
+    基本面/事件维本层不查库（缺维按剩余权重归一化，missing_dims 见
+    candidate_rules.score_candidate 语义）——**不硬造**。全缺 → None。
+    """
+    dims: Dict[str, Optional[float]] = {
+        'money': (min(100.0, max(0.0, (big_net or 0.0) / 1e8 * 50.0))
+                  if big_net is not None else None),
+        'tech': (min(100.0, float(volume_surge) * 25.0)
+                 if volume_surge is not None else None),
+        'sector': (min(100.0, float(cluster_count) * 20.0)
+                   if cluster_count is not None else None),
+    }
+    if all(v is None for v in dims.values()):
+        return None
+    res = score_candidate(dims)
+    return res['score']
 
 
 class ReviewAggregator:
@@ -122,9 +168,16 @@ class ReviewAggregator:
             'stock_count': int(cs_today['ts_code'].nunique()) if not cs_today.empty else 0,
         }
         out['sentiment'] = self._aggregate_sentiment(cs_today, cs_prev, as_of=as_of)
+        out['money_effect'] = self._aggregate_money_effect(cs_today, cs_prev)
+        out['verification'] = self._aggregate_verification(
+            as_of, prev_date, cs_today, (out['sentiment'].data or {}))
         out['market_env'] = self._aggregate_market_env(panel, cs_today, as_of, prev_date)
-        out['sector'] = self._aggregate_sector(panel, cs_today, as_of)
+        out['sector'] = self._aggregate_sector(panel, cs_today, cs_prev, as_of)
         out['movers'] = self._aggregate_movers(cs_today, as_of)
+        # 量价资金维度（量价资金方案 V1.1 §3.3）：量价四象限双锚 / 板块资金聚合 / 资金锚
+        out['volume_price'] = self._volume_price(as_of)
+        out['sector_money'] = self._sector_money(as_of)
+        out['capital_anchors'] = self._capital_anchors(as_of)
         out['fundamentals'] = self._aggregate_fundamentals(as_of, prev_date)
         # 开发项 D：五类已采集数据进报告（表空 → available=False → 渲染"⏳ 待补"）
         out['margin'] = self._aggregate_margin(as_of)
@@ -132,15 +185,25 @@ class ReviewAggregator:
         out['money_flow'] = self._aggregate_money_flow(as_of)
         out['unlock'] = self._aggregate_unlock(as_of)
         out['announcement'] = self._aggregate_announcement(as_of)
-        # 转天买入候选池（第六章预案 × tomorrow_candidates 链同口径；candidate_rules
-        # 谓词共用，全量不截断，展示层按 top_n 截断——与链 CSV top N 同集同序）
+        # 消息催化（四期方案 §4）：当日要闻 + 聚集前列概念关键词命中（市场叙事口径）
+        out['news'] = self._aggregate_news(as_of)
+        # 技术指标状态（P0-1 §3.1.7）：133d 面板复算七模块，与 daily_review 链
+        # 指标列同一实现两入口（indicator_panel 调同一批模块，对拍保一致）
+        out['indicators'] = self._aggregate_indicators(as_of)
+        # 个股估值摘要（P0-4 §3.3.3）：与链 valuation_digest 模块同一
+        # assemble_valuation 入口（原则 P6 两入口同一实现）
+        out['valuation_digest'] = self._aggregate_valuation_digest(as_of)
+        # 转天买入候选池（第六章预案 × daily_review 链 R 列同口径；candidate_rules
+        # 谓词共用，全量不截断，展示层按 top_n 截断——与链 CSV R 列同集同序）
         clusters = ((out['sector'].data or {}).get('limit_up_clusters')
                     if isinstance(out['sector'], AggregationResult) else None) or []
         lhb_data = (out['lhb'].data if isinstance(out['lhb'], AggregationResult) else {}) or {}
+        sm_data = (out['sector_money'].data if isinstance(out['sector_money'], AggregationResult) else {}) or {}
         out['candidates'] = self._build_candidates(
             cs_today, as_of, clusters,
             self._seal_map_of_day(as_of),
-            lhb_data.get('institution') or [])
+            lhb_data.get('institution') or [],
+            top3_members=sm_data.get('top3_members') or set())
         return out
 
     # ------------------------------------------------------------------ 维度1
@@ -221,6 +284,345 @@ class ReviewAggregator:
             out.append({'name': name, 'change_rate': _f(last['change_rate']),
                         'close': _f(last['close']), 'position_pct': _f(pos)})
         return out
+
+    def _volume_price(self, as_of: str) -> AggregationResult:
+        """量价四象限（双锚：上证+中证全指，config review.volume_price.index_codes）。
+
+        每锚：当日成交额 vs 前 5 日均额比值 r5 分档（放量≥1.1/缩量≤0.9/温和）×
+        当日涨跌（±0.3% 算平）→ 四象限判定；附 5 日均量趋势（递增/递减）。
+        阈值判据初版待校准（量价资金方案 V1.1 §3.3①）。
+        """
+        codes = list((self.config.get('review') or {}).get('volume_price', {})
+                     .get('index_codes') or ['000001', '000985'])
+        try:
+            rows = self.db._query(
+                """
+                SELECT index_code, index_name, trade_date, amount, change_rate
+                FROM trade_index_info
+                WHERE index_code = ANY(%s) AND trade_date <= %s
+                  AND amount IS NOT NULL
+                ORDER BY index_code, trade_date
+                """, (codes, as_of))
+        except Exception as e:
+            logger.warning(f'量价序列读取失败: {e}')
+            return AggregationResult(available=False, reason='trade_index_info 为空')
+        if not rows:
+            return AggregationResult(available=False, reason='trade_index_info 为空')
+        series: Dict[str, Dict[str, Any]] = {}
+        for code, name, d, amt, chg in rows:
+            series.setdefault(code, {'name': name,
+                                     'amount': [], 'chg': [], 'date': []})
+            series[code]['amount'].append(float(amt))
+            series[code]['chg'].append(float(chg) if chg is not None else 0.0)
+            series[code]['date'].append(str(d))
+        out = []
+        for code in codes:
+            sdata = series.get(code)
+            if not sdata or len(sdata['amount']) < 6:
+                continue
+            amounts, chgs = sdata['amount'], sdata['chg']
+            today_amt = amounts[-1]
+            prev5 = amounts[-6:-1]
+            r5 = today_amt / (sum(prev5) / len(prev5)) if sum(prev5) > 0 else None
+            # 5 日均量趋势（前 5 日均 vs 前 5 日前的 5 日均）
+            if len(amounts) >= 11:
+                m1 = sum(amounts[-6:-1]) / 5
+                m0 = sum(amounts[-11:-6]) / 5
+                trend = '递增' if m1 > m0 * 1.05 else ('递减' if m1 < m0 * 0.95 else '平稳')
+            else:
+                trend = None
+            chg_today = chgs[-1]
+            vol_state = ('放量' if r5 is not None and r5 >= 1.1
+                         else '缩量' if r5 is not None and r5 <= 0.9 else '温和') if r5 else None
+            direction = ('涨' if chg_today > 0.3 else
+                         '跌' if chg_today < -0.3 else '平')
+            quad = (f'{vol_state}{direction}' if vol_state and direction != '平'
+                    else (f'缩量{direction}' if vol_state == '缩量' else
+                          f'放量{direction}' if vol_state == '放量' else '温和盘整')
+                    if vol_state else None)
+            verdict = {
+                '放量涨': '健康，趋势可信', '缩量涨': '背离，反弹缺承接',
+                '放量跌': '恐慌抛售', '缩量跌': '阴跌磨底',
+            }.get(quad, '观望' if direction == '平' else None)
+            out.append({
+                'code': code, 'name': sdata['name'],
+                'date': sdata['date'][-1],
+                'amount_yi': round(today_amt / 1e8, 0),
+                'r5': round(r5, 3) if r5 is not None else None,
+                'chg': round(chg_today, 2),
+                'volume_state': vol_state, 'direction': direction,
+                'quad': quad, 'verdict': verdict, 'trend_5d': trend,
+            })
+        return AggregationResult(available=bool(out), data={'anchors': out})
+
+    def _sector_money(self, as_of: str) -> AggregationResult:
+        """板块资金流向（行业 sw_2021 聚合大单净额；概念 sina_gn Top5）。
+
+        **口径**：聚合自 money_flow_daily 异动子集（P2 前约 300-400 股/日），
+        系统性偏向异动板块——仅供观察不作排序结论；子集覆盖率随行展示。
+        """
+        try:
+            rows = self.db._query(
+                """
+                SELECT m.ts_code, m.big_net_amt
+                FROM money_flow_daily m
+                WHERE m.trade_date = %s AND m.big_net_amt IS NOT NULL
+                """, (as_of,))
+        except Exception as e:
+            logger.warning(f'板块资金读取失败: {e}')
+            return AggregationResult(available=False, reason='money_flow_daily 为空')
+        if not rows:
+            return AggregationResult(available=False,
+                                     reason='money_flow_daily 当日无数据')
+        try:
+            total_rows = self.db._query(
+                "SELECT COUNT(*) FROM his_kline_day WHERE trade_date = %s "
+                "AND volume > 0", (as_of,))
+            traded = int(total_rows[0][0]) if total_rows else 0
+        except Exception:
+            traded = 0
+        mf_map = {str(t): float(net) for t, net in rows}
+        # 行业映射（sw_2021 主 + sina_hy 回退）
+        try:
+            ind_rows = self.db._query(
+                """
+                SELECT m.ts_code, c.concept_name FROM sector_concept_map m
+                JOIN sector_concept c ON c.concept_code = m.concept_code
+                WHERE c.source IN ('sw_2021', 'sina_hy')
+                  AND (m.in_date IS NULL OR m.in_date <= %s)
+                  AND (m.out_date IS NULL OR m.out_date > %s)
+                """, (as_of, as_of))
+        except Exception as e:
+            logger.warning(f'行业映射读取失败: {e}')
+            ind_rows = []
+        industry_net: Dict[str, float] = {}
+        industry_in: Dict[str, int] = {}
+        seen: set = set()
+        for ts_code, ind in ind_rows:
+            if ts_code in seen or ts_code not in mf_map:
+                continue
+            seen.add(ts_code)
+            net = mf_map[ts_code]
+            industry_net[ind] = industry_net.get(ind, 0.0) + net
+            if net > 0:
+                industry_in[ind] = industry_in.get(ind, 0) + 1
+        ranked = sorted(industry_net.items(), key=lambda kv: -kv[1])
+        top = [{'industry': k, 'net_yi': round(v / 1e8, 2),
+                'in_count': industry_in.get(k, 0)} for k, v in ranked[:5]]
+        bottom = [{'industry': k, 'net_yi': round(v / 1e8, 2),
+                   'in_count': industry_in.get(k, 0)} for k, v in ranked[-5:][::-1]]
+        # 净流入 Top3 行业的成分股集（候选证据标记"板块"用；量价资金 V1.1）
+        top3_industries = {k for k, _ in ranked[:3]}
+        top3_members = {str(ts) for ts, ind in ind_rows
+                        if ind in top3_industries}
+        return AggregationResult(data={
+            'industry_top': top, 'industry_bottom': bottom,
+            'top3_members': top3_members,
+            'subset_count': len(mf_map), 'traded_count': traded,
+            'coverage': round(len(mf_map) / traded * 100, 1) if traded else None,
+        })
+
+    def _capital_anchors(self, as_of: str) -> AggregationResult:
+        """市场级资金锚（P3）：北向总额（活跃度，无方向）+ 南向净额 + ETF 宽基份额变动。
+
+        口径（量价资金方案 V1.1 §5）：北向仅成交总额禁止解读净额；南向净买入=Buy−Sell；
+        ETF 份额变动为 T 日快照差分（两所不足 2 日积累时标待积累）。
+        """
+        data: Dict[str, Any] = {}
+        try:
+            rows = self.db._query(
+                """
+                SELECT channel, total_turnover, buy_turnover, sell_turnover
+                FROM hkex_connect_daily WHERE trade_date = %s
+                """, (as_of,))
+        except Exception as e:
+            logger.warning(f'互联互通读取失败: {e}')
+            rows = []
+        ch = {str(r[0]): r for r in rows}
+        if ch:
+            north_total = sum(float(ch[c][1]) for c in ('north_sse', 'north_szse') if c in ch)
+            south_net = sum(
+                float(ch[c][2] or 0) - float(ch[c][3] or 0)
+                for c in ('south_sse', 'south_szse') if c in ch)
+            data['hkex_date'] = as_of
+            data['north_total_yi'] = round(north_total / 100, 1)   # 百万 → 亿
+            data['south_net_yi'] = round(south_net / 100, 1)
+        else:
+            data['hkex_date'] = None
+        # ETF 宽基份额变动（头部宽基当日 vs 前一可得日，两所合计，亿份）
+        try:
+            etf_rows = self.db._query(
+                """
+                SELECT trade_date, SUM(shares_wan) FROM etf_scale_daily
+                WHERE fund_code = ANY(%s) AND trade_date <= %s
+                GROUP BY trade_date ORDER BY trade_date DESC LIMIT 2
+                """, (['510300', '510050', '588000', '159915', '159919',
+                       '510500', '159922'], as_of))
+            if len(etf_rows) >= 2:
+                d1, v1 = str(etf_rows[0][0]), float(etf_rows[0][1])
+                d0, v0 = str(etf_rows[1][0]), float(etf_rows[1][1])
+                data['etf'] = {'date': d1, 'prev_date': d0,
+                               'chg_yi_fen': round((v1 - v0) / 10000, 2)}
+            else:
+                data['etf'] = {'date': None, 'chg_yi_fen': None,
+                               'note': '待积累（需 ≥2 个交易日）'}
+        except Exception as e:
+            logger.warning(f'ETF 宽基读取失败: {e}')
+            data['etf'] = None
+
+        # ---------- 第三阶段新锚（2026-10-23） ----------
+        # 宏观指标锚（低频背景；缺失指标跳过不硬造）
+        try:
+            data['macro'] = self._macro_anchor()
+        except Exception as e:
+            logger.warning(f'宏观指标锚读取失败: {e}')
+            data['macro'] = None
+        # ETF 期权情绪锚（逐标的 PC 率/OI；SSE 口径，衔接 ETF 规模章）
+        try:
+            data['option'] = self._option_anchor(as_of)
+        except Exception as e:
+            logger.warning(f'期权锚读取失败: {e}')
+            data['option'] = None
+        # 北向个股明细锚（Top N 持仓；披露止于 20240816——数据边界如实标注）
+        try:
+            data['north_detail'] = self._north_detail_anchor(as_of)
+        except Exception as e:
+            logger.warning(f'北向个股明细锚读取失败: {e}')
+            data['north_detail'] = None
+        return AggregationResult(available=bool(data), data=data)
+
+    def _macro_anchor(self) -> Optional[Dict[str, Any]]:
+        """宏观指标最新值快照（第三阶段-1；报告层只读渲染）。
+
+        缺表/无数据 → None（章节显示「宏观数据未采集」提示，不硬造）。
+        """
+        try:
+            rows = self.db._query(
+                """
+                SELECT DISTINCT ON (indicator_code)
+                       indicator_code, value, unit, trade_date
+                FROM macro_indicator_daily
+                ORDER BY indicator_code, trade_date DESC
+                """)
+        except Exception as e:
+            logger.warning(f'宏观指标查询失败: {e}')
+            return None
+        if not rows:
+            return None
+        from ..data_sources.macro_source import INDICATOR_META
+        items = []
+        for code, value, unit, d in rows:   # DataReader._query：元组行
+            code = str(code)
+            name = INDICATOR_META.get(code, (code,))[0]
+            items.append({'code': code, 'name': name,
+                          'value': float(value) if value is not None else None,
+                          'unit': unit, 'trade_date': str(d)})
+        # 展示顺序：利率 → 量 → 价 → 景气
+        order = ['LPR_1Y', 'LPR_5Y', 'SHIBOR_ON', 'SHIBOR_1W', 'SHIBOR_1M',
+                 'M1_YOY', 'M2_YOY', 'SOCIAL_FINANCING', 'PMI_MFG',
+                 'PMI_NONMFG', 'CPI_YOY', 'PPI_YOY']
+        items.sort(key=lambda x: (order.index(x['code'])
+                                  if x['code'] in order else 99, x['code']))
+        return {'items': items, 'max_date': max(i['trade_date'] for i in items)}
+
+    def _option_anchor(self, as_of: str) -> Optional[Dict[str, Any]]:
+        """ETF 期权情绪锚（第三阶段-2：逐标的 PC 率/未平仓；无数据 → None）"""
+        def _query(date: str):
+            return self.db._query(
+                """
+                SELECT underlying_code, underlying_name, contract_count,
+                       put_call_ratio, oi_total, total_amount
+                FROM option_underlying_daily WHERE trade_date = %s
+                ORDER BY total_amount DESC NULLS LAST
+                """, (date,))
+        try:
+            rows = _query(as_of)
+            use_date, fallback = as_of, False
+            if not rows:
+                # 当日无统计（SSE 统计仅最新日；或当日未采）→ 回落最新数据日
+                max_row = self.db._query(
+                    'SELECT MAX(trade_date) FROM option_underlying_daily')
+                max_date = str(max_row[0][0]) if max_row and max_row[0][0] else None
+                if not max_date:
+                    return None
+                rows, use_date, fallback = _query(max_date), max_date, True
+        except Exception as e:
+            logger.warning(f'期权锚查询失败: {e}')
+            return None
+        if not rows:
+            return None
+        items = [{'underlying_code': str(r[0]),
+                  'underlying_name': r[1] or str(r[0]),
+                  'contract_count': int(r[2]) if r[2] is not None else None,
+                  'put_call_ratio': float(r[3]) if r[3] is not None else None,
+                  'oi_total': float(r[4]) if r[4] is not None else None,
+                  'total_amount': float(r[5]) if r[5] is not None else None}
+                 for r in rows]
+        return {'items': items[:6], 'trade_date': use_date,
+                'count': len(items), 'as_of': as_of,
+                'is_latest_fallback': use_date != as_of}
+
+    def _north_detail_anchor(self, as_of: str, limit: int = 10
+                             ) -> Optional[Dict[str, Any]]:
+        """北向个股持仓 Top N（第三阶段-3；披露止于 20240816）。
+
+        取 as_of 当日明细；as_of 晚于披露截止日时自动回落到**库内最新
+        数据日**并标注 data_date（禁用陈旧数据冒充当日——边界必须显式）。
+        """
+        def _top(date: str):
+            return self.db._query(
+                """
+                SELECT n.ts_code, n.hold_market_value, n.hold_ratio
+                FROM north_flow_detail_daily n
+                WHERE n.trade_date = %s
+                ORDER BY n.hold_market_value DESC NULLS LAST LIMIT %s
+                """, (date, limit))
+        try:
+            rows = _top(as_of)
+            use_date, fallback = as_of, False
+            if not rows:
+                # 当日无明细（披露止于 2024-08-16）→ 回落库内最新数据日
+                max_row = self.db._query(
+                    'SELECT MAX(trade_date) FROM north_flow_detail_daily')
+                max_date = str(max_row[0][0]) if max_row and max_row[0][0] else None
+                if not max_date:
+                    return None
+                rows, use_date, fallback = _top(max_date), max_date, True
+        except Exception as e:
+            logger.warning(f'北向明细查询失败: {e}')
+            return None
+        if not rows:
+            return None
+        # 名称回查（base_stock_info；缺失留 code）
+        codes = [str(r[0]) for r in rows]
+        name_map = self._stock_name_map(codes)
+        items = []
+        for r in rows:
+            mv, ratio = r[1], r[2]
+            items.append({
+                'ts_code': str(r[0]),
+                'name': name_map.get(str(r[0]), str(r[0])),
+                'hold_market_value_yi': (round(float(mv) / 1e8, 2)
+                                         if mv is not None else None),
+                'hold_ratio': float(ratio) if ratio is not None else None,
+            })
+        max_row2 = self.db._query(
+            'SELECT MAX(trade_date) FROM north_flow_detail_daily')
+        max_date = (str(max_row2[0][0])
+                    if max_row2 and max_row2[0][0] else use_date)
+        return {'items': items, 'data_date': use_date, 'max_date': max_date,
+                'as_of': as_of, 'is_latest_fallback': fallback}
+
+    def _stock_name_map(self, ts_codes: List[str]) -> Dict[str, str]:
+        if not ts_codes:
+            return {}
+        try:
+            rows = self.db._query(
+                'SELECT ts_code, stock_name FROM base_stock_info '
+                'WHERE ts_code = ANY(%s)', (ts_codes,))
+            return {str(r[0]): str(r[1]) for r in rows}
+        except Exception:
+            return {}
 
     @staticmethod
     def _turnover_delta(panel: pd.DataFrame, as_of: str,
@@ -497,7 +899,10 @@ class ReviewAggregator:
         else:
             metrics = sentiment_metrics(cs_today, cs_prev)
             metrics['from_table'] = False
-        metrics['cycle'] = self._sentiment_cycle(metrics)
+        metrics['cycle'] = self._sentiment_cycle(metrics, as_of=as_of)
+        metrics['cycle_trend'] = self._sentiment_cycle_trend(as_of, metrics) if as_of else None
+        metrics['ladder_gap'] = _ladder_gap(metrics.get('ladder') or {})
+        metrics['seal_dist'] = self._seal_time_dist(as_of, cs_today) if as_of else None
         metrics['percentiles'] = self._sentiment_percentiles(as_of, metrics) if as_of else None
         return AggregationResult(data=metrics)
 
@@ -580,7 +985,36 @@ class ReviewAggregator:
                 out[key] = {'value': value, 'pct': _pct(idx, value), 'n': len(hist)}
         return out
 
-    def _sentiment_cycle(self, m: Dict[str, Any]) -> Dict[str, Any]:
+    def _sentiment_quantile_calibration(self, as_of: Optional[str],
+                                        window_days: int = 250
+                                        ) -> Dict[str, Dict[str, Optional[float]]]:
+        """滚动窗口的情绪读数分位（P1-10 §4.4；报告层分位四态的基准）。
+
+        口径：sentiment_metrics_daily 最近 ``window_days`` 个交易日（不含
+        锚定日之后），对 max_streak/premium_mean/burst_rate 取 p10/p60/p90；
+        表空/查询失败 → {}（quantile_state 归兜底并标注，不硬造）。
+        """
+        if not as_of:
+            return {}
+        try:
+            rows = self.db._query(
+                """
+                SELECT max_streak, premium_mean, burst_rate
+                FROM sentiment_metrics_daily
+                WHERE trade_date < %s
+                ORDER BY trade_date DESC LIMIT %s
+                """, (as_of, window_days))
+        except Exception as e:
+            logger.warning(f'情绪分位滚动窗口读取失败: {e!r}')
+            return {}
+        if not rows:
+            return {}
+        df = pd.DataFrame(rows, columns=['max_streak', 'premium_mean',
+                                         'burst_rate'])
+        return quantile_calibration(df)
+
+    def _sentiment_cycle(self, m: Dict[str, Any],
+                         as_of: Optional[str] = None) -> Dict[str, Any]:
         """情绪周期定位（判据阈值取 config review.sentiment_rules，试用期水印）"""
         rules = self.sentiment_rules
         max_streak = m.get('max_streak') or 0
@@ -606,13 +1040,195 @@ class ReviewAggregator:
         except Exception as e:
             logger.warning(f'情绪周期判据计算失败: {e}')
             cycle, basis = '试用版判据待校准', [f'判据计算异常: {e}']
+
+        # 分位标定四态（P1-10 §4.4 并列列；规则四态保持基线不替换）
+        try:
+            q_calib = self._sentiment_quantile_calibration(as_of)
+            q_cycle, q_basis = quantile_state(m, q_calib)
+        except Exception as e:  # pragma: no cover - 分位异常不拖垮主判据
+            logger.warning(f'情绪分位标定失败: {e!r}')
+            q_calib, q_cycle, q_basis = {}, '数据不足', [f'分位计算异常: {e!r}']
+        divergence = (q_cycle in ('高潮', '冰点', '退潮')
+                      and cycle in ('高潮', '冰点', '退潮')
+                      and q_cycle != cycle)
+        return {'position': cycle, 'basis': basis,
+                'quantile_position': q_cycle, 'quantile_basis': q_basis,
+                'quantile_calibration': q_calib,
+                'quantile_divergence': divergence}
         return {'position': cycle, 'basis': basis,
                 'trial': not self.sentiment_calibrated}
 
+    def _sentiment_cycle_trend(self, as_of: Optional[str],
+                               metrics: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """情绪周期走向（四期方案 §3；vibe-astock 10 日窗口口径）：
+
+        近 10 个交易日（sentiment_metrics_daily，锚定日无表行时以当日重算值补位），
+        涨停家数/最高连板 0-1 归一 + 炸板率取反（越高越冷），三项均值为当日 score。
+        score 是窗口内相对读数，没有绝对含义；样本 <10 天标注不完整。
+        """
+        if not as_of:
+            return None
+        try:
+            rows = self.db._query(
+                """
+                SELECT trade_date, limit_up_count, burst_rate, max_streak
+                FROM sentiment_metrics_daily
+                WHERE trade_date <= %s
+                ORDER BY trade_date DESC LIMIT 10
+                """, (as_of,))
+        except Exception as e:
+            logger.warning(f'情绪周期走向历史读取失败: {e}')
+            return None
+        series = [{'date': str(r[0]), 'limit_up': r[1],
+                   'burst_rate': None if r[2] is None else float(r[2]),
+                   'max_streak': r[3]} for r in reversed(rows)]
+        if not series or series[-1]['date'] != str(as_of):
+            series.append({'date': str(as_of), 'limit_up': metrics.get('limit_up_count'),
+                           'burst_rate': metrics.get('burst_rate'),
+                           'max_streak': metrics.get('max_streak')})
+        if len(series) < 2:
+            return None
+
+        def _norm(value, values, invert):
+            vals = [v for v in values if v is not None]
+            if value is None or not vals:
+                return None
+            lo, hi = min(vals), max(vals)
+            u = 0.5 if hi <= lo else (value - lo) / (hi - lo)
+            return 1.0 - u if invert else u
+
+        for s in series:
+            comps = []
+            vals = {'limit_up': [x['limit_up'] for x in series],
+                    'max_streak': [x['max_streak'] for x in series],
+                    'burst_rate': [x['burst_rate'] for x in series]}
+            for key, invert in (('limit_up', False), ('max_streak', False),
+                                ('burst_rate', True)):
+                u = _norm(s[key], vals[key], invert)
+                if u is not None:
+                    comps.append(u)
+            s['score'] = round(sum(comps) / len(comps), 3) if comps else None
+        scores = [s['score'] for s in series if s['score'] is not None]
+        if not scores:
+            return None
+        today_score = scores[-1]
+        delta = round(today_score - scores[0], 3)
+        direction = '上行' if delta >= 0.05 else ('下行' if delta <= -0.05 else '走平')
+        lo_idx = min(range(len(scores)), key=lambda i: scores[i])
+        below = sum(1 for v in scores if v <= today_score)
+        return {'window': len(scores),
+                'complete': len(scores) >= 10,
+                'score': today_score, 'delta': delta, 'direction': direction,
+                'days_since_low': len(scores) - 1 - lo_idx,
+                'window_pct': round(100.0 * below / len(scores)),
+                'scores': [{'date': s['date'], 'score': s['score']} for s in series]}
+
+    def _seal_time_dist(self, as_of: str,
+                        cs_today: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """封板时段分布（四期方案 §3）：当日涨停股首封时间五时段 + 封板质量。
+
+        数据源 limit_seal_stats_daily（tdx 分笔口径，含炸板股）；涨停股无行时
+        覆盖率如实展示，整表无行返回 None（渲染"待补"）。
+        """
+        if cs_today.empty:
+            return None
+        up_mask = cs_today['_limit_up'].fillna(False).astype(bool)
+        up_codes = [str(c) for c in cs_today.loc[up_mask, 'ts_code']]
+        if not up_codes:
+            return None
+        try:
+            rows = self.db._query(
+                "SELECT ts_code, first_seal_time, open_count FROM limit_seal_stats_daily "
+                "WHERE trade_date = %s AND ts_code = ANY(%s)", (as_of, up_codes))
+        except Exception as e:
+            logger.warning(f'封板时段读取失败: {e}')
+            return None
+        if not rows:
+            return None
+        bounds = (('09:25-09:35', 93500), ('09:35-10:00', 100000),
+                  ('10:00-11:30', 113000), ('11:30-14:00', 140000),
+                  ('14:00-15:00', 150000))
+        buckets = {name: 0 for name, _ in bounds}
+        never_broken = late_seal = 0
+        parsed = 0
+        for row in rows:
+            if row is None or len(row) < 3:
+                continue  # 行结构异常（存根/旧数据）跳过，不硬造
+            _, first, open_count = row[0], row[1], row[2]
+            try:
+                t = int(str(first)[:6]) if first is not None else None
+            except (TypeError, ValueError):
+                t = None
+            if t is None:
+                continue
+            parsed += 1
+            for name, bound in bounds:
+                if t <= bound:
+                    buckets[name] += 1
+                    break
+            if open_count is not None and int(open_count) == 0:
+                never_broken += 1
+            if t > 140000:
+                late_seal += 1
+        if not parsed:
+            return None
+        return {'limit_up_count': len(up_codes), 'covered': len(rows), 'parsed': parsed,
+                'buckets': [{'bucket': name, 'count': buckets[name]}
+                            for name, _ in bounds],
+                'never_broken_rate': round(never_broken / parsed, 4),
+                'late_seal_rate': round(late_seal / parsed, 4)}
+
     # ------------------------------------------------------------------ 维度3
 
+    def _aggregate_verification(self, as_of: str, prev_date: Optional[str],
+                                cs_today: pd.DataFrame,
+                                metrics: Dict[str, Any]) -> AggregationResult:
+        """昨日核验（四期方案 §1）：读 review_prediction_daily 昨日载荷 → 今日截面
+        三态核验 + 候选池战绩 + 滚动战绩。昨日无预测记录（体系建立前）available=False，
+        渲染"⏳ 无昨日预期记录"。落库由 generator 完成（DataReader 只读）。"""
+        from . import verifier as _verifier
+        if not prev_date:
+            return AggregationResult(available=False, reason='无前一交易日')
+        try:
+            rows = self.db._query(
+                "SELECT payload FROM review_prediction_daily WHERE trade_date = %s",
+                (prev_date,))
+        except Exception as e:
+            return AggregationResult(available=False, reason=f'预测表读取失败: {e}',
+                                     data={'prev_date': prev_date})
+        if not rows or not rows[0][0]:
+            return AggregationResult(
+                available=False,
+                reason=f'无 {prev_date} 预测记录（核验体系 2026-10-07 起逐日积累）',
+                data={'prev_date': prev_date})
+        try:
+            payload = rows[0][0] if isinstance(rows[0][0], dict) else json.loads(rows[0][0])
+            name2code = {e.get('name'): e.get('code') for e in
+                         ((self.config.get('review_sync') or {})
+                          .get('overseas_kline_indices') or [])
+                         if e.get('name') and e.get('code')}
+            verified = _verifier.verify_predictions(payload, prev_date, cs_today,
+                                                    metrics, self.db, name2code)
+            verified['rolling'] = _verifier.rolling_stats(as_of, verified, self.db)
+            verified['sentiment_prev'] = payload.get('sentiment') or {}
+            return AggregationResult(data=verified)
+        except Exception as e:
+            logger.warning(f'昨日核验计算失败: {e}')
+            return AggregationResult(available=False, reason=f'核验计算失败: {e}',
+                                     data={'prev_date': prev_date})
+
+    def _aggregate_money_effect(self, cs_today: pd.DataFrame,
+                                cs_prev: pd.DataFrame) -> AggregationResult:
+        """赚钱效应/亏钱效应五组指标（四期方案 §2；money_effect.py 同一实现）。"""
+        try:
+            data = _money_effect.money_effect(cs_today, cs_prev)
+        except Exception as e:
+            logger.warning(f'赚钱效应聚合失败: {e}')
+            return AggregationResult(available=False, reason=f'计算失败: {e}')
+        return AggregationResult(data=data)
+
     def _aggregate_sector(self, panel: pd.DataFrame, cs_today: pd.DataFrame,
-                          as_of: str) -> AggregationResult:
+                          cs_prev: pd.DataFrame, as_of: str) -> AggregationResult:
         industry_map = self._industry_map(as_of)
         concept_map = self._concept_map(as_of)
         if not industry_map and not concept_map:
@@ -629,6 +1245,13 @@ class ReviewAggregator:
             data['industry_l2_today'] = self._industry_ranking(panel, l2_map, [as_of])
         if concept_map:
             data['limit_up_clusters'] = self._limit_up_clusters(cs_today, concept_map)
+        # 四期方案 §3：头部题材集中度 + 题材跨日事件树
+        exclude = ((self.config.get('review') or {}).get('theme_exclude_concepts')) or []
+        data['theme_concentration'] = _theme_concentration(
+            data.get('limit_up_clusters') or [], cs_today, exclude)
+        data['theme_tree'] = self._theme_tree(cs_today, cs_prev, as_of,
+                                              data.get('limit_up_clusters') or [],
+                                              concept_map, exclude)
         return AggregationResult(data=data)
 
     def _industry_map(self, as_of: str) -> Dict[str, str]:
@@ -779,11 +1402,37 @@ class ReviewAggregator:
                 s = seal_map.get(r['ts_code'])
                 r['seal_time'] = s.get('first_seal_time') if s else None
                 r['open_count'] = s.get('open_count') if s else None
+        # G 涨停归因（P1-11）：涨停明细加"归因"列——与链 limit_up_attribution
+        # 模块共用 attribution_rules + 同一公告窗口装配（原则 P6）
+        self._enrich_attribution(data['limit_up'], as_of)
         csv_path = self._csv_path(as_of)
         if csv_path and csv_path.exists():
             data['csv_path'] = str(csv_path)
             data['cross_check'] = self._cross_check(cs_today, csv_path)
         return AggregationResult(data=data)
+
+    def _enrich_attribution(self, rows: List[Dict[str, Any]], as_of: str) -> None:
+        """涨停明细归因列（P1-11）：链 limit_up_attribution 模块的同一实现两入口。
+
+        公告窗口复用 env_assembly._announcement_map（同一装配）；谓词共用
+        attribution_rules.pick_attribution；覆盖断代附注一致。
+        """
+        from ..analysis.attribution_rules import coverage_note, pick_attribution
+        from ..analysis.env_assembly import _announcement_map
+        window = int(((self.config.get('review') or {}).get('attribution') or {})
+                     .get('ann_window_days') or 3)
+        try:
+            ann_map = _announcement_map(self.reader, as_of, window)
+        except Exception as e:
+            logger.warning(f'涨停归因公告窗口读取失败: {e!r}')
+            for r in rows:
+                r['attribution'] = None
+            return
+        for r in rows:
+            label, _, _ = pick_attribution(ann_map.get(r['ts_code']) or [])
+            if coverage_note(as_of):
+                label += '(公告覆盖不全)'
+            r['attribution'] = label
 
     def _lhb_codes_of_day(self, as_of: str) -> set:
         """当日龙虎榜上榜代码集（D2 交叉标记；表空返回空集）"""
@@ -1006,6 +1655,154 @@ class ReviewAggregator:
         return AggregationResult(data={'counts': counts, 'samples': samples,
                                        'total': len(rows)})
 
+    def _aggregate_indicators(self, as_of: str) -> AggregationResult:
+        """技术指标状态（P0-1 §3.1.7）：133d 面板复算七模块 + 交叉榜。
+
+        与链同一实现两入口（indicator_panel.compute_indicator_states 调同一批
+        modules），对拍见 test_review_indicator_parity.py（链 CSV vs 本面板）。
+        失败/空面板 → available=False（报告渲染「⏳ 待补」，不阻塞其他维度）。
+        """
+        from .indicator_panel import (
+            INDICATOR_WINDOW_DAYS, compute_indicator_states,
+            load_indicator_panel, summarize_indicator_states,
+        )
+        try:
+            start = self.reader.nth_trading_day_back(as_of, INDICATOR_WINDOW_DAYS - 1)
+            if start is None:
+                return AggregationResult(
+                    available=False,
+                    reason=f'交易日历不足 {INDICATOR_WINDOW_DAYS} 日，无法满足指标 warmup')
+            panel = load_indicator_panel(self.reader, as_of, start)
+            if panel.empty:
+                return AggregationResult(available=False, reason='指标面板窗口内无日K数据')
+            states = compute_indicator_states(panel, as_of)
+        except Exception as e:
+            logger.warning(f'指标面板复算失败: {e!r}')
+            return AggregationResult(available=False, reason=f'指标面板复算失败: {e!r}')
+        if states.empty:
+            return AggregationResult(available=False, reason='指标面板为空')
+        data = summarize_indicator_states(states, self.volume_surge_min, self.top_n)
+        data['window_start'] = start
+        parity = self._indicator_parity(states, as_of)
+        if parity is not None:
+            data['parity'] = parity
+        return AggregationResult(data=data)
+
+    #: 指标对拍列（报告层面板 vs 链 CSV，同一实现两入口的运行时校验）
+    _INDICATOR_PARITY_COLUMNS = ['MACD状态', 'KDJ状态', 'RSI状态', 'BOLL位置%',
+                                 'ATR波动%', 'OBV趋势', '均线排列']
+
+    def _indicator_parity(self, states: pd.DataFrame,
+                          as_of: str) -> Optional[Dict[str, Any]]:
+        """链 CSV 指标列 vs 报告层面板复算（逐股逐值）；CSV 未跑/无列 → None。"""
+        csv_path = self._csv_path(as_of)
+        if csv_path is None:
+            return None
+        try:
+            csv_df = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
+        except Exception as e:
+            logger.warning(f'指标对拍 CSV 读取失败: {e!r}')
+            return None
+        cols = [c for c in self._INDICATOR_PARITY_COLUMNS if c in csv_df.columns]
+        if not cols or '股票代码' not in csv_df.columns:
+            return None
+        csv_idx = csv_df.set_index(csv_df['股票代码'].astype(str).str.zfill(6))
+        mismatches: List[Dict[str, Any]] = []
+        compared = 0
+        for _, row in states.iterrows():
+            code = str(row['ts_code']).split('.')[-1].zfill(6)
+            if code not in csv_idx.index:
+                continue
+            csv_row = csv_idx.loc[code]
+            if isinstance(csv_row, pd.DataFrame):  # 代码重复时取首行
+                csv_row = csv_row.iloc[0]
+            for col in cols:
+                mine, theirs = row[col], csv_row[col]
+                if _values_match(mine, theirs):
+                    compared += 1
+                    continue
+                mismatches.append({'code': code, 'column': col,
+                                   'panel': str(mine), 'csv': str(theirs)})
+                compared += 1
+        return {'ok': not mismatches, 'compared': compared,
+                'columns': len(cols), 'mismatches': mismatches[:20],
+                'mismatch_count': len(mismatches)}
+
+    def _aggregate_valuation_digest(self, as_of: str) -> AggregationResult:
+        """个股估值摘要聚合（P0-4 §3.3.3）：分位/消化年数/年化 PE 分布 + 判读。
+
+        与链 valuation_digest 模块**同一 assemble_valuation 入口**（原则 P6）；
+        分布为全市场截面，消化年数取 P25/P50/P75 + 极值点名。
+        """
+        from ..analysis.env_assembly import assemble_valuation
+        try:
+            valuation_map = assemble_valuation(self.reader, as_of,
+                                               _ConfigShim(self.config))
+        except Exception as e:
+            logger.warning(f'估值摘要装配失败: {e!r}')
+            return AggregationResult(available=False,
+                                     reason=f'估值摘要装配失败: {e!r}')
+        if not valuation_map:
+            return AggregationResult(available=False,
+                                     reason='stock_valuation_daily 当日无行')
+
+        def _quant(vals, qs=(0.25, 0.5, 0.75)):
+            s = pd.Series([v for v in vals if v is not None], dtype=float)
+            if s.empty:
+                return {'sample': 0}
+            return {'sample': int(len(s)),
+                    **{f'p{int(q * 100)}': _f(s.quantile(q)) for q in qs}}
+
+        pe_pct = _quant([d.pe_percentile for d in valuation_map.values()])
+        digest_years = _quant([d.digestion_years for d in valuation_map.values()])
+        annualized = _quant([d.annualized_pe for d in valuation_map.values()
+                             if d.annualized_pe is not None and d.annualized_pe > 0])
+        # 极值点名（消化年数最小 5 只——消化最快；最大 5 只——消化最慢）
+        ranked = sorted(
+            [d for d in valuation_map.values() if d.digestion_years is not None],
+            key=lambda d: d.digestion_years)
+        fastest = [(d.pe_ttm and round(d.pe_ttm, 1), round(d.digestion_years, 2))
+                   for d in ranked[:5]]
+        slowest = [(d.pe_ttm and round(d.pe_ttm, 1), round(d.digestion_years, 2))
+                   for d in ranked[-5:]]
+        return AggregationResult(data={
+            'as_of': as_of,
+            'stocks': len(valuation_map),
+            'pe_percentile': pe_pct,
+            'digestion_years': digest_years,
+            'annualized_pe': annualized,
+            'fastest': fastest, 'slowest': slowest,
+            'cagr_available': sum(1 for d in valuation_map.values()
+                                  if d.cagr_pct is not None),
+        })
+
+    def _aggregate_news(self, as_of: str) -> AggregationResult:
+        """消息催化（四期方案 §4）：news_telegraph 当日要闻 + 概念关键词命中。
+
+        口径：要闻 importance 优先、时间倒序 top_n；概念关联 = 聚集前列概念名
+        在当日要闻标题/内容中出现即计数（子串匹配，噪声如实注明）。
+        **新闻归因是市场叙事，不是核验过的因果。**
+        """
+        try:
+            rows = self.db._query(
+                """
+                SELECT publish_time, title, content, subject, importance
+                FROM news_telegraph
+                WHERE trade_date = %s
+                ORDER BY importance DESC, publish_time DESC
+                LIMIT %s
+                """, (as_of, self.top_n))
+        except Exception as e:
+            logger.warning(f'市场要闻读取失败: {e}')
+            return AggregationResult(available=False, reason='news_telegraph 无数据（未采集）')
+        if not rows:
+            return AggregationResult(available=False,
+                                     reason='news_telegraph 当日无行（未采集或当日无快讯）')
+        items = [{'time': str(r[0] or ''), 'title': str(r[1] or ''),
+                  'content': str(r[2] or ''), 'subject': r[3],
+                  'importance': int(r[4] or 0)} for r in rows]
+        return AggregationResult(data={'items': items})
+
     def _next_n_dates(self, as_of: str, n: int) -> List[str]:
         """as_of 之后 n 个交易日（升序，D4 解禁窗口）"""
         rows = self.db._query(
@@ -1096,14 +1893,127 @@ class ReviewAggregator:
 
     # ------------------------------------------------------------------ 转天候选
 
+    def _candidate_veto_map(self, as_of: str,
+                            rules: Dict[str, Any]) -> Dict[str, List[str]]:
+        """候选 VETO 预查（P1-7 §4.6 B 事件/基本面两项；技术/资金项在行内算）。
+
+        两路查询：① base_financial_report 最新报告期 net_profit_yoy（暴雷
+        阈值）；② announcement_daily 前 3 个自然日 ann_type='增减持'（大股东
+        减持）。查询失败 → 对应项不过滤（不硬造否决）。
+        """
+        profit_map: Dict[str, float] = {}
+        try:
+            rows = self.db._query(
+                """
+                SELECT DISTINCT ON (ts_code) ts_code, net_profit_yoy
+                FROM base_financial_report
+                WHERE net_profit_yoy IS NOT NULL
+                ORDER BY ts_code, stat_date DESC
+                """)
+            profit_map = {str(t): float(v) for t, v in rows if v is not None}
+        except Exception as e:
+            logger.warning(f'VETO 业绩同比读取失败: {e}')
+
+        reduction_codes: set = set()
+        try:
+            from datetime import datetime, timedelta
+            end = datetime.strptime(str(as_of), '%Y%m%d')
+            start = (end - timedelta(days=2)).strftime('%Y%m%d')
+            rows = self.db._query(
+                "SELECT DISTINCT ts_code FROM announcement_daily "
+                "WHERE ann_type = '增减持' AND ann_date BETWEEN %s AND %s",
+                (start, str(as_of)))
+            reduction_codes = {str(r[0]) for r in rows}
+        except Exception as e:
+            logger.warning(f'VETO 减持公告读取失败: {e}')
+
+        out: Dict[str, List[str]] = {}
+        for ts_code, yoy in profit_map.items():
+            reasons = veto_reasons(profit_yoy=yoy, rules=rules)
+            if ts_code in reduction_codes:
+                reasons.append('大股东减持')
+            if reasons:
+                out[ts_code] = reasons
+        for ts_code in reduction_codes - set(profit_map):
+            out[ts_code] = ['大股东减持']
+        return out
+
+    def _index_adx_gate(self, as_of: str) -> Dict[str, Any]:
+        """指数 ADX 闸门（P1-7 §4.6 E）：档位控制候选开放度。
+
+        口径：默认上证指数（config review.tomorrow_plan.adx_index 可覆盖），
+        ADX 走 indicators.adx（通达信 SUM+MA 口径），MA20 简单平均；
+        full/half/closed 判定在 candidate_rules.adx_gate。库内无指数高低价或
+        数据不足 → gate='closed' 且 reason 标注（禁默认开放）。
+        """
+        from ..analysis.indicators import adx as _adx_fn
+        from ..analysis.indicators import MA as _ma_fn
+        from ..analysis.candidate_rules import adx_gate as _gate_fn
+        tp_cfg = ((self.config.get('review') or {}).get('tomorrow_plan') or {})
+        ts_code = str(tp_cfg.get('adx_index') or 'sh.000001')
+        try:
+            rows = self.db._query(
+                """
+                SELECT trade_date, high, low, close FROM trade_index_info
+                WHERE ts_code = %s AND trade_date <= %s
+                ORDER BY trade_date DESC LIMIT 80
+                """, (ts_code, as_of))
+        except Exception as e:
+            logger.warning(f'指数 ADX 读取失败: {e!r}')
+            return {'gate': 'closed', 'reason': f'指数行情读取失败: {e!r}'}
+        if len(rows) < 30:
+            return {'gate': 'closed',
+                    'reason': f'指数高低价数据不足（{len(rows)} 行 < 30）'}
+        df = pd.DataFrame(reversed(rows),
+                          columns=['trade_date', 'high', 'low', 'close'])
+        df = df.sort_values('trade_date').reset_index(drop=True)
+        try:
+            _, _, adx_s = _adx_fn(pd.to_numeric(df['high']),
+                                  pd.to_numeric(df['low']),
+                                  pd.to_numeric(df['close']))
+            ma20 = _ma_fn(pd.to_numeric(df['close']), 20)
+        except Exception as e:  # pragma: no cover - 指标异常兜底
+            logger.warning(f'指数 ADX 计算失败: {e!r}')
+            return {'gate': 'closed', 'reason': f'ADX 计算失败: {e!r}'}
+        adx_now = adx_s.iloc[-1]
+        adx_prev = adx_s.iloc[-2] if len(adx_s) >= 2 else None
+        close_now = float(pd.to_numeric(df['close']).iloc[-1])
+        ma20_now = ma20.iloc[-1]
+        if pd.isna(adx_now) or pd.isna(ma20_now):
+            return {'gate': 'closed', 'reason': 'ADX/MA20 warmup 不足'}
+        rising = bool(adx_prev is not None and not pd.isna(adx_prev)
+                      and float(adx_now) > float(adx_prev))
+        gate = _gate_fn(float(adx_now), rising, close_now, float(ma20_now))
+        # 弱档判定（P1-10 §4.4）：ADX 闸门 closed，或简化规则「收盘<MA60 且
+        # MA60 下行」——两口径取或（任一弱势即不打板）
+        close_s = pd.to_numeric(df['close'], errors='coerce')
+        ma60 = close_s.rolling(60).mean()
+        ma60_now = ma60.iloc[-1]
+        ma60_prev = ma60.iloc[-2] if len(ma60) >= 2 else None
+        ma60_weak = bool(pd.notna(ma60_now) and ma60_prev is not None
+                         and not pd.isna(ma60_prev)
+                         and close_now < float(ma60_now)
+                         and float(ma60_now) < float(ma60_prev))
+        market_weak = (gate == 'closed') or ma60_weak
+        return {'gate': gate, 'index': ts_code,
+                'adx': round(float(adx_now), 2), 'adx_rising': rising,
+                'close': close_now, 'ma20': round(float(ma20_now), 2),
+                'ma60': round(float(ma60_now), 2) if pd.notna(ma60_now) else None,
+                'market_weak': market_weak,
+                'as_of': str(df['trade_date'].iloc[-1])}
+
     def _build_candidates(self, cs_today: pd.DataFrame, as_of: str,
                           clusters: List[Dict[str, Any]],
                           seal_map: Dict[str, Dict[str, Any]],
-                          institution: List[Dict[str, Any]]) -> Dict[str, Any]:
+                          institution: List[Dict[str, Any]],
+                          top3_members: Optional[set] = None) -> Dict[str, Any]:
         """转天买入候选池（全量，谓词 candidate_rules 与链模块共用）。
 
-        每类行带链同款理由串 label（如「7板/开板0次」「首板/创新药」），
-        报告展示 top_n 截断、链 CSV 全量——同规则同数据则同集同序。
+        每类行带链同款理由串 label（如「7板/开板0次」「首板/创新药」）与
+        **多维证据标记 evidence**（资金=大单净流入>0 / 机构=龙虎榜机构净买 /
+        聚集=概念命中聚集前列 / 板块=净流入Top3行业成分 / 放量=量比≥2，
+        量价资金 V1.1 2026-10-07——解决"候选多而无优先级"问题），
+        报告展示按证据强度降序截断 top_n、链 CSV 全量（链无证据概念，顺序不约束）。
         去重优先级 R1 > R2 > R3 > R4；库表缺失时对应池为空（不硬造）。
         """
         rules = dict(BUY_RULES)
@@ -1116,6 +2026,32 @@ class ReviewAggregator:
 
         top_concepts = [str(c['concept']) for c in (clusters or [])[:3]]
         concept_map = self._concept_map(as_of)
+        # 当日大单净额（候选资金确认列；异动子集口径，无行 None）
+        try:
+            mf_rows = self.db._query(
+                "SELECT ts_code, big_net_amt FROM money_flow_daily "
+                "WHERE trade_date = %s AND big_net_amt IS NOT NULL", (as_of,))
+            big_net_map = {str(t): float(n) for t, n in mf_rows}
+        except Exception as e:
+            logger.warning(f'候选资金确认读取失败: {e}')
+            big_net_map = {}
+
+        # 聚集家数（P1-7 R2 聚集强度输入；clusters 已是当日聚集前列）
+        cluster_counts = {str(c['concept']): int(c['count'])
+                          for c in (clusters or [])}
+
+        # 指数 ADX 闸门 + 弱档判定（P1-7 E / P1-10）：前置计算，R1 谓词与
+        # 报告层开放度共用（一次计算两消费点）
+        adx_info = self._index_adx_gate(as_of)
+        market_weak = bool(adx_info.get('market_weak'))
+
+        # VETO 输入预查（P1-7 §4.6 B）：最新报告期净利同比 + 窗口内减持公告
+        veto_map = self._candidate_veto_map(as_of, rules)
+
+        def _cluster_hit(ts_code: str, concepts: Optional[List[str]] = None) -> Optional[int]:
+            cs = concepts if concepts is not None else (concept_map.get(ts_code) or [])
+            hits = [cluster_counts[c] for c in cs if c in cluster_counts]
+            return max(hits) if hits else None
 
         def _seal_fields(ts_code: str):
             s = seal_map.get(ts_code)
@@ -1123,22 +2059,53 @@ class ReviewAggregator:
                     s.get('first_seal_time') if s else None)
 
         used: set = set()
+        inst_codes = {str(r.get('ts_code') or '') for r in (institution or [])
+                      if (r.get('net') or 0) > 0}
+        top3_members = set(top3_members or set())
+
+        def _evidence(ts_code: str, big_net: Optional[float],
+                      concepts: List[str], volume_surge: Optional[float]) -> tuple:
+            """五维证据标记（程序化确定性；报告展示与精选依据）"""
+            ev = []
+            if big_net is not None and big_net > 0:
+                ev.append('资金')
+            if ts_code in inst_codes:
+                ev.append('机构')
+            if concepts and top_concepts and (set(concepts) & set(top_concepts)):
+                ev.append('聚集')
+            if ts_code in top3_members:
+                ev.append('板块')
+            if volume_surge is not None and float(volume_surge) >= 2.0:
+                ev.append('放量')
+            return ev
 
         # R1 梯队接力（全量涨停截面）
         lu = cs_today[cs_today['_limit_up']]
         r1_rows = []
         for _, r in lu.iterrows():
-            oc, seal_time = _seal_fields(str(r['ts_code']))
+            ts_code = str(r['ts_code'])
+            oc, seal_time = _seal_fields(ts_code)
             streak = int(r['_streak']) if pd.notna(r.get('_streak')) else 0
-            if not is_r1(streak, bool(r.get('is_st')), oc, rules):
+            if not is_r1(streak, bool(r.get('is_st')), oc, rules,
+                         market_weak=market_weak):
                 continue
+            vs = (_f(r.get('_volume_surge'))
+                  if pd.notna(r.get('_volume_surge')) else None)
+            big_net = big_net_map.get(ts_code)
+            ev = _evidence(ts_code, big_net,
+                           concept_map.get(ts_code) or [], vs)
+            tier = r1_tier(streak, rules) or ''
             r1_rows.append({
-                'ts_code': str(r['ts_code']), 'code': str(r['stock_code']),
+                'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
                 'open_count': oc, 'seal_time': seal_time,
                 'amount': _f(r.get('amount')),
-                'label': (f'{streak}板/封板数据缺失' if oc is None
-                          else f'{streak}板/开板{int(oc)}次')})
+                'big_net': big_net,
+                'evidence': ev, 'evidence_count': len(ev),
+                'score': _cand_score(big_net, vs, _cluster_hit(ts_code)),
+                'veto': veto_map.get(ts_code) or [],
+                'label': (f'{tier}/{streak}板/封板数据缺失' if oc is None
+                          else f'{tier}/{streak}板/开板{int(oc)}次')})
         r1_rows.sort(key=lambda x: (-x['streak'], -(x['amount'] or 0)))
         for row in r1_rows:
             used.add(row['ts_code'])
@@ -1152,15 +2119,27 @@ class ReviewAggregator:
                 continue
             streak = int(r['_streak']) if pd.notna(r.get('_streak')) else 0
             concepts = concept_map.get(ts_code) or []
-            if not is_r2(streak, bool(r.get('is_st')), concepts, top_concepts, rules):
+            cc = max([cluster_counts.get(c, 0) for c in concepts
+                      if c in set(top_concepts)] or [None]) if concepts else None
+            if not is_r2(streak, bool(r.get('is_st')), concepts, top_concepts, rules,
+                         big_net=big_net_map.get(ts_code), cluster_count=cc):
                 continue
             hit = next(c for c in top_concepts if c in set(concepts))
+            vs = (_f(r.get('_volume_surge'))
+                  if pd.notna(r.get('_volume_surge')) else None)
+            big_net = big_net_map.get(ts_code)
+            ev = _evidence(ts_code, big_net, concepts, vs)
             r2_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
                 'concepts': concepts, 'hit_concept': hit,
+                'cluster_count': cc,
                 'amount': _f(r.get('amount')),
-                'label': f'首板/{hit}'})
+                'big_net': big_net,
+                'evidence': ev, 'evidence_count': len(ev),
+                'score': _cand_score(big_net, vs, cc),
+                'veto': veto_map.get(ts_code) or [],
+                'label': f'首板/{hit}' + (f'(聚集{cc}家)' if cc is not None else '')})
         r2_rows.sort(key=lambda x: -(x['amount'] or 0))
         used.update(r['ts_code'] for r in r2_rows)
         out['R2'] = r2_rows
@@ -1175,13 +2154,33 @@ class ReviewAggregator:
             volume_surge = (_f(r.get('_volume_surge'))
                             if pd.notna(r.get('_volume_surge')) else None)
             change_rate = _f(r.get('change_rate'))
+            big_net = big_net_map.get(ts_code)
+            # 反高开低走输入（P1-7 A）：开盘涨幅 + 收盘<开盘；缺失不过滤
+            open_gain = None
+            close_lt_open = False
+            try:
+                o_v, pc_v, c_v = (float(r.get('open')), float(r.get('preclose')),
+                                  float(r.get('close')))
+                if pc_v > 0:
+                    open_gain = (o_v - pc_v) / pc_v * 100.0
+                    close_lt_open = c_v < o_v
+            except (TypeError, ValueError):
+                open_gain, close_lt_open = None, False
             if not is_r3(True, bool(r.get('is_st')), volume_surge,
-                         change_rate, rules):
+                         change_rate, rules, big_net=big_net,
+                         open_gain=open_gain, close_lt_open=close_lt_open):
                 continue
+            ev = _evidence(ts_code, big_net,
+                           concept_map.get(ts_code) or [], volume_surge)
             r3_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'amount': _f(r.get('amount')),
                 'change_rate': change_rate, 'volume_surge': volume_surge,
+                'big_net': big_net,
+                'evidence': ev, 'evidence_count': len(ev),
+                'score': _cand_score(big_net, volume_surge,
+                                     _cluster_hit(ts_code)),
+                'veto': veto_map.get(ts_code) or [],
                 'label': f'新高/{change_rate:+.1f}%/{volume_surge:.1f}x'})
         r3_rows.sort(key=lambda x: -(x['amount'] or 0))
         used.update(r['ts_code'] for r in r3_rows)
@@ -1195,11 +2194,33 @@ class ReviewAggregator:
             net = r.get('net')
             if not is_r4(net, 'ST' in name) or ts_code in used:
                 continue
+            ev = ['机构']
+            if ts_code in top3_members:
+                ev.append('板块')
             r4_rows.append({
                 'ts_code': ts_code, 'code': ts_code.split('.')[-1],
                 'name': name or '—', 'net': _f(net),
+                'evidence': ev, 'evidence_count': len(ev),
+                'score': _cand_score(net, None, None),
+                'veto': veto_map.get(ts_code) or [],
                 'label': f'机构净买{net / 1e8:+.2f}亿'})
         out['R4'] = r4_rows
+
+        # VETO 分流（P1-7 §4.6 B）：命中一票否决的候选移出主池、记入 vetoed
+        # （报告层点名「出池股及原因」——禁静默缩池）
+        vetoed: List[Dict[str, Any]] = []
+        for ctype in ('R1', 'R2', 'R3', 'R4'):
+            kept, dropped = [], []
+            for row in out[ctype]:
+                (dropped if row.get('veto') else kept).append(row)
+            out[ctype] = kept
+            for row in dropped:
+                vetoed.append({'type': ctype, 'code': row.get('code'),
+                               'name': row.get('name'),
+                               'reasons': row.get('veto')})
+        out['vetoed'] = vetoed
+        out['vetoed_count'] = len(vetoed)
+        out['adx_gate'] = adx_info
         return out
 
     # ------------------------------------------------------------------ 维度5
@@ -1314,6 +2335,109 @@ class ReviewAggregator:
 
 
 # ------------------------------------------------------------------ 工具
+
+
+    def _theme_tree(self, cs_today: pd.DataFrame, cs_prev: pd.DataFrame, as_of: str,
+                    clusters: List[Dict[str, Any]], concept_map: Dict[str, List[str]],
+                    exclude: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """题材跨日事件树（四期方案 §3；vibe-astock theme_tree 口径）：
+
+        对涨停聚集前 3 概念（黑名单剔除后）：昨日题材涨停家数→今日家数（扩散/收敛）、
+        昨日题材涨停股今日均值/翻红率/晋级数、今日题材内炸板数与最高板、题材内首封
+        时间范围（首末拉开=发酵判读）。概念成分为 sina_gn 时点匹配口径。
+        """
+        blacklist = [str(x) for x in (exclude or [])]
+        top = [c['concept'] for c in (clusters or [])[:3]
+               if not any(b in c['concept'] for b in blacklist)]
+        if not top or cs_today.empty:
+            return []
+        members: Dict[str, set] = {}
+        for ts_code, concepts in concept_map.items():
+            for c in concepts:
+                if c in top:
+                    members.setdefault(c, set()).add(ts_code)
+
+        change = pd.to_numeric(cs_today['change_rate'], errors='coerce')
+        today: Dict[str, Dict[str, Any]] = {}
+        lu = cs_today['_limit_up'].fillna(False).astype(bool)
+        bu = cs_today['_burst'].fillna(False).astype(bool)
+        for ts_code, chg, up, burst, streak in zip(cs_today['ts_code'], change, lu, bu,
+                                                   cs_today['_streak']):
+            today[str(ts_code)] = {
+                'chg': None if pd.isna(chg) else float(chg), 'up': bool(up),
+                'burst': bool(burst),
+                'streak': int(streak) if pd.notna(streak) else 0}
+        prev_up: set = set()
+        if not cs_prev.empty:
+            pu = cs_prev[cs_prev['_limit_up'].fillna(False).astype(bool)]
+            prev_up = {str(c) for c in pu['ts_code']}
+        seal_map = self._seal_map_of_day(as_of)
+
+        rows: List[Dict[str, Any]] = []
+        for concept in top:
+            mem = members.get(concept) or set()
+            today_up = [ts for ts in mem if today.get(ts, {}).get('up')]
+            prev_up_mem = [ts for ts in mem if ts in prev_up]
+            chgs = [today[ts]['chg'] for ts in prev_up_mem
+                    if today.get(ts) and today[ts]['chg'] is not None]
+            relimit = sum(1 for ts in prev_up_mem if today.get(ts, {}).get('up'))
+            burst_n = sum(1 for ts in mem if today.get(ts, {}).get('burst'))
+            max_streak = max((today[ts]['streak'] for ts in today_up), default=0)
+            seals = sorted(int(str(seal_map[ts]['first_seal_time'])[:6])
+                           for ts in today_up
+                           if seal_map.get(ts) and seal_map[ts].get('first_seal_time')
+                           and str(seal_map[ts]['first_seal_time'])[:6].isdigit())
+            if len(today_up) > len(prev_up_mem):
+                flow = '扩散'
+            elif len(today_up) < len(prev_up_mem):
+                flow = '收敛'
+            else:
+                flow = '持平' if prev_up_mem else '—'
+            rows.append({
+                'concept': concept, 'prev_up': len(prev_up_mem),
+                'today_up': len(today_up), 'flow': flow,
+                'prev_mean': round(sum(chgs) / len(chgs), 2) if chgs else None,
+                'red_rate': round(sum(1 for c in chgs if c > 0) / len(chgs), 4)
+                if chgs else None,
+                'relimit': relimit, 'burst': burst_n, 'max_streak': max_streak,
+                'seal_first': _fmt_hhmm(seals[0]) if seals else None,
+                'seal_last': _fmt_hhmm(seals[-1]) if seals else None,
+            })
+        return rows
+
+
+def _ladder_gap(ladder: Dict[int, int]) -> Optional[Dict[str, Any]]:
+    """梯队断层（四期方案 §3；vibe-astock ladder_gap）：最高板与最低板间缺失档位。"""
+    heights = sorted(int(h) for h in (ladder or {}) if int(h) >= 2)
+    if not heights:
+        return None
+    lo, hi = heights[0], heights[-1]
+    gaps = [h for h in range(lo, hi + 1) if h not in heights]
+    return {'min': lo, 'max': hi, 'gaps': gaps}
+
+
+def _theme_concentration(clusters: List[Dict[str, Any]], cs_today: pd.DataFrame,
+                         exclude: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """头部题材集中度（四期方案 §3）：第一题材涨停数 ÷ 全市场涨停数（越高越一枝独秀）。"""
+    if not clusters or cs_today.empty:
+        return None
+    blacklist = [str(x) for x in (exclude or [])]
+    first = next((c for c in clusters
+                  if not any(b in c['concept'] for b in blacklist)), None)
+    if not first:
+        return None
+    mask = cs_today['_limit_up'].fillna(False).astype(bool)
+    total = int(mask.sum())
+    if not total:
+        return None
+    return {'concept': first['concept'], 'count': first['count'],
+            'rate': round(first['count'] / total, 4)}
+
+
+def _fmt_hhmm(t: int) -> str:
+    """整型 HHMMSS 时间 92500 → '09:25'。"""
+    return f'{t // 10000:02d}:{t // 100 % 100:02d}'
+
 
 def cs_prev_empty() -> pd.DataFrame:
     return pd.DataFrame()

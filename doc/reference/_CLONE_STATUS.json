@@ -1,0 +1,1025 @@
+{
+  "total": 127,
+  "ok": 0,
+  "skip": 127,
+  "fail": 0,
+  "pending": 0,
+  "results": [
+    {
+      "name": "HKUDS__Vibe-Trading",
+      "status": "skip",
+      "url_used": "https://github.com/HKUDS/Vibe-Trading.git",
+      "https": "https://github.com/HKUDS/Vibe-Trading.git",
+      "ssh": "git@github.com:HKUDS/Vibe-Trading.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "hsliuping__TradingAgents-CN",
+      "status": "skip",
+      "url_used": "https://github.com/hsliuping/TradingAgents-CN.git",
+      "https": "https://github.com/hsliuping/TradingAgents-CN.git",
+      "ssh": "git@github.com:hsliuping/TradingAgents-CN.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "HKUDS__AI-Trader",
+      "status": "skip",
+      "url_used": "https://github.com/HKUDS/AI-Trader.git",
+      "https": "https://github.com/HKUDS/AI-Trader.git",
+      "ssh": "git@github.com:HKUDS/AI-Trader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "AI4Finance-Foundation__FinGPT",
+      "status": "skip",
+      "url_used": "https://github.com/AI4Finance-Foundation/FinGPT.git",
+      "https": "https://github.com/AI4Finance-Foundation/FinGPT.git",
+      "ssh": "git@github.com:AI4Finance-Foundation/FinGPT.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "xbtlin__ai-berkshire",
+      "status": "skip",
+      "url_used": "https://github.com/xbtlin/ai-berkshire.git",
+      "https": "https://github.com/xbtlin/ai-berkshire.git",
+      "ssh": "git@github.com:xbtlin/ai-berkshire.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "OpenByteInc__QuantDinger",
+      "status": "skip",
+      "url_used": "https://github.com/OpenByteInc/QuantDinger.git",
+      "https": "https://github.com/OpenByteInc/QuantDinger.git",
+      "ssh": "git@github.com:OpenByteInc/QuantDinger.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ValueCell-ai__valuecell",
+      "status": "skip",
+      "url_used": "https://github.com/ValueCell-ai/valuecell.git",
+      "https": "https://github.com/ValueCell-ai/valuecell.git",
+      "ssh": "git@github.com:ValueCell-ai/valuecell.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "AI4Finance-Foundation__FinRobot",
+      "status": "skip",
+      "url_used": "https://github.com/AI4Finance-Foundation/FinRobot.git",
+      "https": "https://github.com/AI4Finance-Foundation/FinRobot.git",
+      "ssh": "git@github.com:AI4Finance-Foundation/FinRobot.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "simonlin1212__TradingAgents-astock",
+      "status": "skip",
+      "url_used": "https://github.com/simonlin1212/TradingAgents-astock.git",
+      "https": "https://github.com/simonlin1212/TradingAgents-astock.git",
+      "ssh": "git@github.com:simonlin1212/TradingAgents-astock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "oficcejo__aiagents-stock",
+      "status": "skip",
+      "url_used": "https://github.com/oficcejo/aiagents-stock.git",
+      "https": "https://github.com/oficcejo/aiagents-stock.git",
+      "ssh": "git@github.com:oficcejo/aiagents-stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "virattt__ai-financial-agent",
+      "status": "skip",
+      "url_used": "https://github.com/virattt/ai-financial-agent.git",
+      "https": "https://github.com/virattt/ai-financial-agent.git",
+      "ssh": "git@github.com:virattt/ai-financial-agent.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ginlix-ai__LangAlpha",
+      "status": "skip",
+      "url_used": "https://github.com/ginlix-ai/LangAlpha.git",
+      "https": "https://github.com/ginlix-ai/LangAlpha.git",
+      "ssh": "git@github.com:ginlix-ai/LangAlpha.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "KylinMountain__TradingAgents-AShare",
+      "status": "skip",
+      "url_used": "https://github.com/KylinMountain/TradingAgents-AShare.git",
+      "https": "https://github.com/KylinMountain/TradingAgents-AShare.git",
+      "ssh": "git@github.com:KylinMountain/TradingAgents-AShare.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "YoungCan-Wang__WyckoffTradingAgent",
+      "status": "skip",
+      "url_used": "https://github.com/YoungCan-Wang/WyckoffTradingAgent.git",
+      "https": "https://github.com/YoungCan-Wang/WyckoffTradingAgent.git",
+      "ssh": "git@github.com:YoungCan-Wang/WyckoffTradingAgent.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "jason8745__llm-agent-trader",
+      "status": "skip",
+      "url_used": "https://github.com/jason8745/llm-agent-trader.git",
+      "https": "https://github.com/jason8745/llm-agent-trader.git",
+      "ssh": "git@github.com:jason8745/llm-agent-trader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "x-pai__AlphaBot",
+      "status": "skip",
+      "url_used": "https://github.com/x-pai/AlphaBot.git",
+      "https": "https://github.com/x-pai/AlphaBot.git",
+      "ssh": "git@github.com:x-pai/AlphaBot.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "FeiCoder__BreadFree-Simu",
+      "status": "skip",
+      "url_used": "https://github.com/FeiCoder/BreadFree-Simu.git",
+      "https": "https://github.com/FeiCoder/BreadFree-Simu.git",
+      "ssh": "git@github.com:FeiCoder/BreadFree-Simu.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ArvinLovegood__go-stock",
+      "status": "skip",
+      "url_used": "https://github.com/ArvinLovegood/go-stock.git",
+      "https": "https://github.com/ArvinLovegood/go-stock.git",
+      "ssh": "git@github.com:ArvinLovegood/go-stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shy3130__tick-stock-panel",
+      "status": "skip",
+      "url_used": "https://github.com/shy3130/tick-stock-panel.git",
+      "https": "https://github.com/shy3130/tick-stock-panel.git",
+      "ssh": "git@github.com:shy3130/tick-stock-panel.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "jundizhou__easy-stock",
+      "status": "skip",
+      "url_used": "https://github.com/jundizhou/easy-stock.git",
+      "https": "https://github.com/jundizhou/easy-stock.git",
+      "ssh": "git@github.com:jundizhou/easy-stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "simonlin1212__Vibe-Research",
+      "status": "skip",
+      "url_used": "https://github.com/simonlin1212/Vibe-Research.git",
+      "https": "https://github.com/simonlin1212/Vibe-Research.git",
+      "ssh": "git@github.com:simonlin1212/Vibe-Research.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "TNT-Likely__PanWatch",
+      "status": "skip",
+      "url_used": "https://github.com/TNT-Likely/PanWatch.git",
+      "https": "https://github.com/TNT-Likely/PanWatch.git",
+      "ssh": "git@github.com:TNT-Likely/PanWatch.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "simonlin1212__vibe-astock",
+      "status": "skip",
+      "url_used": "https://github.com/simonlin1212/vibe-astock.git",
+      "https": "https://github.com/simonlin1212/vibe-astock.git",
+      "ssh": "git@github.com:simonlin1212/vibe-astock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Austin-Patrician__eastmoney",
+      "status": "skip",
+      "url_used": "https://github.com/Austin-Patrician/eastmoney.git",
+      "https": "https://github.com/Austin-Patrician/eastmoney.git",
+      "ssh": "git@github.com:Austin-Patrician/eastmoney.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "agentpit-io__hunter-community",
+      "status": "skip",
+      "url_used": "https://github.com/agentpit-io/hunter-community.git",
+      "https": "https://github.com/agentpit-io/hunter-community.git",
+      "ssh": "git@github.com:agentpit-io/hunter-community.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "stock-programmer__limit-up-review",
+      "status": "skip",
+      "url_used": "https://github.com/stock-programmer/limit-up-review.git",
+      "https": "https://github.com/stock-programmer/limit-up-review.git",
+      "ssh": "git@github.com:stock-programmer/limit-up-review.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "myhhub__stock",
+      "status": "skip",
+      "url_used": "https://github.com/myhhub/stock.git",
+      "https": "https://github.com/myhhub/stock.git",
+      "ssh": "git@github.com:myhhub/stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "sngyai__Sequoia-X",
+      "status": "skip",
+      "url_used": "https://github.com/sngyai/Sequoia-X.git",
+      "https": "https://github.com/sngyai/Sequoia-X.git",
+      "ssh": "git@github.com:sngyai/Sequoia-X.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wangshub__RL-Stock",
+      "status": "skip",
+      "url_used": "https://github.com/wangshub/RL-Stock.git",
+      "https": "https://github.com/wangshub/RL-Stock.git",
+      "ssh": "git@github.com:wangshub/RL-Stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "axiaoxin-com__investool",
+      "status": "skip",
+      "url_used": "https://github.com/axiaoxin-com/investool.git",
+      "https": "https://github.com/axiaoxin-com/investool.git",
+      "ssh": "git@github.com:axiaoxin-com/investool.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "tkfy920__qstock",
+      "status": "skip",
+      "url_used": "https://github.com/tkfy920/qstock.git",
+      "https": "https://github.com/tkfy920/qstock.git",
+      "ssh": "git@github.com:tkfy920/qstock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wkingnet__stock-analysis",
+      "status": "skip",
+      "url_used": "https://github.com/wkingnet/stock-analysis.git",
+      "https": "https://github.com/wkingnet/stock-analysis.git",
+      "ssh": "git@github.com:wkingnet/stock-analysis.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ling-0729__KHunter",
+      "status": "skip",
+      "url_used": "https://github.com/ling-0729/KHunter.git",
+      "https": "https://github.com/ling-0729/KHunter.git",
+      "ssh": "git@github.com:ling-0729/KHunter.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Dzy-HW-XD__a-share-quant-selector",
+      "status": "skip",
+      "url_used": "https://github.com/Dzy-HW-XD/a-share-quant-selector.git",
+      "https": "https://github.com/Dzy-HW-XD/a-share-quant-selector.git",
+      "ssh": "git@github.com:Dzy-HW-XD/a-share-quant-selector.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "stlin256__AShare-AI-Stock-Picker",
+      "status": "skip",
+      "url_used": "https://github.com/stlin256/AShare-AI-Stock-Picker.git",
+      "https": "https://github.com/stlin256/AShare-AI-Stock-Picker.git",
+      "ssh": "git@github.com:stlin256/AShare-AI-Stock-Picker.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "online0001__short-term-stock-picker",
+      "status": "skip",
+      "url_used": "https://github.com/online0001/short-term-stock-picker.git",
+      "https": "https://github.com/online0001/short-term-stock-picker.git",
+      "ssh": "git@github.com:online0001/short-term-stock-picker.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Jesse-J-whu__stock-picker",
+      "status": "skip",
+      "url_used": "https://github.com/Jesse-J-whu/stock-picker.git",
+      "https": "https://github.com/Jesse-J-whu/stock-picker.git",
+      "ssh": "git@github.com:Jesse-J-whu/stock-picker.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "meiqinggao__AStock-Trading",
+      "status": "skip",
+      "url_used": "https://github.com/meiqinggao/AStock-Trading.git",
+      "https": "https://github.com/meiqinggao/AStock-Trading.git",
+      "ssh": "git@github.com:meiqinggao/AStock-Trading.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "huang1125677925__jingjia-stock-selector-custom-skill",
+      "status": "skip",
+      "url_used": "https://github.com/huang1125677925/jingjia-stock-selector-custom-skill.git",
+      "https": "https://github.com/huang1125677925/jingjia-stock-selector-custom-skill.git",
+      "ssh": "git@github.com:huang1125677925/jingjia-stock-selector-custom-skill.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "pranjal-joshi__Screeni-py",
+      "status": "skip",
+      "url_used": "https://github.com/pranjal-joshi/Screeni-py.git",
+      "https": "https://github.com/pranjal-joshi/Screeni-py.git",
+      "ssh": "git@github.com:pranjal-joshi/Screeni-py.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "microsoft__qlib",
+      "status": "skip",
+      "url_used": "https://github.com/microsoft/qlib.git",
+      "https": "https://github.com/microsoft/qlib.git",
+      "ssh": "git@github.com:microsoft/qlib.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "mementum__backtrader",
+      "status": "skip",
+      "url_used": "https://github.com/mementum/backtrader.git",
+      "https": "https://github.com/mementum/backtrader.git",
+      "ssh": "git@github.com:mementum/backtrader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "QuantConnect__Lean",
+      "status": "skip",
+      "url_used": "https://github.com/QuantConnect/Lean.git",
+      "https": "https://github.com/QuantConnect/Lean.git",
+      "ssh": "git@github.com:QuantConnect/Lean.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "stefan-jansen__machine-learning-for-trading",
+      "status": "skip",
+      "url_used": "https://github.com/stefan-jansen/machine-learning-for-trading.git",
+      "https": "https://github.com/stefan-jansen/machine-learning-for-trading.git",
+      "ssh": "git@github.com:stefan-jansen/machine-learning-for-trading.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "quantopian__zipline",
+      "status": "skip",
+      "url_used": "https://github.com/quantopian/zipline.git",
+      "https": "https://github.com/quantopian/zipline.git",
+      "ssh": "git@github.com:quantopian/zipline.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "bbfamily__abu",
+      "status": "skip",
+      "url_used": "https://github.com/bbfamily/abu.git",
+      "https": "https://github.com/bbfamily/abu.git",
+      "ssh": "git@github.com:bbfamily/abu.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "UFund-Me__Qbot",
+      "status": "skip",
+      "url_used": "https://github.com/UFund-Me/Qbot.git",
+      "https": "https://github.com/UFund-Me/Qbot.git",
+      "ssh": "git@github.com:UFund-Me/Qbot.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "yutiansut__QUANTAXIS",
+      "status": "skip",
+      "url_used": "https://github.com/yutiansut/QUANTAXIS.git",
+      "https": "https://github.com/yutiansut/QUANTAXIS.git",
+      "ssh": "git@github.com:yutiansut/QUANTAXIS.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "StockSharp__StockSharp",
+      "status": "skip",
+      "url_used": "https://github.com/StockSharp/StockSharp.git",
+      "https": "https://github.com/StockSharp/StockSharp.git",
+      "ssh": "git@github.com:StockSharp/StockSharp.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "huseinzol05__Stock-Prediction-Models",
+      "status": "skip",
+      "url_used": "https://github.com/huseinzol05/Stock-Prediction-Models.git",
+      "https": "https://github.com/huseinzol05/Stock-Prediction-Models.git",
+      "ssh": "git@github.com:huseinzol05/Stock-Prediction-Models.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "polakowo__vectorbt",
+      "status": "skip",
+      "url_used": "https://github.com/polakowo/vectorbt.git",
+      "https": "https://github.com/polakowo/vectorbt.git",
+      "ssh": "git@github.com:polakowo/vectorbt.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "tensortrade-org__tensortrade",
+      "status": "skip",
+      "url_used": "https://github.com/tensortrade-org/tensortrade.git",
+      "https": "https://github.com/tensortrade-org/tensortrade.git",
+      "ssh": "git@github.com:tensortrade-org/tensortrade.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ricequant__rqalpha",
+      "status": "skip",
+      "url_used": "https://github.com/ricequant/rqalpha.git",
+      "https": "https://github.com/ricequant/rqalpha.git",
+      "ssh": "git@github.com:ricequant/rqalpha.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "charliedream1__ai_quant_trade",
+      "status": "skip",
+      "url_used": "https://github.com/charliedream1/ai_quant_trade.git",
+      "https": "https://github.com/charliedream1/ai_quant_trade.git",
+      "ssh": "git@github.com:charliedream1/ai_quant_trade.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "jaungiers__LSTM-Neural-Network-for-Time-Series-Prediction",
+      "status": "skip",
+      "url_used": "https://github.com/jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git",
+      "https": "https://github.com/jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git",
+      "ssh": "git@github.com:jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "nkaz001__hftbacktest",
+      "status": "skip",
+      "url_used": "https://github.com/nkaz001/hftbacktest.git",
+      "https": "https://github.com/nkaz001/hftbacktest.git",
+      "ssh": "git@github.com:nkaz001/hftbacktest.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shashankvemuri__Finance",
+      "status": "skip",
+      "url_used": "https://github.com/shashankvemuri/Finance.git",
+      "https": "https://github.com/shashankvemuri/Finance.git",
+      "ssh": "git@github.com:shashankvemuri/Finance.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "fasiondog__hikyuu",
+      "status": "skip",
+      "url_used": "https://github.com/fasiondog/hikyuu.git",
+      "https": "https://github.com/fasiondog/hikyuu.git",
+      "ssh": "git@github.com:fasiondog/hikyuu.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "edtechre__pybroker",
+      "status": "skip",
+      "url_used": "https://github.com/edtechre/pybroker.git",
+      "https": "https://github.com/edtechre/pybroker.git",
+      "ssh": "git@github.com:edtechre/pybroker.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "akfamily__akquant",
+      "status": "skip",
+      "url_used": "https://github.com/akfamily/akquant.git",
+      "https": "https://github.com/akfamily/akquant.git",
+      "ssh": "git@github.com:akfamily/akquant.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "achillesrasquinha__bulbea",
+      "status": "skip",
+      "url_used": "https://github.com/achillesrasquinha/bulbea.git",
+      "https": "https://github.com/achillesrasquinha/bulbea.git",
+      "ssh": "git@github.com:achillesrasquinha/bulbea.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "robertmartin8__MachineLearningStocks",
+      "status": "skip",
+      "url_used": "https://github.com/robertmartin8/MachineLearningStocks.git",
+      "https": "https://github.com/robertmartin8/MachineLearningStocks.git",
+      "ssh": "git@github.com:robertmartin8/MachineLearningStocks.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "qusong0627__QuantMind",
+      "status": "skip",
+      "url_used": "https://github.com/qusong0627/QuantMind.git",
+      "https": "https://github.com/qusong0627/QuantMind.git",
+      "ssh": "git@github.com:qusong0627/QuantMind.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "LastAncientOne__Deep_Learning_Machine_Learning_Stock",
+      "status": "skip",
+      "url_used": "https://github.com/LastAncientOne/Deep_Learning_Machine_Learning_Stock.git",
+      "https": "https://github.com/LastAncientOne/Deep_Learning_Machine_Learning_Stock.git",
+      "ssh": "git@github.com:LastAncientOne/Deep_Learning_Machine_Learning_Stock.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "touhoufan2024__qlibAssistant",
+      "status": "skip",
+      "url_used": "https://github.com/touhoufan2024/qlibAssistant.git",
+      "https": "https://github.com/touhoufan2024/qlibAssistant.git",
+      "ssh": "git@github.com:touhoufan2024/qlibAssistant.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "jrothschild33__learn_backtrader",
+      "status": "skip",
+      "url_used": "https://github.com/jrothschild33/learn_backtrader.git",
+      "https": "https://github.com/jrothschild33/learn_backtrader.git",
+      "ssh": "git@github.com:jrothschild33/learn_backtrader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "waditu__czsc",
+      "status": "skip",
+      "url_used": "https://github.com/waditu/czsc.git",
+      "https": "https://github.com/waditu/czsc.git",
+      "ssh": "git@github.com:waditu/czsc.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "bukosabino__ta",
+      "status": "skip",
+      "url_used": "https://github.com/bukosabino/ta.git",
+      "https": "https://github.com/bukosabino/ta.git",
+      "ssh": "git@github.com:bukosabino/ta.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "mpquant__MyTT",
+      "status": "skip",
+      "url_used": "https://github.com/mpquant/MyTT.git",
+      "https": "https://github.com/mpquant/MyTT.git",
+      "ssh": "git@github.com:mpquant/MyTT.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "jones2000__HQChart",
+      "status": "skip",
+      "url_used": "https://github.com/jones2000/HQChart.git",
+      "https": "https://github.com/jones2000/HQChart.git",
+      "ssh": "git@github.com:jones2000/HQChart.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Vespa314__chan.py",
+      "status": "skip",
+      "url_used": "https://github.com/Vespa314/chan.py.git",
+      "https": "https://github.com/Vespa314/chan.py.git",
+      "ssh": "git@github.com:Vespa314/chan.py.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ta4j__ta4j",
+      "status": "skip",
+      "url_used": "https://github.com/ta4j/ta4j.git",
+      "https": "https://github.com/ta4j/ta4j.git",
+      "ssh": "git@github.com:ta4j/ta4j.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "andredumas__techan.js",
+      "status": "skip",
+      "url_used": "https://github.com/andredumas/techan.js.git",
+      "https": "https://github.com/andredumas/techan.js.git",
+      "ssh": "git@github.com:andredumas/techan.js.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "yijixiuxin__chanlun-pro",
+      "status": "skip",
+      "url_used": "https://github.com/yijixiuxin/chanlun-pro.git",
+      "https": "https://github.com/yijixiuxin/chanlun-pro.git",
+      "ssh": "git@github.com:yijixiuxin/chanlun-pro.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "cinar__indicator",
+      "status": "skip",
+      "url_used": "https://github.com/cinar/indicator.git",
+      "https": "https://github.com/cinar/indicator.git",
+      "ssh": "git@github.com:cinar/indicator.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "TA-Lib__ta-lib",
+      "status": "skip",
+      "url_used": "https://github.com/TA-Lib/ta-lib.git",
+      "https": "https://github.com/TA-Lib/ta-lib.git",
+      "ssh": "git@github.com:TA-Lib/ta-lib.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "deepentropy__tvscreener",
+      "status": "skip",
+      "url_used": "https://github.com/deepentropy/tvscreener.git",
+      "https": "https://github.com/deepentropy/tvscreener.git",
+      "ssh": "git@github.com:deepentropy/tvscreener.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shner-elmo__TradingView-Screener",
+      "status": "skip",
+      "url_used": "https://github.com/shner-elmo/TradingView-Screener.git",
+      "https": "https://github.com/shner-elmo/TradingView-Screener.git",
+      "ssh": "git@github.com:shner-elmo/TradingView-Screener.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "facioquo__stock-indicators-dotnet",
+      "status": "skip",
+      "url_used": "https://github.com/facioquo/stock-indicators-dotnet.git",
+      "https": "https://github.com/facioquo/stock-indicators-dotnet.git",
+      "ssh": "git@github.com:facioquo/stock-indicators-dotnet.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "femtotrader__pandas_talib",
+      "status": "skip",
+      "url_used": "https://github.com/femtotrader/pandas_talib.git",
+      "https": "https://github.com/femtotrader/pandas_talib.git",
+      "ssh": "git@github.com:femtotrader/pandas_talib.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "hackingthemarkets__candlestick-screener",
+      "status": "skip",
+      "url_used": "https://github.com/hackingthemarkets/candlestick-screener.git",
+      "https": "https://github.com/hackingthemarkets/candlestick-screener.git",
+      "ssh": "git@github.com:hackingthemarkets/candlestick-screener.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ibaihuo__chanvis",
+      "status": "skip",
+      "url_used": "https://github.com/ibaihuo/chanvis.git",
+      "https": "https://github.com/ibaihuo/chanvis.git",
+      "ssh": "git@github.com:ibaihuo/chanvis.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "neil-pan-s__one-quant-doc",
+      "status": "skip",
+      "url_used": "https://github.com/neil-pan-s/one-quant-doc.git",
+      "https": "https://github.com/neil-pan-s/one-quant-doc.git",
+      "ssh": "git@github.com:neil-pan-s/one-quant-doc.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "tomcat123a__-chanlun",
+      "status": "skip",
+      "url_used": "https://github.com/tomcat123a/-chanlun.git",
+      "https": "https://github.com/tomcat123a/-chanlun.git",
+      "ssh": "git@github.com:tomcat123a/-chanlun.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "SpiralDevelopment__candlestick-patterns",
+      "status": "skip",
+      "url_used": "https://github.com/SpiralDevelopment/candlestick-patterns.git",
+      "https": "https://github.com/SpiralDevelopment/candlestick-patterns.git",
+      "ssh": "git@github.com:SpiralDevelopment/candlestick-patterns.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "xgboosted__pandas-ta-classic",
+      "status": "skip",
+      "url_used": "https://github.com/xgboosted/pandas-ta-classic.git",
+      "https": "https://github.com/xgboosted/pandas-ta-classic.git",
+      "ssh": "git@github.com:xgboosted/pandas-ta-classic.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "kldcty__ChanlunX",
+      "status": "skip",
+      "url_used": "https://github.com/kldcty/ChanlunX.git",
+      "https": "https://github.com/kldcty/ChanlunX.git",
+      "ssh": "git@github.com:kldcty/ChanlunX.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Fidingks__facecat-kronos",
+      "status": "skip",
+      "url_used": "https://github.com/Fidingks/facecat-kronos.git",
+      "https": "https://github.com/Fidingks/facecat-kronos.git",
+      "ssh": "git@github.com:Fidingks/facecat-kronos.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "sansan0__TrendRadar",
+      "status": "skip",
+      "url_used": "https://github.com/sansan0/TrendRadar.git",
+      "https": "https://github.com/sansan0/TrendRadar.git",
+      "ssh": "git@github.com:sansan0/TrendRadar.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "666ghj__BettaFish",
+      "status": "skip",
+      "url_used": "https://github.com/666ghj/BettaFish.git",
+      "https": "https://github.com/666ghj/BettaFish.git",
+      "ssh": "git@github.com:666ghj/BettaFish.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shirosaidev__stocksight",
+      "status": "skip",
+      "url_used": "https://github.com/shirosaidev/stocksight.git",
+      "https": "https://github.com/shirosaidev/stocksight.git",
+      "ssh": "git@github.com:shirosaidev/stocksight.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "kaushikjadhav01__Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis",
+      "status": "skip",
+      "url_used": "https://github.com/kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git",
+      "https": "https://github.com/kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git",
+      "ssh": "git@github.com:kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "WayneDW__Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction",
+      "status": "skip",
+      "url_used": "https://github.com/WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git",
+      "https": "https://github.com/WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git",
+      "ssh": "git@github.com:WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "algosenses__Stock_Market_Sentiment_Analysis",
+      "status": "skip",
+      "url_used": "https://github.com/algosenses/Stock_Market_Sentiment_Analysis.git",
+      "https": "https://github.com/algosenses/Stock_Market_Sentiment_Analysis.git",
+      "ssh": "git@github.com:algosenses/Stock_Market_Sentiment_Analysis.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "ranaroussi__yfinance",
+      "status": "skip",
+      "url_used": "https://github.com/ranaroussi/yfinance.git",
+      "https": "https://github.com/ranaroussi/yfinance.git",
+      "ssh": "git@github.com:ranaroussi/yfinance.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "akfamily__akshare",
+      "status": "skip",
+      "url_used": "https://github.com/akfamily/akshare.git",
+      "https": "https://github.com/akfamily/akshare.git",
+      "ssh": "git@github.com:akfamily/akshare.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shidenggui__easytrader",
+      "status": "skip",
+      "url_used": "https://github.com/shidenggui/easytrader.git",
+      "https": "https://github.com/shidenggui/easytrader.git",
+      "ssh": "git@github.com:shidenggui/easytrader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "simonlin1212__a-stock-data",
+      "status": "skip",
+      "url_used": "https://github.com/simonlin1212/a-stock-data.git",
+      "https": "https://github.com/simonlin1212/a-stock-data.git",
+      "ssh": "git@github.com:simonlin1212/a-stock-data.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "goldmansachs__gs-quant",
+      "status": "skip",
+      "url_used": "https://github.com/goldmansachs/gs-quant.git",
+      "https": "https://github.com/goldmansachs/gs-quant.git",
+      "ssh": "git@github.com:goldmansachs/gs-quant.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "JerBouma__FinanceDatabase",
+      "status": "skip",
+      "url_used": "https://github.com/JerBouma/FinanceDatabase.git",
+      "https": "https://github.com/JerBouma/FinanceDatabase.git",
+      "ssh": "git@github.com:JerBouma/FinanceDatabase.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "1nchaos__adata",
+      "status": "skip",
+      "url_used": "https://github.com/1nchaos/adata.git",
+      "https": "https://github.com/1nchaos/adata.git",
+      "ssh": "git@github.com:1nchaos/adata.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "shidenggui__easyquotation",
+      "status": "skip",
+      "url_used": "https://github.com/shidenggui/easyquotation.git",
+      "https": "https://github.com/shidenggui/easyquotation.git",
+      "ssh": "git@github.com:shidenggui/easyquotation.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Micro-sheep__efinance",
+      "status": "skip",
+      "url_used": "https://github.com/Micro-sheep/efinance.git",
+      "https": "https://github.com/Micro-sheep/efinance.git",
+      "ssh": "git@github.com:Micro-sheep/efinance.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "mpquant__Ashare",
+      "status": "skip",
+      "url_used": "https://github.com/mpquant/Ashare.git",
+      "https": "https://github.com/mpquant/Ashare.git",
+      "ssh": "git@github.com:mpquant/Ashare.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "openctp__openctp",
+      "status": "skip",
+      "url_used": "https://github.com/openctp/openctp.git",
+      "https": "https://github.com/openctp/openctp.git",
+      "ssh": "git@github.com:openctp/openctp.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "simonlin1212__global-stock-data",
+      "status": "skip",
+      "url_used": "https://github.com/simonlin1212/global-stock-data.git",
+      "https": "https://github.com/simonlin1212/global-stock-data.git",
+      "ssh": "git@github.com:simonlin1212/global-stock-data.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "nladuo__THSTrader",
+      "status": "skip",
+      "url_used": "https://github.com/nladuo/THSTrader.git",
+      "https": "https://github.com/nladuo/THSTrader.git",
+      "ssh": "git@github.com:nladuo/THSTrader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "tickflow-org__tickflow",
+      "status": "skip",
+      "url_used": "https://github.com/tickflow-org/tickflow.git",
+      "https": "https://github.com/tickflow-org/tickflow.git",
+      "ssh": "git@github.com:tickflow-org/tickflow.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "skyformat99__ths_trade",
+      "status": "skip",
+      "url_used": "https://github.com/skyformat99/ths_trade.git",
+      "https": "https://github.com/skyformat99/ths_trade.git",
+      "ssh": "git@github.com:skyformat99/ths_trade.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "openbq-org__OpenBB",
+      "status": "skip",
+      "url_used": "https://github.com/openbq-org/OpenBB.git",
+      "https": "https://github.com/openbq-org/OpenBB.git",
+      "ssh": "git@github.com:openbq-org/OpenBB.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "Fincept-Corporation__FinceptTerminal",
+      "status": "skip",
+      "url_used": "https://github.com/Fincept-Corporation/FinceptTerminal.git",
+      "https": "https://github.com/Fincept-Corporation/FinceptTerminal.git",
+      "ssh": "git@github.com:Fincept-Corporation/FinceptTerminal.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "TraderAlice__OpenAlice",
+      "status": "skip",
+      "url_used": "https://github.com/TraderAlice/OpenAlice.git",
+      "https": "https://github.com/TraderAlice/OpenAlice.git",
+      "ssh": "git@github.com:TraderAlice/OpenAlice.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "bklieger-groq__stockbot-on-groq",
+      "status": "skip",
+      "url_used": "https://github.com/bklieger-groq/stockbot-on-groq.git",
+      "https": "https://github.com/bklieger-groq/stockbot-on-groq.git",
+      "ssh": "git@github.com:bklieger-groq/stockbot-on-groq.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wbh604__UZI-Skill",
+      "status": "skip",
+      "url_used": "https://github.com/wbh604/UZI-Skill.git",
+      "https": "https://github.com/wbh604/UZI-Skill.git",
+      "ssh": "git@github.com:wbh604/UZI-Skill.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "AlphaGBM__skills",
+      "status": "skip",
+      "url_used": "https://github.com/AlphaGBM/skills.git",
+      "https": "https://github.com/AlphaGBM/skills.git",
+      "ssh": "git@github.com:AlphaGBM/skills.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "atilaahmettaner__tradingview-mcp",
+      "status": "skip",
+      "url_used": "https://github.com/atilaahmettaner/tradingview-mcp.git",
+      "https": "https://github.com/atilaahmettaner/tradingview-mcp.git",
+      "ssh": "git@github.com:atilaahmettaner/tradingview-mcp.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "tradermonty__claude-trading-skills",
+      "status": "skip",
+      "url_used": "https://github.com/tradermonty/claude-trading-skills.git",
+      "https": "https://github.com/tradermonty/claude-trading-skills.git",
+      "ssh": "git@github.com:tradermonty/claude-trading-skills.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "guangxiangdebizi__FinanceMCP",
+      "status": "skip",
+      "url_used": "https://github.com/guangxiangdebizi/FinanceMCP.git",
+      "https": "https://github.com/guangxiangdebizi/FinanceMCP.git",
+      "ssh": "git@github.com:guangxiangdebizi/FinanceMCP.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wshobson__maverick-mcp",
+      "status": "skip",
+      "url_used": "https://github.com/wshobson/maverick-mcp.git",
+      "https": "https://github.com/wshobson/maverick-mcp.git",
+      "ssh": "git@github.com:wshobson/maverick-mcp.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wshobson__mcp-trader",
+      "status": "skip",
+      "url_used": "https://github.com/wshobson/mcp-trader.git",
+      "https": "https://github.com/wshobson/mcp-trader.git",
+      "ssh": "git@github.com:wshobson/mcp-trader.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "yennanliu__InvestSkill",
+      "status": "skip",
+      "url_used": "https://github.com/yennanliu/InvestSkill.git",
+      "https": "https://github.com/yennanliu/InvestSkill.git",
+      "ssh": "git@github.com:yennanliu/InvestSkill.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "agentii-ai__agentii-investment-intelligence",
+      "status": "skip",
+      "url_used": "https://github.com/agentii-ai/agentii-investment-intelligence.git",
+      "https": "https://github.com/agentii-ai/agentii-investment-intelligence.git",
+      "ssh": "git@github.com:agentii-ai/agentii-investment-intelligence.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "kangarooking__buffett-letters-skill",
+      "status": "skip",
+      "url_used": "https://github.com/kangarooking/buffett-letters-skill.git",
+      "https": "https://github.com/kangarooking/buffett-letters-skill.git",
+      "ssh": "git@github.com:kangarooking/buffett-letters-skill.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wilsonfreitas__awesome-quant",
+      "status": "skip",
+      "url_used": "https://github.com/wilsonfreitas/awesome-quant.git",
+      "https": "https://github.com/wilsonfreitas/awesome-quant.git",
+      "ssh": "git@github.com:wilsonfreitas/awesome-quant.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "wangzhe3224__awesome-systematic-trading",
+      "status": "skip",
+      "url_used": "https://github.com/wangzhe3224/awesome-systematic-trading.git",
+      "https": "https://github.com/wangzhe3224/awesome-systematic-trading.git",
+      "ssh": "git@github.com:wangzhe3224/awesome-systematic-trading.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "grananqvist__Awesome-Quant-Machine-Learning-Trading",
+      "status": "skip",
+      "url_used": "https://github.com/grananqvist/Awesome-Quant-Machine-Learning-Trading.git",
+      "https": "https://github.com/grananqvist/Awesome-Quant-Machine-Learning-Trading.git",
+      "ssh": "git@github.com:grananqvist/Awesome-Quant-Machine-Learning-Trading.git",
+      "reason": "目录已存在且为 git 仓库"
+    },
+    {
+      "name": "LLMQuant__quant-wiki",
+      "status": "skip",
+      "url_used": "https://github.com/LLMQuant/quant-wiki.git",
+      "https": "https://github.com/LLMQuant/quant-wiki.git",
+      "ssh": "git@github.com:LLMQuant/quant-wiki.git",
+      "reason": "目录已存在且为 git 仓库"
+    }
+  ]
+}

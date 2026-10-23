@@ -21,6 +21,9 @@
   sync-overseas-kline       外围日K（腾讯 ifzq：港美股指数+港股个股池，2026-10-04 新增）
   calc-stock-valuation      个股 PE/PB 自算（本地计算）
   sync-bj-kline             北交所日K（通达信官网盘后包，P0-2 方案 B，2026-09-30 新增）
+  sync-macro-indicator      宏观指标（东财+金十直连，第三阶段-1，2026-10-23 新增）
+  sync-option-daily         ETF 期权（上交所官方接口直连，第三阶段-2，2026-10-23 新增）
+  sync-north-flow-detail    北向个股明细（东财直连，第三阶段-3，2026-10-23 新增）
   review generate           复盘报告生成（六维 MD+HTML，复盘报告层方案 §5.5）
 """
 
@@ -168,15 +171,78 @@ def sync_adjust_factor(ctx, init_mode, trade_date, codes, dry_run):
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+@click.command('sync-hkex-connect')
+@click.option('--start-date', default=None, help='yyyyMMdd 起始（缺省=库内最新+1；空库回补 backfill_days）')
+@click.option('--end-date', default=None, help='yyyyMMdd 结束（缺省当日）')
+@click.pass_context
+def sync_hkex_connect(ctx, start_date, end_date):
+    """互联互通日度（北向总额+南向净额；港交所官方日度 JSON，滚动保留约2个月）"""
+    from src.sync.hkex_connect_manager import HkexConnectManager
+    manager = HkexConnectManager(ctx.obj['config_manager'])
+    result = manager.execute(start_date=start_date, end_date=end_date)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 互联互通（{stats['start']}~{stats['end']}）")
+    click.echo(f"  - 抓到 {stats['days_fetched']} 个交易日 / 空日 {stats['days_empty']}；入库 {stats['rows']} 行；耗时 {stats['duration']}s")
+    click.echo('  - 口径：北向仅成交总额（禁止解读净额）；南向净买入=Buy−Sell')
+    for e in result['errors'][:3]:
+        click.echo(f'  - 错误: {e}')
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('sync-etf-scale')
+@click.option('--start-date', default=None, help='yyyyMMdd（上交所 STAT_DATE 回补起点；缺省=库内最新+1，空库回补 250 日）')
+@click.option('--end-date', default=None, help='yyyyMMdd（缺省当日）')
+@click.pass_context
+def sync_etf_scale(ctx, start_date, end_date):
+    """ETF 份额日度（沪深两所官方 API；单位万份；深交所仅当日快照）"""
+    from src.sync.etf_scale_manager import EtfScaleManager
+    manager = EtfScaleManager(ctx.obj['config_manager'])
+    result = manager.execute(start_date=start_date, end_date=end_date)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} ETF 份额（{stats['start']}~{stats['end']}）")
+    click.echo(f"  - 上交所 {stats['sse_days']} 日 {stats['sse_rows']} 行；深交所快照 {stats['szse_rows']} 行；耗时 {stats['duration']}s")
+    click.echo('  - 口径：份额万份；日变化=申赎方向代理')
+    for e in stats.get('errors', [])[:3]:
+        click.echo(f'  - 错误: {e}')
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('sync-news-telegraph')
+@click.option('--pages', default=None, type=int, help='抓取页数（缺省=增量追平游标，上限 config max_pages）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行：不请求不写库')
+@click.pass_context
+def sync_news_telegraph(ctx, pages, dry_run):
+    """市场要闻（四期方案 §4）：新浪 7x24 快讯 → news_telegraph（增量游标幂等）"""
+    from src.sync.news_telegraph_manager import NewsTelegraphManager
+    manager = NewsTelegraphManager(ctx.obj['config_manager'])
+    result = manager.execute(pages=pages, dry_run=dry_run)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 市场要闻（新浪 7x24，dry_run={dry_run}）")
+    click.echo(f"  - 页数 {stats['pages']}，条目 {stats['items']}，新入库 {stats['rows']}；"
+               f"游标 {stats['cursor_before'] or '—'} → {stats['cursor_after'] or '—'}；"
+               f"耗时 {result.get('duration', 0):.1f}s")
+    click.echo('  - 口径：新闻归因是市场叙事，不是核验过的因果；财联社签名接口按合规红线不采')
+    for e in result.get('errors', [])[:3]:
+        click.echo(f'  - 错误: {e}')
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 @click.command('sync-money-flow')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省当日；历史日走历史分笔路径补抓）')
 @click.option('--codes', default=None, help='指定股票（跳过异动子集筛选）')
+@click.option('--full-market/--no-full-market', default=None,
+              help='覆盖 config full_market（P2 全市场扩面；缺省用配置值）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行：只输出异动子集清单')
 @click.pass_context
-def sync_money_flow(ctx, trade_date, codes, dry_run):
-    """同步分笔资金流（异动子集，近似口径：分笔分桶）"""
+def sync_money_flow(ctx, trade_date, codes, full_market, dry_run):
+    """同步分笔资金流（P2 全市场扩面后为全池；口径：分笔分桶）"""
     from src.sync.money_flow_manager import MoneyFlowManager
     manager = MoneyFlowManager(ctx.obj['config_manager'])
+    if full_market is not None:
+        manager.full_market = bool(full_market)
     code_list = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
     try:
         result = manager.execute(trade_date=trade_date, codes=code_list, dry_run=dry_run)
@@ -186,8 +252,11 @@ def sync_money_flow(ctx, trade_date, codes, dry_run):
     stats = result['stats']
     sub = stats.get('subset', {})
     click.echo(f"\n{'✓' if result['success'] else '✗'} 分笔资金流（{stats['trade_date']}）")
-    click.echo(f"  - 子集: 涨跌停 {sub.get('limit_hits', 0)}，|涨跌幅| {sub.get('pct_hits', 0)}，"
-               f"Top成交额 {sub.get('top_amount', 0)} -> 选中 {sub.get('selected', 0)} 只")
+    if sub.get('full_market'):
+        click.echo(f"  - 全市场模式: 快照 {sub.get('snapshot_total', 0)} -> 选中 {sub.get('selected', 0)} 只")
+    else:
+        click.echo(f"  - 子集: 涨跌停 {sub.get('limit_hits', 0)}，|涨跌幅| {sub.get('pct_hits', 0)}，"
+                   f"Top成交额 {sub.get('top_amount', 0)} -> 选中 {sub.get('selected', 0)} 只")
     if not dry_run:
         click.echo(f"  - 抓取: 成功 {stats['stocks_ok']}，失败 {stats['stocks_failed']}，"
                    f"分笔 {stats['total_trades']} 笔；降速触发: "
@@ -792,12 +861,144 @@ def _plain(v):
     return str(v).replace('-', '')[:8]
 
 
+@click.command('sync-macro-indicator')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--indicators', default=None,
+              help='指标 code 列表逗号分隔（缺省 config review_sync.macro.indicators 全量）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.pass_context
+def sync_macro_indicator(ctx, start_date, end_date, indicators, dry_run):
+    """同步宏观指标（LPR/SHIBOR/PMI/M1/M2/社融/CPI/PPI；东财+金十直连）
+
+    低频指标整段拉取按发布日过滤；日/周跑一次足矣，不进 sync-review-all。
+    区间回填模式：--start-date/--end-date 同给（断点查库跳过已有）。
+    """
+    from src.sync.macro_manager import MacroManager
+    manager = MacroManager(ctx.obj['config_manager'])
+    codes = ([c.strip() for c in indicators.split(',') if c.strip()]
+             if indicators else None)
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        result = manager.backfill_range(start_date, end_date, dry_run=dry_run)
+        stats = result['stats']
+        total = stats.pop('_total_rows', 0)
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 宏观指标回填"
+                   f"（{start_date}~{end_date}）累计 {total} 行")
+        for code, st in stats.items():
+            click.echo(f"  - {code}: {st['status']} rows={st.get('rows', 0)}")
+        return
+    result = manager.execute(dry_run=dry_run, indicators=codes)
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 宏观指标同步")
+    for code, st in result['stats'].items():
+        line = f"  - {code}: {st['status']}"
+        if st.get('latest_date'):
+            line += f" latest={st['latest_date']}"
+        if st.get('rows'):
+            line += f" rows={st['rows']}"
+        if st.get('error'):
+            line += f" ({st['error']})"
+        click.echo(line)
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('sync-option-daily')
+@click.option('--trade-date', default=None, help='yyyyMMdd（缺省 T-1；SSE 数据 T 日盘后发布）')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.pass_context
+def sync_option_daily(ctx, trade_date, start_date, end_date, dry_run):
+    """同步 ETF 期权（上交所官方接口：逐合约 IV/希腊字母 + 逐标的统计 + 合约主数据）
+
+    历史回填模式：--start-date/--end-date 同给按交易日历逐日回填，
+    断点续跑只信查库（当日 option_daily 行数 > 0 跳过）。
+    """
+    from src.sync.option_manager import OptionManager
+    manager = OptionManager(ctx.obj['config_manager'])
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        result = manager.backfill_range(start_date, end_date, dry_run=dry_run)
+        stats = result['stats']
+        click.echo(f"\n{'✓' if result['success'] else '✗'} ETF 期权回填"
+                   f"（{stats['range']}）交易日 {stats['days_total']}：回填 "
+                   f"{stats['days_done']}、跳过 {stats['days_skipped']}、失败 "
+                   f"{len(stats['days_failed'])}；累计 {stats['risk_rows']} 行")
+        if stats['days_failed']:
+            click.echo(f"  - 失败日期: {[f['date'] for f in stats['days_failed'][:30]]}")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+        return
+    result = manager.execute(trade_date=trade_date, dry_run=dry_run)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} ETF 期权（数据日期 "
+               f"{stats['trade_date']}）风险指标 {stats['risk_rows']} 行 / "
+               f"标的统计 {stats['stats_rows']} 行 / 主数据 {stats['master_rows']} 行")
+    if stats['missing']:
+        click.echo(f"  - 校验提示: {stats['missing']}")
+    for err in result['errors']:
+        click.echo(f"  - {err}")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
+@click.command('sync-north-flow-detail')
+@click.option('--trade-date', default=None, help='yyyyMMdd（缺省对库内有持仓股票重拉；披露止于 20240816）')
+@click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
+@click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
+@click.option('--symbols', default=None,
+              help='股票代码列表逗号分隔（缺省日增量=库内有持仓股票；回填=全部在市股票）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.pass_context
+def sync_north_flow_detail(ctx, trade_date, start_date, end_date, symbols, dry_run):
+    """同步北向个股明细（东财直连：个股北向持股历史，沪/深双通道聚合）
+
+    口径边界：交易所 2024-08-19 起停止披露个股每日明细，日增量重拉自然无新
+    数据（如实记录非故障）；总额口径见 sync-hkex-connect（港交所日统计）。
+    """
+    from src.sync.hkex_connect_manager import NorthFlowDetailManager
+    manager = NorthFlowDetailManager(ctx.obj['config_manager'])
+    codes = ([c.strip() for c in symbols.split(',') if c.strip()]
+             if symbols else None)
+    if bool(start_date) != bool(end_date):
+        raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    if start_date:
+        result = manager.backfill_range(start_date, end_date, symbols=codes,
+                                        dry_run=dry_run)
+        stats = result['stats']
+        click.echo(f"\n{'✓' if result['success'] else '✗'} 北向个股明细回填"
+                   f"（{stats['range']}）股票 {stats['symbols_total']} 只：完成 "
+                   f"{stats['symbols_done']}、失败 {len(stats['symbols_failed'])}；"
+                   f"累计 {stats['rows']} 行")
+        if stats['symbols_failed']:
+            click.echo(f"  - 失败股票: {stats['symbols_failed'][:30]}")
+        if result.get('report_path'):
+            click.echo(f"  - 报告: {result['report_path']}")
+        return
+    result = manager.execute(trade_date=trade_date, dry_run=dry_run, symbols=codes)
+    stats = result['stats']
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 北向个股明细同步"
+               f"（目标 {stats['requested']} 只，实拉 {stats['pulled']} 只）")
+    click.echo(f"  - 库内最新数据日：{stats.get('max_date_before')} → "
+               f"{stats.get('max_date_after')}（披露止于 20240816）")
+    if stats['failed']:
+        click.echo(f"  - 失败股票: {stats['failed'][:20]}")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
+
+
 # CLI 注册清单（main.py 汇总 add_command）
 review_commands = [
     sync_review_all,
     sync_review_data,
     sync_index_kline,
     sync_adjust_factor,
+    sync_hkex_connect,
+    sync_etf_scale,
+    sync_news_telegraph,
     sync_money_flow,
     sync_seal_stats,
     sync_announcement,
@@ -815,4 +1016,7 @@ review_commands = [
     sync_overseas_kline,
     calc_stock_valuation,
     sync_bj_kline,
+    sync_macro_indicator,
+    sync_option_daily,
+    sync_north_flow_detail,
 ]

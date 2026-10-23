@@ -32,9 +32,13 @@ class TestChainConfig:
         assert chain.modules[1].params == {"max_lookback": 60}
 
     def test_load_daily_review(self):
-        """每日复盘链（方案阶段1）：8 模块、60 交易日窗口。"""
+        """每日复盘链：24 模块（量价资金 2026-10-06；R1-R4 候选 2026-10-18 §2.4；
+        P0-1 指标七件套 2026-10-18 §3.1；P0-2 形态 2026-10-20 §3.2；
+        P0-4 估值摘要 2026-10-20 §3.3；P1-11 涨停归因 2026-10-20 §3.4）、
+        60 交易日窗口、双 env 装配。"""
         chain = load_chain("daily_review")
         assert chain.chain == "daily_review"
+        assert chain.env_list() == ["a_share_candidates", "a_share_valuation"]
         assert [s.name_en for s in chain.modules] == [
             "limit_up_today",
             "consecutive_limit_up",
@@ -43,12 +47,31 @@ class TestChainConfig:
             "limit_up_premium",
             "big_mover",
             "volume_surge",
+            "volume_trend",
             "new_high_low",
+            "money_trend",
+            "r1_ladder_relay",
+            "r2_mainline_follow",
+            "r3_trend_new_high",
+            "r4_institution_seat",
+            "macd_state",
+            "kdj_state",
+            "rsi_state",
+            "boll_pos",
+            "atr_pct",
+            "obv_trend",
+            "ma_arrangement",
+            "candle_pattern",
+            "valuation_digest",
+            "limit_up_attribution",
         ]
+        assert chain.env_list() == ["a_share_candidates", "a_share_valuation"]
         assert chain.lookback.is_all is False
         assert str(chain.lookback) == "60d"
         assert chain.modules[1].params == {"max_lookback": 60}
-        assert chain.modules[-1].params == {"window": 60}
+        # new_high_low（60日窗口）与 money_trend（无参数）两模块 params
+        assert chain.modules[8].params == {"window": 60}
+        assert chain.modules[-1].params == {}
 
     def test_list_chains_contains_daily_review(self):
         assert "daily_review" in [c.chain for c in list_chains()]

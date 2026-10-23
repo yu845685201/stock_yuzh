@@ -9,6 +9,7 @@ review 相关 DAO mixin（每日复盘数据采集技术方案 V1.0 第五章）
 金额单位：元；成交量单位：股；涨跌幅/占比单位：百分点或小数按列注释。
 """
 
+import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -188,6 +189,86 @@ class ReviewDaoMixin:
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
+        'macro_indicator_daily': """
+        CREATE TABLE IF NOT EXISTS macro_indicator_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            indicator_code VARCHAR(30) NOT NULL,
+            value NUMERIC(24, 6),
+            unit VARCHAR(20),
+            period VARCHAR(20),
+            source VARCHAR(30),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'option_daily': """
+        CREATE TABLE IF NOT EXISTS option_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            contract_code VARCHAR(20) NOT NULL,
+            contract_symbol VARCHAR(40),
+            underlying_code VARCHAR(12),
+            call_put VARCHAR(4),
+            strike NUMERIC(12, 4),
+            expiry_date VARCHAR(8),
+            iv NUMERIC(12, 6),
+            delta NUMERIC(12, 6),
+            gamma NUMERIC(12, 6),
+            theta NUMERIC(12, 6),
+            vega NUMERIC(12, 6),
+            rho NUMERIC(12, 6),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'option_underlying_daily': """
+        CREATE TABLE IF NOT EXISTS option_underlying_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            underlying_code VARCHAR(12) NOT NULL,
+            underlying_name VARCHAR(40),
+            contract_count INTEGER,
+            total_amount NUMERIC(24, 4),
+            total_volume NUMERIC(24, 4),
+            call_volume NUMERIC(24, 4),
+            put_volume NUMERIC(24, 4),
+            put_call_ratio NUMERIC(12, 4),
+            oi_total NUMERIC(24, 4),
+            oi_call NUMERIC(24, 4),
+            oi_put NUMERIC(24, 4),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'option_contract_master': """
+        CREATE TABLE IF NOT EXISTS option_contract_master (
+            contract_code VARCHAR(20) PRIMARY KEY,
+            contract_symbol VARCHAR(40),
+            underlying_code VARCHAR(12),
+            underlying_name VARCHAR(40),
+            call_put VARCHAR(4),
+            strike NUMERIC(12, 4),
+            expiry_date VARCHAR(8),
+            first_seen VARCHAR(8),
+            last_seen VARCHAR(8),
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'north_flow_detail_daily': """
+        CREATE TABLE IF NOT EXISTS north_flow_detail_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            ts_code VARCHAR(20) NOT NULL,
+            hold_shares NUMERIC(24, 4),
+            hold_market_value NUMERIC(24, 4),
+            hold_ratio NUMERIC(12, 6),
+            change_shares NUMERIC(24, 4),
+            change_amount NUMERIC(24, 4),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
         'share_unlock_calendar': """
         CREATE TABLE IF NOT EXISTS share_unlock_calendar (
             id BIGSERIAL PRIMARY KEY,
@@ -239,6 +320,15 @@ class ReviewDaoMixin:
             big_sell_amt NUMERIC(24, 4),
             big_net_amt NUMERIC(24, 4),
             big_net_pct NUMERIC(14, 6),
+            super_big_buy_amt NUMERIC(24, 4),
+            super_big_sell_amt NUMERIC(24, 4),
+            super_big_net_amt NUMERIC(24, 4),
+            mid_buy_amt NUMERIC(24, 4),
+            mid_sell_amt NUMERIC(24, 4),
+            mid_net_amt NUMERIC(24, 4),
+            small_buy_amt NUMERIC(24, 4),
+            small_sell_amt NUMERIC(24, 4),
+            small_net_amt NUMERIC(24, 4),
             stock_count INTEGER,
             calib_note VARCHAR(50) DEFAULT '近似口径:分笔分桶',
             create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -285,6 +375,70 @@ class ReviewDaoMixin:
             update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
+        'hkex_connect_daily': """
+        CREATE TABLE IF NOT EXISTS hkex_connect_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            channel VARCHAR(16) NOT NULL,
+            total_turnover NUMERIC(24, 4),
+            buy_turnover NUMERIC(24, 4),
+            sell_turnover NUMERIC(24, 4),
+            etf_turnover NUMERIC(24, 4),
+            trade_count BIGINT,
+            source VARCHAR(24) DEFAULT 'hkex_dailystat',
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'etf_scale_daily': """
+        CREATE TABLE IF NOT EXISTS etf_scale_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            exchange VARCHAR(4) NOT NULL,
+            fund_code VARCHAR(10) NOT NULL,
+            fund_name VARCHAR(64),
+            etf_type VARCHAR(20),
+            shares_wan NUMERIC(24, 4),
+            source VARCHAR(20),
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'review_prediction_daily': """
+        CREATE TABLE IF NOT EXISTS review_prediction_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            payload JSONB NOT NULL,
+            version INT DEFAULT 1,
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'review_verification_daily': """
+        CREATE TABLE IF NOT EXISTS review_verification_daily (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date VARCHAR(8) NOT NULL,
+            prev_date VARCHAR(8),
+            payload JSONB NOT NULL,
+            version INT DEFAULT 1,
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        'news_telegraph': """
+        CREATE TABLE IF NOT EXISTS news_telegraph (
+            id BIGSERIAL PRIMARY KEY,
+            news_id VARCHAR(64) NOT NULL,
+            publish_time VARCHAR(19),
+            trade_date VARCHAR(8),
+            title VARCHAR(500),
+            content TEXT,
+            subject VARCHAR(100),
+            importance SMALLINT DEFAULT 0,
+            source VARCHAR(20) DEFAULT 'sina_7x24',
+            create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
     }
 
     _REVIEW_UNIQUE_KEYS: Dict[str, str] = {
@@ -300,12 +454,21 @@ class ReviewDaoMixin:
         'lhb_stock_daily': 'UNIQUE (trade_date, ts_code, reason)',
         'lhb_detail': 'UNIQUE (trade_date, ts_code, seat_name, side)',
         'margin_trade_daily': 'UNIQUE (trade_date, ts_code)',
+        'macro_indicator_daily': 'UNIQUE (trade_date, indicator_code)',
+        'option_daily': 'UNIQUE (trade_date, contract_code)',
+        'option_underlying_daily': 'UNIQUE (trade_date, underlying_code)',
+        'north_flow_detail_daily': 'UNIQUE (trade_date, ts_code)',
         'share_unlock_calendar': 'UNIQUE (ts_code, unlock_date)',
         'overseas_market_daily': 'UNIQUE (trade_date, market_code)',
         'overseas_kline_day': 'UNIQUE (market_code, trade_date)',
         'money_flow_daily': 'UNIQUE (trade_date, ts_code)',
         'sentiment_metrics_daily': 'UNIQUE (trade_date)',
         'limit_seal_stats_daily': 'UNIQUE (trade_date, ts_code)',
+        'hkex_connect_daily': 'UNIQUE (trade_date, channel)',
+        'etf_scale_daily': 'UNIQUE (trade_date, exchange, fund_code)',
+        'review_prediction_daily': 'UNIQUE (trade_date)',
+        'review_verification_daily': 'UNIQUE (trade_date)',
+        'news_telegraph': 'UNIQUE (news_id)',
     }
 
     def ensure_review_tables(self) -> None:
@@ -321,6 +484,17 @@ class ReviewDaoMixin:
                 # sec_tx_amount = 个股当日总成交额（沪市 secTxAmount / 深市列表成交金额）
                 cursor.execute("ALTER TABLE lhb_stock_daily "
                                "ADD COLUMN IF NOT EXISTS sec_tx_amount NUMERIC(24, 4)")
+                # P2 分桶扩列（存量库加列，量价资金方案 V1.1 2026-10-05；存量行 NULL
+                # 不回填——历史分笔不可得，calib_note 区分行级口径）
+                for _col in ('super_big_buy_amt', 'super_big_sell_amt', 'super_big_net_amt',
+                             'mid_buy_amt', 'mid_sell_amt', 'mid_net_amt',
+                             'small_buy_amt', 'small_sell_amt', 'small_net_amt'):
+                    cursor.execute(f"ALTER TABLE money_flow_daily "
+                                   f"ADD COLUMN IF NOT EXISTS {_col} NUMERIC(24, 4)")
+                # news_telegraph 存量表补 update_time（首版 DDL 缺列，2026-10-07 修）
+                cursor.execute("ALTER TABLE news_telegraph "
+                               "ADD COLUMN IF NOT EXISTS update_time TIMESTAMP "
+                               "DEFAULT CURRENT_TIMESTAMP")
                 # 披露日 COALESCE 回填的查询路径索引（回填实测教训：34.6 万财报行 ×
                 # 公告相关子查询，无此索引时单次回填可达小时级/更久）
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_announcement_ts_date "
@@ -830,6 +1004,41 @@ class ReviewDaoMixin:
 
     # ---------- 两融 ----------
 
+    def upsert_hkex_connect(self, rows: List[Dict[str, Any]]) -> int:
+        """互联互通日度（北向总额+南向净额）upsert（P3，量价资金方案 V1.1）"""
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO hkex_connect_daily
+        (trade_date, channel, total_turnover, buy_turnover, sell_turnover,
+         etf_turnover, trade_count, source)
+        VALUES (%(trade_date)s, %(channel)s, %(total_turnover)s, %(buy_turnover)s,
+                %(sell_turnover)s, %(etf_turnover)s, %(trade_count)s, %(source)s)
+        ON CONFLICT (trade_date, channel)
+        DO UPDATE SET total_turnover = EXCLUDED.total_turnover,
+                      buy_turnover = EXCLUDED.buy_turnover,
+                      sell_turnover = EXCLUDED.sell_turnover,
+                      etf_turnover = EXCLUDED.etf_turnover,
+                      trade_count = EXCLUDED.trade_count,
+                      source = EXCLUDED.source, update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def upsert_etf_scale(self, rows: List[Dict[str, Any]]) -> int:
+        """ETF 份额日度（沪深两所，单位万份）upsert（P3）"""
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO etf_scale_daily
+        (trade_date, exchange, fund_code, fund_name, etf_type, shares_wan, source)
+        VALUES (%(trade_date)s, %(exchange)s, %(fund_code)s, %(fund_name)s,
+                %(etf_type)s, %(shares_wan)s, %(source)s)
+        ON CONFLICT (trade_date, exchange, fund_code)
+        DO UPDATE SET fund_name = EXCLUDED.fund_name, etf_type = EXCLUDED.etf_type,
+                      shares_wan = EXCLUDED.shares_wan, source = EXCLUDED.source
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
     def upsert_margin_trades(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:
             return 0
@@ -842,6 +1051,196 @@ class ReviewDaoMixin:
                       rzche = EXCLUDED.rzche, rqye = EXCLUDED.rqye, update_time = NOW()
         """
         return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    # ---------- 宏观指标（第三阶段-1） ----------
+
+    def upsert_macro_indicators(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO macro_indicator_daily
+        (trade_date, indicator_code, value, unit, period, source)
+        VALUES (%(trade_date)s, %(indicator_code)s, %(value)s, %(unit)s,
+                %(period)s, %(source)s)
+        ON CONFLICT (trade_date, indicator_code)
+        DO UPDATE SET value = EXCLUDED.value, unit = EXCLUDED.unit,
+                      period = EXCLUDED.period, source = EXCLUDED.source,
+                      update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def fetch_macro_indicator_dates(self, start_date: str,
+                                    end_date: str) -> Dict[str, List[str]]:
+        """区间内已有指标日期 {indicator_code: [trade_date,...]}（断点续跑判定）"""
+        rows = self.execute_query(
+            "SELECT DISTINCT indicator_code, trade_date FROM macro_indicator_daily "
+            "WHERE trade_date BETWEEN %s AND %s ORDER BY indicator_code, trade_date",
+            (start_date, end_date))
+        out: Dict[str, List[str]] = {}
+        for r in rows:   # RealDictCursor：dict 行
+            out.setdefault(str(r['indicator_code']), []).append(str(r['trade_date']))
+        return out
+
+    def fetch_macro_latest(self, indicator_code: str) -> Optional[Dict[str, Any]]:
+        rows = self.execute_query(
+            "SELECT trade_date, value, unit FROM macro_indicator_daily "
+            "WHERE indicator_code = %s ORDER BY trade_date DESC LIMIT 1",
+            (indicator_code,))
+        if not rows:
+            return None
+        r = rows[0]
+        return {'trade_date': str(r['trade_date']), 'value': r['value'],
+                'unit': r['unit']}
+
+    def fetch_macro_indicators_as_of(self, trade_date: str) -> List[Dict[str, Any]]:
+        """某日全部指标行（报告层宏观锚消费）"""
+        rows = self.execute_query(
+            "SELECT indicator_code, value, unit, period FROM macro_indicator_daily "
+            "WHERE trade_date = %s ORDER BY indicator_code", (trade_date,))
+        return [{'indicator_code': str(r['indicator_code']), 'value': r['value'],
+                 'unit': r['unit'], 'period': r['period']} for r in rows]
+
+    # ---------- ETF 期权（第三阶段-2） ----------
+
+    def upsert_option_daily(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO option_daily
+        (trade_date, contract_code, contract_symbol, underlying_code, call_put,
+         strike, expiry_date, iv, delta, gamma, theta, vega, rho)
+        VALUES (%(trade_date)s, %(contract_code)s, %(contract_symbol)s,
+                %(underlying_code)s, %(call_put)s, %(strike)s, %(expiry_date)s,
+                %(iv)s, %(delta)s, %(gamma)s, %(theta)s, %(vega)s, %(rho)s)
+        ON CONFLICT (trade_date, contract_code)
+        DO UPDATE SET iv = EXCLUDED.iv, delta = EXCLUDED.delta,
+                      gamma = EXCLUDED.gamma, theta = EXCLUDED.theta,
+                      vega = EXCLUDED.vega, rho = EXCLUDED.rho,
+                      contract_symbol = EXCLUDED.contract_symbol,
+                      underlying_code = EXCLUDED.underlying_code,
+                      call_put = EXCLUDED.call_put, strike = EXCLUDED.strike,
+                      expiry_date = EXCLUDED.expiry_date, update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def upsert_option_underlying_daily(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO option_underlying_daily
+        (trade_date, underlying_code, underlying_name, contract_count, total_amount,
+         total_volume, call_volume, put_volume, put_call_ratio, oi_total, oi_call,
+         oi_put)
+        VALUES (%(trade_date)s, %(underlying_code)s, %(underlying_name)s,
+                %(contract_count)s, %(total_amount)s, %(total_volume)s,
+                %(call_volume)s, %(put_volume)s, %(put_call_ratio)s,
+                %(oi_total)s, %(oi_call)s, %(oi_put)s)
+        ON CONFLICT (trade_date, underlying_code)
+        DO UPDATE SET underlying_name = EXCLUDED.underlying_name,
+                      contract_count = EXCLUDED.contract_count,
+                      total_amount = EXCLUDED.total_amount,
+                      total_volume = EXCLUDED.total_volume,
+                      call_volume = EXCLUDED.call_volume,
+                      put_volume = EXCLUDED.put_volume,
+                      put_call_ratio = EXCLUDED.put_call_ratio,
+                      oi_total = EXCLUDED.oi_total, oi_call = EXCLUDED.oi_call,
+                      oi_put = EXCLUDED.oi_put, update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def upsert_option_contracts(self, rows: List[Dict[str, Any]]) -> int:
+        """合约主数据 upsert（first_seen 保首见日，last_seen 滚动刷新）"""
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO option_contract_master
+        (contract_code, contract_symbol, underlying_code, underlying_name,
+         call_put, strike, expiry_date, first_seen, last_seen)
+        VALUES (%(contract_code)s, %(contract_symbol)s, %(underlying_code)s,
+                %(underlying_name)s, %(call_put)s, %(strike)s, %(expiry_date)s,
+                %(first_seen)s, %(last_seen)s)
+        ON CONFLICT (contract_code)
+        DO UPDATE SET contract_symbol = EXCLUDED.contract_symbol,
+                      underlying_code = EXCLUDED.underlying_code,
+                      underlying_name = EXCLUDED.underlying_name,
+                      call_put = EXCLUDED.call_put, strike = EXCLUDED.strike,
+                      expiry_date = EXCLUDED.expiry_date,
+                      last_seen = EXCLUDED.last_seen, update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def fetch_option_row_count(self, trade_date: str) -> int:
+        rows = self.execute_query(
+            "SELECT COUNT(*) AS n FROM option_daily WHERE trade_date = %s",
+            (trade_date,))
+        return int(rows[0]['n']) if rows else 0
+
+    def fetch_option_underlying_as_of(self, trade_date: str) -> List[Dict[str, Any]]:
+        rows = self.execute_query(
+            "SELECT underlying_code, underlying_name, contract_count, total_amount, "
+            "total_volume, call_volume, put_volume, put_call_ratio, oi_total "
+            "FROM option_underlying_daily WHERE trade_date = %s "
+            "ORDER BY total_amount DESC", (trade_date,))
+        return [{'underlying_code': str(r['underlying_code']),
+                 'underlying_name': r['underlying_name'],
+                 'contract_count': r['contract_count'],
+                 'total_amount': r['total_amount'],
+                 'total_volume': r['total_volume'],
+                 'call_volume': r['call_volume'], 'put_volume': r['put_volume'],
+                 'put_call_ratio': r['put_call_ratio'],
+                 'oi_total': r['oi_total']} for r in rows]
+
+    # ---------- 北向个股明细（第三阶段-3） ----------
+
+    def upsert_north_flow_detail(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO north_flow_detail_daily
+        (trade_date, ts_code, hold_shares, hold_market_value, hold_ratio,
+         change_shares, change_amount)
+        VALUES (%(trade_date)s, %(ts_code)s, %(hold_shares)s,
+                %(hold_market_value)s, %(hold_ratio)s, %(change_shares)s,
+                %(change_amount)s)
+        ON CONFLICT (trade_date, ts_code)
+        DO UPDATE SET hold_shares = EXCLUDED.hold_shares,
+                      hold_market_value = EXCLUDED.hold_market_value,
+                      hold_ratio = EXCLUDED.hold_ratio,
+                      change_shares = EXCLUDED.change_shares,
+                      change_amount = EXCLUDED.change_amount,
+                      update_time = NOW()
+        """
+        return self.execute_batch(sql, [self._strip(r) for r in rows])
+
+    def fetch_north_flow_detail_dates(self, start_date: str,
+                                      end_date: str) -> List[str]:
+        rows = self.execute_query(
+            "SELECT DISTINCT trade_date FROM north_flow_detail_daily "
+            "WHERE trade_date BETWEEN %s AND %s ORDER BY trade_date",
+            (start_date, end_date))
+        return [str(r['trade_date']) for r in rows]
+
+    def fetch_north_flow_detail_max_date(self) -> Optional[str]:
+        rows = self.execute_query(
+            "SELECT MAX(trade_date) AS d FROM north_flow_detail_daily")
+        return str(rows[0]['d']) if rows and rows[0]['d'] else None
+
+    def fetch_north_flow_detail_top(self, trade_date: str,
+                                    limit: int = 10) -> List[Dict[str, Any]]:
+        """某日北向持股市值 Top N（报告层活跃度锚）"""
+        rows = self.execute_query(
+            "SELECT ts_code, hold_shares, hold_market_value, hold_ratio "
+            "FROM north_flow_detail_daily WHERE trade_date = %s "
+            "ORDER BY hold_market_value DESC NULLS LAST LIMIT %s",
+            (trade_date, limit))
+        return [{'ts_code': str(r['ts_code']), 'hold_shares': r['hold_shares'],
+                 'hold_market_value': r['hold_market_value'],
+                 'hold_ratio': r['hold_ratio']} for r in rows]
+
+    def fetch_north_flow_detail_date_count(self) -> int:
+        rows = self.execute_query(
+            "SELECT COUNT(DISTINCT trade_date) AS n FROM north_flow_detail_daily")
+        return int(rows[0]['n']) if rows else 0
 
     # ---------- 解禁 ----------
 
@@ -964,14 +1363,29 @@ class ReviewDaoMixin:
         sql = """
         INSERT INTO money_flow_daily
         (trade_date, ts_code, total_amt, big_buy_amt, big_sell_amt, big_net_amt,
-         big_net_pct, stock_count, calib_note)
+         big_net_pct, super_big_buy_amt, super_big_sell_amt, super_big_net_amt,
+         mid_buy_amt, mid_sell_amt, mid_net_amt,
+         small_buy_amt, small_sell_amt, small_net_amt,
+         stock_count, calib_note)
         VALUES (%(trade_date)s, %(ts_code)s, %(total_amt)s, %(big_buy_amt)s, %(big_sell_amt)s,
-                %(big_net_amt)s, %(big_net_pct)s, %(stock_count)s,
-                COALESCE(%(calib_note)s, '近似口径:分笔分桶'))
+                %(big_net_amt)s, %(big_net_pct)s,
+                %(super_big_buy_amt)s, %(super_big_sell_amt)s, %(super_big_net_amt)s,
+                %(mid_buy_amt)s, %(mid_sell_amt)s, %(mid_net_amt)s,
+                %(small_buy_amt)s, %(small_sell_amt)s, %(small_net_amt)s,
+                %(stock_count)s, COALESCE(%(calib_note)s, '近似口径:分笔分桶'))
         ON CONFLICT (trade_date, ts_code)
         DO UPDATE SET total_amt = EXCLUDED.total_amt, big_buy_amt = EXCLUDED.big_buy_amt,
                       big_sell_amt = EXCLUDED.big_sell_amt, big_net_amt = EXCLUDED.big_net_amt,
-                      big_net_pct = EXCLUDED.big_net_pct, stock_count = EXCLUDED.stock_count,
+                      big_net_pct = EXCLUDED.big_net_pct,
+                      super_big_buy_amt = EXCLUDED.super_big_buy_amt,
+                      super_big_sell_amt = EXCLUDED.super_big_sell_amt,
+                      super_big_net_amt = EXCLUDED.super_big_net_amt,
+                      mid_buy_amt = EXCLUDED.mid_buy_amt, mid_sell_amt = EXCLUDED.mid_sell_amt,
+                      mid_net_amt = EXCLUDED.mid_net_amt,
+                      small_buy_amt = EXCLUDED.small_buy_amt,
+                      small_sell_amt = EXCLUDED.small_sell_amt,
+                      small_net_amt = EXCLUDED.small_net_amt,
+                      stock_count = EXCLUDED.stock_count,
                       calib_note = EXCLUDED.calib_note, update_time = NOW()
         """
         return self.execute_batch(sql, [self._strip(r) for r in rows])
@@ -1061,6 +1475,74 @@ class ReviewDaoMixin:
             WHERE trade_date <= %s
             ORDER BY trade_date DESC LIMIT %s
         """, (trade_date, days))
+
+    # ---------- 复盘预期落库与核验（四期方案 §1） ----------
+
+    def upsert_review_prediction(self, trade_date: str, payload: Dict[str, Any],
+                                 version: int = 1) -> int:
+        """复盘预期落库（payload 由调用方 json.dumps；同锚定日重生成覆盖）"""
+        return self.execute_batch(
+            """
+            INSERT INTO review_prediction_daily (trade_date, payload, version)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (trade_date)
+            DO UPDATE SET payload = EXCLUDED.payload, version = EXCLUDED.version,
+                          update_time = NOW()
+            """,
+            [(trade_date, json.dumps(payload, ensure_ascii=False), version)])
+
+    def fetch_review_prediction(self, trade_date: str) -> Optional[Dict[str, Any]]:
+        """单日预测载荷（JSONB 自动还原 dict）；无行返回 None"""
+        rows = self.execute_query(
+            "SELECT payload FROM review_prediction_daily WHERE trade_date = %s",
+            (trade_date,))
+        return rows[0]['payload'] if rows else None
+
+    def upsert_review_verification(self, trade_date: str, prev_date: Optional[str],
+                                   payload: Dict[str, Any], version: int = 1) -> int:
+        """核验结果落库（同锚定日重生成覆盖）"""
+        return self.execute_batch(
+            """
+            INSERT INTO review_verification_daily (trade_date, prev_date, payload, version)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (trade_date)
+            DO UPDATE SET prev_date = EXCLUDED.prev_date, payload = EXCLUDED.payload,
+                          version = EXCLUDED.version, update_time = NOW()
+            """,
+            [(trade_date, prev_date, json.dumps(payload, ensure_ascii=False), version)])
+
+    def list_review_verifications(self, end_date: str, limit: int = 30) -> List[Dict[str, Any]]:
+        """截至 end_date（含）最近 limit 个核验记录（降序；滚动战绩输入）"""
+        return self.execute_query(
+            """
+            SELECT trade_date, prev_date, payload FROM review_verification_daily
+            WHERE trade_date <= %s
+            ORDER BY trade_date DESC LIMIT %s
+            """, (end_date, limit))
+
+    # ---------- 消息催化新闻（四期方案 §4） ----------
+
+    def upsert_news_telegraph(self, rows: List[Dict[str, Any]]) -> int:
+        """财联社电报 upsert（news_id 唯一；幂等可中断重跑）"""
+        if not rows:
+            return 0
+        return self.execute_batch(
+            """
+            INSERT INTO news_telegraph
+            (news_id, publish_time, trade_date, title, content, subject, importance, source)
+            VALUES (%(news_id)s, %(publish_time)s, %(trade_date)s, %(title)s,
+                    %(content)s, %(subject)s, %(importance)s, %(source)s)
+            ON CONFLICT (news_id)
+            DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content,
+                          subject = EXCLUDED.subject, importance = EXCLUDED.importance,
+                          update_time = NOW()
+            """, [self._strip(r) for r in rows])
+
+    def fetch_latest_news_id(self) -> Optional[str]:
+        """最新入库 news_id（增量游标）"""
+        rows = self.execute_query(
+            "SELECT news_id FROM news_telegraph ORDER BY publish_time DESC LIMIT 1")
+        return rows[0]['news_id'] if rows else None
 
     # ---------- 日K快照（money_flow 子集 / valuation_calc 输入） ----------
 

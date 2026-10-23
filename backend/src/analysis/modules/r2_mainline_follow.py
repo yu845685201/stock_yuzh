@@ -1,4 +1,4 @@
-"""R2 ``r2_mainline_follow`` 主线跟随候选（转天买入候选链）。
+"""R2 ``r2_mainline_follow`` 主线跟随候选（daily_review 链 R 列；2026-10-18 自独立候选链合入）。
 
 判定（candidate_rules.is_r2 同口径）：首板涨停 且 非 ST 且 概念成分命中
 涨停聚集前列概念（全部成分 ∩ 聚集前 3——非报告层题材候选截断串，避免
@@ -34,6 +34,8 @@ class R2MainlineFollow(AnalysisModule):
     )
     required_columns: ClassVar[List[str]] = ['is_st']
     default_params: ClassVar[Dict[str, object]] = {}
+    # 命中统计口径（方案 §2.5）：理由串类，非「否 / 数据不足」即命中
+    hit_rule: ClassVar[str] = 'reason'
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
         r1 = ctx.upstream.get('R1梯队接力')
@@ -61,11 +63,24 @@ class R2MainlineFollow(AnalysisModule):
 
         theme_map = ctx.upstream.get('cand_theme_map') or {}
         top_concepts = ctx.upstream.get('cand_top_concepts') or []
+        cluster_counts = ctx.upstream.get('cand_cluster_counts') or {}
         concepts = theme_map.get(ctx.stock.ts_code) or []
 
-        if not is_r2(streak, is_st, concepts, top_concepts):
+        # 聚集强度（P1-7 A）：命中聚集概念内当日涨停家数（缺失不过滤）
+        cluster_count = None
+        if concepts and top_concepts and cluster_counts:
+            hit_counts = [cluster_counts[c] for c in concepts
+                          if c in set(top_concepts) and c in cluster_counts]
+            cluster_count = max(hit_counts) if hit_counts else None
+
+        if not is_r2(streak, is_st, concepts, top_concepts,
+                     cluster_count=cluster_count):
             return ModuleResult('否')
         # 命中概念取聚集序最前（top_concepts 顺序即家数降序）
         hit_concept = next(c for c in top_concepts if c in set(concepts))
-        return ModuleResult(f'首板/{hit_concept}',
-                            {'concepts': concepts, 'top_concepts': top_concepts})
+        label = f'首板/{hit_concept}'
+        if cluster_count is not None:
+            label += f'(聚集{cluster_count}家)'
+        return ModuleResult(label, {'concepts': concepts,
+                                    'top_concepts': top_concepts,
+                                    'cluster_count': cluster_count})

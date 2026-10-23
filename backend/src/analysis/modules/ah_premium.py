@@ -35,6 +35,8 @@ class AhPremium(AnalysisModule):
     required_columns: ClassVar[List[str]] = ["close", "a_close"]
     max_lookback: ClassVar[int] = 1
     default_params: ClassVar[Dict[str, object]] = {}
+    # 命中统计口径（方案 §2.5）：连续比率不计命中，显示可算样本数
+    hit_rule: ClassVar[str] = "sample"
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
         if any(str(r).startswith(LAG_REASON_PREFIX) for r in (ctx.suspect_reasons or [])):

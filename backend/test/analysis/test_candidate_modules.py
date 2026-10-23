@@ -7,7 +7,7 @@ candidate_rules.is_r1/is_r2/is_r3/is_r4 谓词与报告层共用（同数据同�
 import pandas as pd
 import pytest
 
-from src.analysis.candidate_rules import is_r1, is_r2, is_r3, is_r4
+from src.analysis.candidate_rules import is_r1, is_r2, is_r3, is_r4, r1_tier
 from src.analysis.module_base import ChainContext, ModuleResult, StockInfo
 from src.analysis.modules.r1_ladder_relay import R1LadderRelay
 from src.analysis.modules.r2_mainline_follow import R2MainlineFollow
@@ -37,13 +37,25 @@ def _res(value):
 class TestCandidateRules:
     def test_r1_basic(self):
         assert is_r1(2, False, 0)
-        assert is_r1(7, False, 2)
+        assert is_r1(5, False, 2)          # 中位板：开板 ≤2 仍准入
+
+    def test_r1_high_tier_stricter_reopen(self):
+        """高位板（≥6 板）开板上限收紧为 1（P1-7 §4.6 A）。"""
+        assert is_r1(7, False, 1)          # 高位板开板 1 → 准入
+        assert not is_r1(7, False, 2)      # 高位板开板 2 → 剔除
+        assert not is_r1(6, False, 2)      # 边界：6 板即高位
 
     def test_r1_veto(self):
         assert not is_r1(1, False, 0)          # 连板不足
         assert not is_r1(3, True, 0)           # ST
         assert not is_r1(3, False, 3)          # 开板超限
         assert is_r1(3, False, None)           # 封板数据缺失视为通过
+
+    def test_r1_tier_labels(self):
+        assert r1_tier(2) == '低位板' and r1_tier(3) == '低位板'
+        assert r1_tier(4) == '中位板' and r1_tier(5) == '中位板'
+        assert r1_tier(6) == '高位板' and r1_tier(9) == '高位板'
+        assert r1_tier(1) is None and r1_tier(None) is None
 
     def test_r2_basic_and_veto(self):
         assert is_r2(1, False, ["创新药", "融资融券"], ["创新药"])
@@ -78,18 +90,19 @@ class TestR1LadderRelay:
         return self.mod.analyze(_df(is_st=is_st), _ctx(upstream=upstream))
 
     def test_hit(self):
-        assert self._run(7, open_count=0).value == "7板/开板0次"
-        assert self._run(3, open_count=2).value == "3板/开板2次"
+        assert self._run(7, open_count=0).value == "高位板/7板/开板0次"
+        assert self._run(3, open_count=2).value == "低位板/3板/开板2次"
 
     def test_miss(self):
         assert self._run(1).value == "否"
         assert self._run(4, is_st=1).value == "否"
         assert self._run(4, open_count=3).value == "否"
+        assert self._run(7, open_count=2).value == "否"   # 高位板开板超严限
 
     def test_seal_missing_passes_with_note(self):
         """开板数据缺失视为通过并标注。"""
         upstream = {"连续涨停数": _res(5), "cand_seal_open_map": {}}
-        assert self.mod.analyze(_df(), _ctx(upstream=upstream)).value == "5板/封板数据缺失"
+        assert self.mod.analyze(_df(), _ctx(upstream=upstream)).value == "中位板/5板/封板数据缺失"
 
     def test_missing_predecessor(self):
         assert "数据不足" in self._run(7, upstream_extra={"连续涨停数": None}).value or True

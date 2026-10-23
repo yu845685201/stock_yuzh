@@ -37,6 +37,8 @@ class NewHighLow(AnalysisModule):
     required_columns: ClassVar[List[str]] = ["close", "volume"]
     max_lookback: ClassVar[int] = 61  # 前 60 个交易日 + 锚定日
     default_params: ClassVar[Dict[str, object]] = {"window": 60}
+    # 命中统计分桶（方案 §2.5）：新高/新低两方向分别计数，不合并
+    hit_buckets: ClassVar[List[str]] = ["新高", "新低"]
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
         if df is None or df.empty:

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .env_assembly import ENV_A_SHARE_CANDIDATES
+from .env_assembly import ENV_ASSEMBLERS
 from .lookback import Lookback
 
 CHAINS_DIR = Path(__file__).resolve().parent / "chains"
@@ -38,9 +38,29 @@ class ChainConfig:
     #: 数据域（整合方案 §1.3）：a_share（默认） / overseas_indices / overseas_stocks
     domain: str = "a_share"
     #: 截面环境装配（env_assembly.assemble_env）：None（默认，不装配）/
-    #: a_share_candidates（转天候选链：封板/概念/聚集/机构截面查表）
-    env: Optional[str] = None
+    #: 字符串或字符串列表（a_share_candidates 候选查表 / a_share_valuation
+    #: 个股估值摘要；多个装配依序合并进 ctx.upstream）
+    env: Optional[object] = None
     source_path: Optional[Path] = None
+
+    def env_list(self) -> List[str]:
+        """env 装配标识列表（空 = 不装配）。"""
+        if not self.env:
+            return []
+        if isinstance(self.env, str):
+            return [self.env]
+        return [str(x) for x in self.env]
+
+
+def _parse_env(raw) -> Optional[List[str]]:
+    """env 字段规范化：None / 字符串 / 字符串列表 → Optional[List[str]]。"""
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw if x]
+    raise ValueError(f"链配置 env 字段类型非法: {type(raw).__name__}（支持字符串或列表）")
 
 
 def list_chain_files(chains_dir: Path = CHAINS_DIR) -> List[Path]:
@@ -71,15 +91,16 @@ def load_chain(name: str, chains_dir: Path = CHAINS_DIR) -> ChainConfig:
         description=str(raw.get("description") or ""),
         lookback=Lookback.parse(raw["lookback"]) if "lookback" in raw else Lookback.default(),
         domain=str(raw.get("domain") or "a_share"),
-        env=str(raw["env"]) if raw.get("env") else None,
+        env=_parse_env(raw.get("env")),
         source_path=path,
     )
-    # domain 非法值加载即报错（整合方案 §1.3，防拼错静默落回 A 股域）
-    if chain.env is not None and chain.env != ENV_A_SHARE_CANDIDATES:
-        raise ValueError(
-            f"链配置 {path} 的 env 非法: {chain.env}"
-            f"（可用: {ENV_A_SHARE_CANDIDATES} 或不配置）"
-        )
+    # env 非法值加载即报错（防拼错静默空装配）
+    for env_name in chain.env_list():
+        if env_name not in ENV_ASSEMBLERS:
+            raise ValueError(
+                f"链配置 {path} 的 env 非法: {env_name}"
+                f"（可用: {', '.join(ENV_ASSEMBLERS)} 或不配置）"
+            )
     if chain.domain not in ("a_share", "overseas_indices", "overseas_stocks"):
         raise ValueError(
             f"链配置 {path} 的 domain 非法: {chain.domain}"

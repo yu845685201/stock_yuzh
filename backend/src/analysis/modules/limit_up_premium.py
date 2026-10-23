@@ -35,6 +35,8 @@ class LimitUpPremium(AnalysisModule):
     )
     required_columns: ClassVar[List[str]] = ["change_rate", "close", "high", "is_st", "volume"]
     max_lookback: ClassVar[int] = 2  # 前一交易日 + 锚定日
+    # 命中统计口径（方案 §2.5）：正溢价/负溢价分别计数（晋级成功/失败两面都要可见）
+    hit_rule: ClassVar[str] = "signed"
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
         if df is None or df.empty:

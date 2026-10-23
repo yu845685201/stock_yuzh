@@ -1,0 +1,769 @@
+{
+  "total": 127,
+  "verified": [
+    {
+      "name": "HKUDS__Vibe-Trading",
+      "head": "8e430079fdbd",
+      "https": "https://github.com/HKUDS/Vibe-Trading.git",
+      "ssh": "git@github.com:HKUDS/Vibe-Trading.git"
+    },
+    {
+      "name": "hsliuping__TradingAgents-CN",
+      "head": "51060a7682cf",
+      "https": "https://github.com/hsliuping/TradingAgents-CN.git",
+      "ssh": "git@github.com:hsliuping/TradingAgents-CN.git"
+    },
+    {
+      "name": "HKUDS__AI-Trader",
+      "head": "d03ff6c056b3",
+      "https": "https://github.com/HKUDS/AI-Trader.git",
+      "ssh": "git@github.com:HKUDS/AI-Trader.git"
+    },
+    {
+      "name": "AI4Finance-Foundation__FinGPT",
+      "head": "fdb04c9a273d",
+      "https": "https://github.com/AI4Finance-Foundation/FinGPT.git",
+      "ssh": "git@github.com:AI4Finance-Foundation/FinGPT.git"
+    },
+    {
+      "name": "xbtlin__ai-berkshire",
+      "head": "a221a20def75",
+      "https": "https://github.com/xbtlin/ai-berkshire.git",
+      "ssh": "git@github.com:xbtlin/ai-berkshire.git"
+    },
+    {
+      "name": "OpenByteInc__QuantDinger",
+      "head": "ba8cd667acca",
+      "https": "https://github.com/OpenByteInc/QuantDinger.git",
+      "ssh": "git@github.com:OpenByteInc/QuantDinger.git"
+    },
+    {
+      "name": "ValueCell-ai__valuecell",
+      "head": "9793e9c0563f",
+      "https": "https://github.com/ValueCell-ai/valuecell.git",
+      "ssh": "git@github.com:ValueCell-ai/valuecell.git"
+    },
+    {
+      "name": "AI4Finance-Foundation__FinRobot",
+      "head": "2717499b8e30",
+      "https": "https://github.com/AI4Finance-Foundation/FinRobot.git",
+      "ssh": "git@github.com:AI4Finance-Foundation/FinRobot.git"
+    },
+    {
+      "name": "simonlin1212__TradingAgents-astock",
+      "head": "e3981af1e4c9",
+      "https": "https://github.com/simonlin1212/TradingAgents-astock.git",
+      "ssh": "git@github.com:simonlin1212/TradingAgents-astock.git"
+    },
+    {
+      "name": "oficcejo__aiagents-stock",
+      "head": "f31c44ddbe18",
+      "https": "https://github.com/oficcejo/aiagents-stock.git",
+      "ssh": "git@github.com:oficcejo/aiagents-stock.git"
+    },
+    {
+      "name": "virattt__ai-financial-agent",
+      "head": "836d30b28ff5",
+      "https": "https://github.com/virattt/ai-financial-agent.git",
+      "ssh": "git@github.com:virattt/ai-financial-agent.git"
+    },
+    {
+      "name": "ginlix-ai__LangAlpha",
+      "head": "86a846da9a60",
+      "https": "https://github.com/ginlix-ai/LangAlpha.git",
+      "ssh": "git@github.com:ginlix-ai/LangAlpha.git"
+    },
+    {
+      "name": "KylinMountain__TradingAgents-AShare",
+      "head": "63b25eda4443",
+      "https": "https://github.com/KylinMountain/TradingAgents-AShare.git",
+      "ssh": "git@github.com:KylinMountain/TradingAgents-AShare.git"
+    },
+    {
+      "name": "YoungCan-Wang__WyckoffTradingAgent",
+      "head": "0eee0f118f8c",
+      "https": "https://github.com/YoungCan-Wang/WyckoffTradingAgent.git",
+      "ssh": "git@github.com:YoungCan-Wang/WyckoffTradingAgent.git"
+    },
+    {
+      "name": "jason8745__llm-agent-trader",
+      "head": "68b2741077b6",
+      "https": "https://github.com/jason8745/llm-agent-trader.git",
+      "ssh": "git@github.com:jason8745/llm-agent-trader.git"
+    },
+    {
+      "name": "x-pai__AlphaBot",
+      "head": "23ad5232504e",
+      "https": "https://github.com/x-pai/AlphaBot.git",
+      "ssh": "git@github.com:x-pai/AlphaBot.git"
+    },
+    {
+      "name": "FeiCoder__BreadFree-Simu",
+      "head": "6e5d9dde2047",
+      "https": "https://github.com/FeiCoder/BreadFree-Simu.git",
+      "ssh": "git@github.com:FeiCoder/BreadFree-Simu.git"
+    },
+    {
+      "name": "ArvinLovegood__go-stock",
+      "head": "73d4dcf95b85",
+      "https": "https://github.com/ArvinLovegood/go-stock.git",
+      "ssh": "git@github.com:ArvinLovegood/go-stock.git"
+    },
+    {
+      "name": "shy3130__tick-stock-panel",
+      "head": "c5ffe38c7543",
+      "https": "https://github.com/shy3130/tick-stock-panel.git",
+      "ssh": "git@github.com:shy3130/tick-stock-panel.git"
+    },
+    {
+      "name": "jundizhou__easy-stock",
+      "head": "dc7f64d3ec4f",
+      "https": "https://github.com/jundizhou/easy-stock.git",
+      "ssh": "git@github.com:jundizhou/easy-stock.git"
+    },
+    {
+      "name": "simonlin1212__Vibe-Research",
+      "head": "d643728e79b9",
+      "https": "https://github.com/simonlin1212/Vibe-Research.git",
+      "ssh": "git@github.com:simonlin1212/Vibe-Research.git"
+    },
+    {
+      "name": "TNT-Likely__PanWatch",
+      "head": "1ebec29a494b",
+      "https": "https://github.com/TNT-Likely/PanWatch.git",
+      "ssh": "git@github.com:TNT-Likely/PanWatch.git"
+    },
+    {
+      "name": "simonlin1212__vibe-astock",
+      "head": "d5bf80d2ed16",
+      "https": "https://github.com/simonlin1212/vibe-astock.git",
+      "ssh": "git@github.com:simonlin1212/vibe-astock.git"
+    },
+    {
+      "name": "Austin-Patrician__eastmoney",
+      "head": "e293bf7effad",
+      "https": "https://github.com/Austin-Patrician/eastmoney.git",
+      "ssh": "git@github.com:Austin-Patrician/eastmoney.git"
+    },
+    {
+      "name": "agentpit-io__hunter-community",
+      "head": "4e369531b172",
+      "https": "https://github.com/agentpit-io/hunter-community.git",
+      "ssh": "git@github.com:agentpit-io/hunter-community.git"
+    },
+    {
+      "name": "stock-programmer__limit-up-review",
+      "head": "0d1606d55bd8",
+      "https": "https://github.com/stock-programmer/limit-up-review.git",
+      "ssh": "git@github.com:stock-programmer/limit-up-review.git"
+    },
+    {
+      "name": "myhhub__stock",
+      "head": "b6e0ca2268cf",
+      "https": "https://github.com/myhhub/stock.git",
+      "ssh": "git@github.com:myhhub/stock.git"
+    },
+    {
+      "name": "sngyai__Sequoia-X",
+      "head": "444c0db69ff3",
+      "https": "https://github.com/sngyai/Sequoia-X.git",
+      "ssh": "git@github.com:sngyai/Sequoia-X.git"
+    },
+    {
+      "name": "wangshub__RL-Stock",
+      "head": "22d2cbf88f62",
+      "https": "https://github.com/wangshub/RL-Stock.git",
+      "ssh": "git@github.com:wangshub/RL-Stock.git"
+    },
+    {
+      "name": "axiaoxin-com__investool",
+      "head": "2323bfdd2ba7",
+      "https": "https://github.com/axiaoxin-com/investool.git",
+      "ssh": "git@github.com:axiaoxin-com/investool.git"
+    },
+    {
+      "name": "tkfy920__qstock",
+      "head": "d710191e9318",
+      "https": "https://github.com/tkfy920/qstock.git",
+      "ssh": "git@github.com:tkfy920/qstock.git"
+    },
+    {
+      "name": "wkingnet__stock-analysis",
+      "head": "814f1d4db3a7",
+      "https": "https://github.com/wkingnet/stock-analysis.git",
+      "ssh": "git@github.com:wkingnet/stock-analysis.git"
+    },
+    {
+      "name": "ling-0729__KHunter",
+      "head": "9b2e8f0b179c",
+      "https": "https://github.com/ling-0729/KHunter.git",
+      "ssh": "git@github.com:ling-0729/KHunter.git"
+    },
+    {
+      "name": "Dzy-HW-XD__a-share-quant-selector",
+      "head": "9cfbf80305ce",
+      "https": "https://github.com/Dzy-HW-XD/a-share-quant-selector.git",
+      "ssh": "git@github.com:Dzy-HW-XD/a-share-quant-selector.git"
+    },
+    {
+      "name": "stlin256__AShare-AI-Stock-Picker",
+      "head": "6b296a85a52d",
+      "https": "https://github.com/stlin256/AShare-AI-Stock-Picker.git",
+      "ssh": "git@github.com:stlin256/AShare-AI-Stock-Picker.git"
+    },
+    {
+      "name": "online0001__short-term-stock-picker",
+      "head": "91354201b6df",
+      "https": "https://github.com/online0001/short-term-stock-picker.git",
+      "ssh": "git@github.com:online0001/short-term-stock-picker.git"
+    },
+    {
+      "name": "Jesse-J-whu__stock-picker",
+      "head": "c7c76a712978",
+      "https": "https://github.com/Jesse-J-whu/stock-picker.git",
+      "ssh": "git@github.com:Jesse-J-whu/stock-picker.git"
+    },
+    {
+      "name": "meiqinggao__AStock-Trading",
+      "head": "3ac0524db5be",
+      "https": "https://github.com/meiqinggao/AStock-Trading.git",
+      "ssh": "git@github.com:meiqinggao/AStock-Trading.git"
+    },
+    {
+      "name": "huang1125677925__jingjia-stock-selector-custom-skill",
+      "head": "fc9915875006",
+      "https": "https://github.com/huang1125677925/jingjia-stock-selector-custom-skill.git",
+      "ssh": "git@github.com:huang1125677925/jingjia-stock-selector-custom-skill.git"
+    },
+    {
+      "name": "pranjal-joshi__Screeni-py",
+      "head": "ad1058a3c5b8",
+      "https": "https://github.com/pranjal-joshi/Screeni-py.git",
+      "ssh": "git@github.com:pranjal-joshi/Screeni-py.git"
+    },
+    {
+      "name": "microsoft__qlib",
+      "head": "543552324638",
+      "https": "https://github.com/microsoft/qlib.git",
+      "ssh": "git@github.com:microsoft/qlib.git"
+    },
+    {
+      "name": "mementum__backtrader",
+      "head": "b853d7c90b67",
+      "https": "https://github.com/mementum/backtrader.git",
+      "ssh": "git@github.com:mementum/backtrader.git"
+    },
+    {
+      "name": "QuantConnect__Lean",
+      "head": "80e7843f6456",
+      "https": "https://github.com/QuantConnect/Lean.git",
+      "ssh": "git@github.com:QuantConnect/Lean.git"
+    },
+    {
+      "name": "stefan-jansen__machine-learning-for-trading",
+      "head": "988cf9715b49",
+      "https": "https://github.com/stefan-jansen/machine-learning-for-trading.git",
+      "ssh": "git@github.com:stefan-jansen/machine-learning-for-trading.git"
+    },
+    {
+      "name": "quantopian__zipline",
+      "head": "014f1fc339dc",
+      "https": "https://github.com/quantopian/zipline.git",
+      "ssh": "git@github.com:quantopian/zipline.git"
+    },
+    {
+      "name": "bbfamily__abu",
+      "head": "d602d847677e",
+      "https": "https://github.com/bbfamily/abu.git",
+      "ssh": "git@github.com:bbfamily/abu.git"
+    },
+    {
+      "name": "UFund-Me__Qbot",
+      "head": "f0425ae4ae8b",
+      "https": "https://github.com/UFund-Me/Qbot.git",
+      "ssh": "git@github.com:UFund-Me/Qbot.git"
+    },
+    {
+      "name": "yutiansut__QUANTAXIS",
+      "head": "232aa7ac9869",
+      "https": "https://github.com/yutiansut/QUANTAXIS.git",
+      "ssh": "git@github.com:yutiansut/QUANTAXIS.git"
+    },
+    {
+      "name": "StockSharp__StockSharp",
+      "head": "61cc0f169742",
+      "https": "https://github.com/StockSharp/StockSharp.git",
+      "ssh": "git@github.com:StockSharp/StockSharp.git"
+    },
+    {
+      "name": "huseinzol05__Stock-Prediction-Models",
+      "head": "33266732b0b1",
+      "https": "https://github.com/huseinzol05/Stock-Prediction-Models.git",
+      "ssh": "git@github.com:huseinzol05/Stock-Prediction-Models.git"
+    },
+    {
+      "name": "polakowo__vectorbt",
+      "head": "f54802a5982c",
+      "https": "https://github.com/polakowo/vectorbt.git",
+      "ssh": "git@github.com:polakowo/vectorbt.git"
+    },
+    {
+      "name": "tensortrade-org__tensortrade",
+      "head": "d58afba23deb",
+      "https": "https://github.com/tensortrade-org/tensortrade.git",
+      "ssh": "git@github.com:tensortrade-org/tensortrade.git"
+    },
+    {
+      "name": "ricequant__rqalpha",
+      "head": "284b78a1975b",
+      "https": "https://github.com/ricequant/rqalpha.git",
+      "ssh": "git@github.com:ricequant/rqalpha.git"
+    },
+    {
+      "name": "charliedream1__ai_quant_trade",
+      "head": "a67a217aaea4",
+      "https": "https://github.com/charliedream1/ai_quant_trade.git",
+      "ssh": "git@github.com:charliedream1/ai_quant_trade.git"
+    },
+    {
+      "name": "jaungiers__LSTM-Neural-Network-for-Time-Series-Prediction",
+      "head": "da44411c9113",
+      "https": "https://github.com/jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git",
+      "ssh": "git@github.com:jaungiers/LSTM-Neural-Network-for-Time-Series-Prediction.git"
+    },
+    {
+      "name": "nkaz001__hftbacktest",
+      "head": "5f3ec40b2afb",
+      "https": "https://github.com/nkaz001/hftbacktest.git",
+      "ssh": "git@github.com:nkaz001/hftbacktest.git"
+    },
+    {
+      "name": "shashankvemuri__Finance",
+      "head": "20799035c34d",
+      "https": "https://github.com/shashankvemuri/Finance.git",
+      "ssh": "git@github.com:shashankvemuri/Finance.git"
+    },
+    {
+      "name": "fasiondog__hikyuu",
+      "head": "59618dd646df",
+      "https": "https://github.com/fasiondog/hikyuu.git",
+      "ssh": "git@github.com:fasiondog/hikyuu.git"
+    },
+    {
+      "name": "edtechre__pybroker",
+      "head": "95e00fecb100",
+      "https": "https://github.com/edtechre/pybroker.git",
+      "ssh": "git@github.com:edtechre/pybroker.git"
+    },
+    {
+      "name": "akfamily__akquant",
+      "head": "e86d611dcd77",
+      "https": "https://github.com/akfamily/akquant.git",
+      "ssh": "git@github.com:akfamily/akquant.git"
+    },
+    {
+      "name": "achillesrasquinha__bulbea",
+      "head": "4caba8f042f1",
+      "https": "https://github.com/achillesrasquinha/bulbea.git",
+      "ssh": "git@github.com:achillesrasquinha/bulbea.git"
+    },
+    {
+      "name": "robertmartin8__MachineLearningStocks",
+      "head": "1c3712af741a",
+      "https": "https://github.com/robertmartin8/MachineLearningStocks.git",
+      "ssh": "git@github.com:robertmartin8/MachineLearningStocks.git"
+    },
+    {
+      "name": "qusong0627__QuantMind",
+      "head": "7d8019cac06e",
+      "https": "https://github.com/qusong0627/QuantMind.git",
+      "ssh": "git@github.com:qusong0627/QuantMind.git"
+    },
+    {
+      "name": "LastAncientOne__Deep_Learning_Machine_Learning_Stock",
+      "head": "e31e9fc689cd",
+      "https": "https://github.com/LastAncientOne/Deep_Learning_Machine_Learning_Stock.git",
+      "ssh": "git@github.com:LastAncientOne/Deep_Learning_Machine_Learning_Stock.git"
+    },
+    {
+      "name": "touhoufan2024__qlibAssistant",
+      "head": "77547728eb08",
+      "https": "https://github.com/touhoufan2024/qlibAssistant.git",
+      "ssh": "git@github.com:touhoufan2024/qlibAssistant.git"
+    },
+    {
+      "name": "jrothschild33__learn_backtrader",
+      "head": "de32a182184a",
+      "https": "https://github.com/jrothschild33/learn_backtrader.git",
+      "ssh": "git@github.com:jrothschild33/learn_backtrader.git"
+    },
+    {
+      "name": "waditu__czsc",
+      "head": "701e480a5450",
+      "https": "https://github.com/waditu/czsc.git",
+      "ssh": "git@github.com:waditu/czsc.git"
+    },
+    {
+      "name": "bukosabino__ta",
+      "head": "a890410710a6",
+      "https": "https://github.com/bukosabino/ta.git",
+      "ssh": "git@github.com:bukosabino/ta.git"
+    },
+    {
+      "name": "mpquant__MyTT",
+      "head": "7cd36ae13cae",
+      "https": "https://github.com/mpquant/MyTT.git",
+      "ssh": "git@github.com:mpquant/MyTT.git"
+    },
+    {
+      "name": "jones2000__HQChart",
+      "head": "73e42a1f786a",
+      "https": "https://github.com/jones2000/HQChart.git",
+      "ssh": "git@github.com:jones2000/HQChart.git"
+    },
+    {
+      "name": "Vespa314__chan.py",
+      "head": "429d6ed3043e",
+      "https": "https://github.com/Vespa314/chan.py.git",
+      "ssh": "git@github.com:Vespa314/chan.py.git"
+    },
+    {
+      "name": "ta4j__ta4j",
+      "head": "6448f810d933",
+      "https": "https://github.com/ta4j/ta4j.git",
+      "ssh": "git@github.com:ta4j/ta4j.git"
+    },
+    {
+      "name": "andredumas__techan.js",
+      "head": "434eab99e9cf",
+      "https": "https://github.com/andredumas/techan.js.git",
+      "ssh": "git@github.com:andredumas/techan.js.git"
+    },
+    {
+      "name": "yijixiuxin__chanlun-pro",
+      "head": "d752b651b73e",
+      "https": "https://github.com/yijixiuxin/chanlun-pro.git",
+      "ssh": "git@github.com:yijixiuxin/chanlun-pro.git"
+    },
+    {
+      "name": "cinar__indicator",
+      "head": "18a0b934a565",
+      "https": "https://github.com/cinar/indicator.git",
+      "ssh": "git@github.com:cinar/indicator.git"
+    },
+    {
+      "name": "TA-Lib__ta-lib",
+      "head": "481dda1b1035",
+      "https": "https://github.com/TA-Lib/ta-lib.git",
+      "ssh": "git@github.com:TA-Lib/ta-lib.git"
+    },
+    {
+      "name": "deepentropy__tvscreener",
+      "head": "6faf496fa8b2",
+      "https": "https://github.com/deepentropy/tvscreener.git",
+      "ssh": "git@github.com:deepentropy/tvscreener.git"
+    },
+    {
+      "name": "shner-elmo__TradingView-Screener",
+      "head": "5422d9012752",
+      "https": "https://github.com/shner-elmo/TradingView-Screener.git",
+      "ssh": "git@github.com:shner-elmo/TradingView-Screener.git"
+    },
+    {
+      "name": "facioquo__stock-indicators-dotnet",
+      "head": "009b4c932bb6",
+      "https": "https://github.com/facioquo/stock-indicators-dotnet.git",
+      "ssh": "git@github.com:facioquo/stock-indicators-dotnet.git"
+    },
+    {
+      "name": "femtotrader__pandas_talib",
+      "head": "49f773a0d0f2",
+      "https": "https://github.com/femtotrader/pandas_talib.git",
+      "ssh": "git@github.com:femtotrader/pandas_talib.git"
+    },
+    {
+      "name": "hackingthemarkets__candlestick-screener",
+      "head": "2747eab3d310",
+      "https": "https://github.com/hackingthemarkets/candlestick-screener.git",
+      "ssh": "git@github.com:hackingthemarkets/candlestick-screener.git"
+    },
+    {
+      "name": "ibaihuo__chanvis",
+      "head": "0608519a6447",
+      "https": "https://github.com/ibaihuo/chanvis.git",
+      "ssh": "git@github.com:ibaihuo/chanvis.git"
+    },
+    {
+      "name": "neil-pan-s__one-quant-doc",
+      "head": "7231f5d5353c",
+      "https": "https://github.com/neil-pan-s/one-quant-doc.git",
+      "ssh": "git@github.com:neil-pan-s/one-quant-doc.git"
+    },
+    {
+      "name": "tomcat123a__-chanlun",
+      "head": "3bfbdf3483a2",
+      "https": "https://github.com/tomcat123a/-chanlun.git",
+      "ssh": "git@github.com:tomcat123a/-chanlun.git"
+    },
+    {
+      "name": "SpiralDevelopment__candlestick-patterns",
+      "head": "bd7630a4695c",
+      "https": "https://github.com/SpiralDevelopment/candlestick-patterns.git",
+      "ssh": "git@github.com:SpiralDevelopment/candlestick-patterns.git"
+    },
+    {
+      "name": "xgboosted__pandas-ta-classic",
+      "head": "b08a2400242a",
+      "https": "https://github.com/xgboosted/pandas-ta-classic.git",
+      "ssh": "git@github.com:xgboosted/pandas-ta-classic.git"
+    },
+    {
+      "name": "kldcty__ChanlunX",
+      "head": "10ea0b731144",
+      "https": "https://github.com/kldcty/ChanlunX.git",
+      "ssh": "git@github.com:kldcty/ChanlunX.git"
+    },
+    {
+      "name": "Fidingks__facecat-kronos",
+      "head": "dee5d9f3bd7b",
+      "https": "https://github.com/Fidingks/facecat-kronos.git",
+      "ssh": "git@github.com:Fidingks/facecat-kronos.git"
+    },
+    {
+      "name": "sansan0__TrendRadar",
+      "head": "ae6e980f8f51",
+      "https": "https://github.com/sansan0/TrendRadar.git",
+      "ssh": "git@github.com:sansan0/TrendRadar.git"
+    },
+    {
+      "name": "666ghj__BettaFish",
+      "head": "b67928ff1ce5",
+      "https": "https://github.com/666ghj/BettaFish.git",
+      "ssh": "git@github.com:666ghj/BettaFish.git"
+    },
+    {
+      "name": "shirosaidev__stocksight",
+      "head": "580d35876f2d",
+      "https": "https://github.com/shirosaidev/stocksight.git",
+      "ssh": "git@github.com:shirosaidev/stocksight.git"
+    },
+    {
+      "name": "kaushikjadhav01__Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis",
+      "head": "fcd9b6b98dac",
+      "https": "https://github.com/kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git",
+      "ssh": "git@github.com:kaushikjadhav01/Stock-Market-Prediction-Web-App-using-Machine-Learning-And-Sentiment-Analysis.git"
+    },
+    {
+      "name": "WayneDW__Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction",
+      "head": "fcb29fbcde2a",
+      "https": "https://github.com/WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git",
+      "ssh": "git@github.com:WayneDW/Sentiment-Analysis-in-Event-Driven-Stock-Price-Movement-Prediction.git"
+    },
+    {
+      "name": "algosenses__Stock_Market_Sentiment_Analysis",
+      "head": "86b0b3d74a44",
+      "https": "https://github.com/algosenses/Stock_Market_Sentiment_Analysis.git",
+      "ssh": "git@github.com:algosenses/Stock_Market_Sentiment_Analysis.git"
+    },
+    {
+      "name": "ranaroussi__yfinance",
+      "head": "5cae563642b5",
+      "https": "https://github.com/ranaroussi/yfinance.git",
+      "ssh": "git@github.com:ranaroussi/yfinance.git"
+    },
+    {
+      "name": "akfamily__akshare",
+      "head": "fac1e50ebf9b",
+      "https": "https://github.com/akfamily/akshare.git",
+      "ssh": "git@github.com:akfamily/akshare.git"
+    },
+    {
+      "name": "shidenggui__easytrader",
+      "head": "def5a8edc5eb",
+      "https": "https://github.com/shidenggui/easytrader.git",
+      "ssh": "git@github.com:shidenggui/easytrader.git"
+    },
+    {
+      "name": "simonlin1212__a-stock-data",
+      "head": "29b07d2e3700",
+      "https": "https://github.com/simonlin1212/a-stock-data.git",
+      "ssh": "git@github.com:simonlin1212/a-stock-data.git"
+    },
+    {
+      "name": "goldmansachs__gs-quant",
+      "head": "e5b96bf48b1f",
+      "https": "https://github.com/goldmansachs/gs-quant.git",
+      "ssh": "git@github.com:goldmansachs/gs-quant.git"
+    },
+    {
+      "name": "JerBouma__FinanceDatabase",
+      "head": "fe5f75ca72f7",
+      "https": "https://github.com/JerBouma/FinanceDatabase.git",
+      "ssh": "git@github.com:JerBouma/FinanceDatabase.git"
+    },
+    {
+      "name": "1nchaos__adata",
+      "head": "b14f4e57b217",
+      "https": "https://github.com/1nchaos/adata.git",
+      "ssh": "git@github.com:1nchaos/adata.git"
+    },
+    {
+      "name": "shidenggui__easyquotation",
+      "head": "7778c1b9f93a",
+      "https": "https://github.com/shidenggui/easyquotation.git",
+      "ssh": "git@github.com:shidenggui/easyquotation.git"
+    },
+    {
+      "name": "Micro-sheep__efinance",
+      "head": "c8fd370a3109",
+      "https": "https://github.com/Micro-sheep/efinance.git",
+      "ssh": "git@github.com:Micro-sheep/efinance.git"
+    },
+    {
+      "name": "mpquant__Ashare",
+      "head": "7ef1ce075794",
+      "https": "https://github.com/mpquant/Ashare.git",
+      "ssh": "git@github.com:mpquant/Ashare.git"
+    },
+    {
+      "name": "openctp__openctp",
+      "head": "0a6dce6f0ecd",
+      "https": "https://github.com/openctp/openctp.git",
+      "ssh": "git@github.com:openctp/openctp.git"
+    },
+    {
+      "name": "simonlin1212__global-stock-data",
+      "head": "f0b2df07815d",
+      "https": "https://github.com/simonlin1212/global-stock-data.git",
+      "ssh": "git@github.com:simonlin1212/global-stock-data.git"
+    },
+    {
+      "name": "nladuo__THSTrader",
+      "head": "fe07e879c619",
+      "https": "https://github.com/nladuo/THSTrader.git",
+      "ssh": "git@github.com:nladuo/THSTrader.git"
+    },
+    {
+      "name": "tickflow-org__tickflow",
+      "head": "c27f23c50386",
+      "https": "https://github.com/tickflow-org/tickflow.git",
+      "ssh": "git@github.com:tickflow-org/tickflow.git"
+    },
+    {
+      "name": "skyformat99__ths_trade",
+      "head": "8c560d4481f6",
+      "https": "https://github.com/skyformat99/ths_trade.git",
+      "ssh": "git@github.com:skyformat99/ths_trade.git"
+    },
+    {
+      "name": "openbq-org__OpenBB",
+      "head": "ae0268771f76",
+      "https": "https://github.com/openbq-org/OpenBB.git",
+      "ssh": "git@github.com:openbq-org/OpenBB.git"
+    },
+    {
+      "name": "Fincept-Corporation__FinceptTerminal",
+      "head": "3f444cb7ab71",
+      "https": "https://github.com/Fincept-Corporation/FinceptTerminal.git",
+      "ssh": "git@github.com:Fincept-Corporation/FinceptTerminal.git"
+    },
+    {
+      "name": "TraderAlice__OpenAlice",
+      "head": "87bc415260aa",
+      "https": "https://github.com/TraderAlice/OpenAlice.git",
+      "ssh": "git@github.com:TraderAlice/OpenAlice.git"
+    },
+    {
+      "name": "bklieger-groq__stockbot-on-groq",
+      "head": "0ea5de9dad7e",
+      "https": "https://github.com/bklieger-groq/stockbot-on-groq.git",
+      "ssh": "git@github.com:bklieger-groq/stockbot-on-groq.git"
+    },
+    {
+      "name": "wbh604__UZI-Skill",
+      "head": "650788c54a9b",
+      "https": "https://github.com/wbh604/UZI-Skill.git",
+      "ssh": "git@github.com:wbh604/UZI-Skill.git"
+    },
+    {
+      "name": "AlphaGBM__skills",
+      "head": "b625a392c83d",
+      "https": "https://github.com/AlphaGBM/skills.git",
+      "ssh": "git@github.com:AlphaGBM/skills.git"
+    },
+    {
+      "name": "atilaahmettaner__tradingview-mcp",
+      "head": "099090e15fb7",
+      "https": "https://github.com/atilaahmettaner/tradingview-mcp.git",
+      "ssh": "git@github.com:atilaahmettaner/tradingview-mcp.git"
+    },
+    {
+      "name": "tradermonty__claude-trading-skills",
+      "head": "c8d58f01912c",
+      "https": "https://github.com/tradermonty/claude-trading-skills.git",
+      "ssh": "git@github.com:tradermonty/claude-trading-skills.git"
+    },
+    {
+      "name": "guangxiangdebizi__FinanceMCP",
+      "head": "04df04cb31c7",
+      "https": "https://github.com/guangxiangdebizi/FinanceMCP.git",
+      "ssh": "git@github.com:guangxiangdebizi/FinanceMCP.git"
+    },
+    {
+      "name": "wshobson__maverick-mcp",
+      "head": "475899c4363a",
+      "https": "https://github.com/wshobson/maverick-mcp.git",
+      "ssh": "git@github.com:wshobson/maverick-mcp.git"
+    },
+    {
+      "name": "wshobson__mcp-trader",
+      "head": "8b7b96043fed",
+      "https": "https://github.com/wshobson/mcp-trader.git",
+      "ssh": "git@github.com:wshobson/mcp-trader.git"
+    },
+    {
+      "name": "yennanliu__InvestSkill",
+      "head": "50134bdcdf1d",
+      "https": "https://github.com/yennanliu/InvestSkill.git",
+      "ssh": "git@github.com:yennanliu/InvestSkill.git"
+    },
+    {
+      "name": "agentii-ai__agentii-investment-intelligence",
+      "head": "86980e14fb98",
+      "https": "https://github.com/agentii-ai/agentii-investment-intelligence.git",
+      "ssh": "git@github.com:agentii-ai/agentii-investment-intelligence.git"
+    },
+    {
+      "name": "kangarooking__buffett-letters-skill",
+      "head": "5b1fbe1d93f1",
+      "https": "https://github.com/kangarooking/buffett-letters-skill.git",
+      "ssh": "git@github.com:kangarooking/buffett-letters-skill.git"
+    },
+    {
+      "name": "wilsonfreitas__awesome-quant",
+      "head": "48e48a76b205",
+      "https": "https://github.com/wilsonfreitas/awesome-quant.git",
+      "ssh": "git@github.com:wilsonfreitas/awesome-quant.git"
+    },
+    {
+      "name": "wangzhe3224__awesome-systematic-trading",
+      "head": "0f95a0ee4c6e",
+      "https": "https://github.com/wangzhe3224/awesome-systematic-trading.git",
+      "ssh": "git@github.com:wangzhe3224/awesome-systematic-trading.git"
+    },
+    {
+      "name": "grananqvist__Awesome-Quant-Machine-Learning-Trading",
+      "head": "9b9c3c0fafa7",
+      "https": "https://github.com/grananqvist/Awesome-Quant-Machine-Learning-Trading.git",
+      "ssh": "git@github.com:grananqvist/Awesome-Quant-Machine-Learning-Trading.git"
+    },
+    {
+      "name": "LLMQuant__quant-wiki",
+      "head": "f08b94e13425",
+      "https": "https://github.com/LLMQuant/quant-wiki.git",
+      "ssh": "git@github.com:LLMQuant/quant-wiki.git"
+    }
+  ],
+  "missing": [],
+  "extra": []
+}

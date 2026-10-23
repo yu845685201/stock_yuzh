@@ -422,6 +422,43 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                  f'六维报告同源（ReviewAggregator 同一次聚合）；外围为市场自身交易日历'
                  f'（qfq/指数原值），A 股锚定日 {as_of}、前一交易日 {prev_date or "—"}。</p>')
 
+    # 〇、昨日核验摘要（四期 §1.4：复盘先对账，置于大盘环境之前）
+    ver = agg.get('verification') or {}
+    if ver.get('available') and ver.get('data'):
+        parts.append('<h2>〇、昨日核验（摘要）</h2>')
+        ver_data = ver['data']
+        sc = ver_data.get('scenario') or {}
+        if sc.get('triggered'):
+            open_bit = ''
+            if sc.get('expectation') and sc.get('open_gap') is not None:
+                open_bit = (f"，今日上证开盘 {_fmt(sc.get('open_gap'), 2, True)}% —— "
+                            f"{_esc(sc['expectation'])}预期"
+                            f"{_esc(sc.get('fulfilled') or '数据不足')}")
+            parts.append(f'<p>情景：<strong>{_esc(sc["triggered"])}</strong>'
+                         f'{open_bit}</p>')
+        v2 = next((p for p in (ver_data.get('verify_points') or [])
+                   if str(p.get('key', '')).startswith('V2')), None)
+        if v2:
+            parts.append(f'<p>V2 梯队：{_esc(v2.get("base"))} —— 今日 {_esc(v2.get("actual"))}'
+                         f'，判定 <strong>{_esc(v2.get("verdict"))}</strong></p>')
+        cand = ver_data.get('candidates') or {}
+        excess_bits = []
+        for key in ('R1', 'R2', 'R3', 'R4'):
+            st = ((cand.get('pools') or {}).get(key) or {})
+            if st.get('traded') and st.get('excess_median') is not None:
+                excess_bits.append(f'{key} {st["excess_median"]:+.2f}pct')
+        if excess_bits:
+            mkt = cand.get('market_median')
+            parts.append('<p>候选池超额（池中位 − 全市场中位'
+                         + (f' {_fmt(mkt, 2, True)}%' if mkt is not None else '')
+                         + '）：<strong>' + '；'.join(_esc(b) for b in excess_bits)
+                         + '</strong></p>')
+        if ver_data.get('rolling'):
+            parts.append('<p class="note">滚动战绩（近 30 核验日）详见报告'
+                         '「〇、昨日核验」章节。</p>')
+    elif ver.get('reason'):
+        parts.append(f'<p class="note">昨日核验：{_esc(ver["reason"])}</p>')
+
     parts.append('<h2>一、大盘环境（A 股）</h2>')
     if a_idx:
         parts.append('<div class="chart">' + svg_dual_bars(a_idx) + '</div>')
@@ -436,6 +473,13 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     cycle = (senti.get('cycle') or {})
     parts.append(f'<p>情绪周期定位：<strong>{_esc(cycle.get("position", "—"))}</strong>'
                  f'（{"；".join(_esc(b) for b in (cycle.get("basis") or [])) or "—"}）</p>')
+    trend = senti.get('cycle_trend')
+    if trend:
+        complete = '' if trend.get('complete') else f"（窗口仅 {trend['window']} 天，读数不完整）"
+        parts.append(f'<p>周期走向：10 日窗口 score <strong>{_fmt(trend.get("score"), 2)}</strong>'
+                     f'（窗口分位 {_esc(trend.get("window_pct"))}%），'
+                     f'{_esc(trend.get("direction"))}（首尾差 {_fmt(trend.get("delta"), 2, True)}），'
+                     f'距窗口最低点第 {_esc(trend.get("days_since_low"))} 天{complete}</p>')
     parts.append('<div class="chart">' + svg_ladder(ladder) + '</div>')
     parts.append('<div class="chart">' + svg_position_bars(pct_items) + '</div>')
     parts.append(f'<p class="note">涨停 {_esc(senti.get("limit_up_count"))} 家 / '
@@ -485,6 +529,22 @@ def build_digest(config_manager, as_of: Optional[str] = None,
         parts.append('<div class="chart">' + svg_vbars(hol_items) + '</div>')
         parts.append('<p class="note">区间（前一 A 股交易日, 锚定日）各市场自身交易日'
                      '首尾收盘比（qfq）；锚定日当日变化计入当日%，不重复计入。</p>')
+
+    # 市场要闻（四期 §4；新浪 7x24 当日快讯，importance 优先）
+    news = agg.get('news') or {}
+    news_items = ((news.get('data') or {}).get('items')) or []
+    if news_items:
+        parts.append('<h2>市场要闻（新浪 7x24，重要优先）</h2>')
+        parts.append('<ul class="news">')
+        for it in news_items[:10]:
+            star = '★ ' if it.get('importance') else ''
+            t = str(it.get('time', ''))
+            hm = t[11:16] if len(t) >= 16 else ''
+            parts.append(f'<li>{_esc(star)}{_esc(hm)} {_esc(it.get("title"))}</li>')
+        parts.append('</ul>')
+        parts.append('<p class="note">新闻归因是市场叙事，不是核验过的因果。</p>')
+    elif news.get('reason'):
+        parts.append(f'<p class="note">市场要闻：{_esc(news["reason"])}</p>')
 
     parts.append('<div class="interp"><h2>复盘解读</h2>')
     interp_path = Path(interpretation_path) if interpretation_path else \

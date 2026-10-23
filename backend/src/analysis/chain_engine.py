@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -34,15 +34,21 @@ from .result_writer import RunMeta, ResultWriter, now_iso
 logger = logging.getLogger(__name__)
 
 
-def _is_hit(value: Any) -> bool:
-    """命中统计：布尔类模块值为「是」，数值类模块值 > 0，其余不计。"""
-    if isinstance(value, bool):
-        return value
-    if value == "是":
-        return True
-    if isinstance(value, (int, float)):
-        return value > 0
-    return False
+def flatten_hits(buckets: Dict[str, Dict[str, int]]) -> Dict[str, Any]:
+    """把跨股累计的命中桶压平为展示结构（方案 §2.5）。
+
+    单桶「命中」压平为 int（与历史显示兼容），多桶保留 ``{桶名: 数}``
+    （如大涨/大跌分桶、正/负溢价分桶、可算样本数）。
+    """
+    summary: Dict[str, Any] = {}
+    for name, b in buckets.items():
+        if not b:
+            summary[name] = 0
+        elif set(b) == {"命中"}:
+            summary[name] = b["命中"]
+        else:
+            summary[name] = b
+    return summary
 
 
 @dataclass
@@ -74,7 +80,9 @@ class EngineResult:
     suspended_count: int
     module_names: List[str]
     duration_seconds: float
-    hit_summary: Dict[str, int]
+    hit_summary: Dict[str, Any]
+    #: 各模块「数据不足」行数（样本数类模块展示用：可算 N（数据不足 M））
+    insufficient_summary: Dict[str, int] = field(default_factory=dict)
     lookback: str = ""
     window_start: Optional[str] = None
     loaded_trading_days: int = 0
@@ -121,9 +129,10 @@ class ChainEngine:
             lookback_desc = load.lookback_desc
             window_start = load.window_start
             window_expanded = load.window_expanded
-            # 截面环境装配（env_assembly；链未声明 env 时零行为变化）
-            if chain.env:
-                load.env_extras.update(assemble_env(chain.env, reader, as_of,
+            # 截面环境装配（env_assembly；链未声明 env 时零行为变化；
+            # env 为列表时依序装配合并，后者键覆盖同名键）
+            for env_name in chain.env_list():
+                load.env_extras.update(assemble_env(env_name, reader, as_of,
                                                     self.config_manager))
             reader.close()
 
@@ -154,7 +163,8 @@ class ChainEngine:
         )
 
         rows: List[Dict[str, Any]] = []
-        hit_summary: Dict[str, int] = {name: 0 for name in module_names}
+        hit_buckets: Dict[str, Dict[str, int]] = {name: {} for name in module_names}
+        insufficient_summary: Dict[str, int] = {name: 0 for name in module_names}
         suspect_count = 0
         try:
             info_by_ts = {s.ts_code: s for s in universe}
@@ -170,9 +180,10 @@ class ChainEngine:
                         suspect_count += 1
                     results = self._run_modules(modules, g, as_of, stock, reasons,
                                                 load.env_extras)
-                    for name, res in results.items():
-                        if _is_hit(res.value):
-                            hit_summary[name] += 1
+                    for mod in modules:
+                        for key in mod.hit_keys(results[mod.name].value):
+                            bucket = hit_buckets[mod.name]
+                            bucket[key] = bucket.get(key, 0) + 1
                     rows.append(self._row(stock, reasons, results, module_names))
                     progress.tick()
             # 股票池中在加载窗口内无任何 K 线的股票（如上市晚于锚定日、长期停牌）
@@ -189,6 +200,12 @@ class ChainEngine:
             progress.fail(repr(exc))
             raise
 
+        hit_summary = flatten_hits(hit_buckets)
+        # 数据不足行数从最终 rows 统计（含「窗口内无 K 线」的第二批股票——
+        # 它们同样写「数据不足」行，只在逐股循环里计数会漏掉）
+        for name in module_names:
+            insufficient_summary[name] = sum(
+                1 for r in rows if r.get(name) == DATA_INSUFFICIENT)
         rows.sort(key=lambda r: r["股票代码"])  # 固定行序，保证同锚定日重复运行逐字节一致
         csv_path = writer.write_csv(chain.chain, as_of, module_names, rows)
         duration = time.monotonic() - started
@@ -229,6 +246,7 @@ class ChainEngine:
             module_names=module_names,
             duration_seconds=duration,
             hit_summary=hit_summary,
+            insufficient_summary=insufficient_summary,
             lookback=lookback_desc,
             window_start=window_start,
             loaded_trading_days=loaded_trading_days,

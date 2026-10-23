@@ -21,6 +21,7 @@ import pandas as pd
 
 from ..config.config_manager import ConfigManager
 from ..database.connection import DatabaseConnection
+from ..utils.financial_ttm import ttm_frame as _ttm_frame_impl
 from .review_common import write_review_report
 
 logger = logging.getLogger(__name__)
@@ -202,48 +203,11 @@ class ValuationCalcManager:
     def _ttm_frame(reports: List[Dict[str, Any]]) -> pd.DataFrame:
         """每只股票最近 N 期累计净利 -> (TTM 归母净利, 最新净资产, 最新报告期)
 
-        累计口径单季换算：TTM = cum(L) + cum(A_prev) - cum(S_prev)；
-        L 为年报（1231）时 TTM = cum(L)。净资产取最新期 net_assets。
+        实现已抽公共至 ``utils.financial_ttm.ttm_frame``（P0-4 方案 §3.3.2，
+        原则 P6：报告层估值 calc 与本处同口径，禁两处实现）——本方法为 import
+        委托，行为与列名不变（test/test_valuation_calc.py 保护）。
         """
-        if not reports:
-            return pd.DataFrame(columns=['ts_code', 'ttm_profit', 'latest_net_assets',
-                                         'latest_stat_date'])
-        df = pd.DataFrame(reports)
-        df['stat_date'] = df['stat_date'].astype(str)
-        df['net_profit'] = pd.to_numeric(df['net_profit'], errors='coerce')
-        df['net_assets'] = pd.to_numeric(df.get('net_assets'), errors='coerce')
-        df = df.sort_values(['ts_code', 'stat_date'], ascending=[True, False])
-
-        ttm_rows = []
-        for ts_code, g in df.groupby('ts_code'):
-            rows = g.reset_index(drop=True)
-            if rows.empty or pd.isna(rows.loc[0, 'net_profit']):
-                continue
-            latest = rows.loc[0]
-            latest_cum = latest['net_profit']
-            latest_md = latest['stat_date'][4:8]
-            ttm = None
-            if latest_md == '1231':
-                ttm = latest_cum
-            else:
-                # 上年年报
-                prev_annual = rows[(rows['stat_date'].str.endswith('1231'))
-                                   & (rows['stat_date'] < latest['stat_date'])]
-                # 上年同期
-                prev_year = str(int(latest['stat_date'][:4]) - 1)
-                prev_same = rows[rows['stat_date'] == f'{prev_year}{latest_md}']
-                if not prev_annual.empty and not prev_same.empty \
-                        and not pd.isna(prev_annual.iloc[0]['net_profit']) \
-                        and not pd.isna(prev_same.iloc[0]['net_profit']):
-                    ttm = latest_cum + prev_annual.iloc[0]['net_profit'] \
-                        - prev_same.iloc[0]['net_profit']
-            ttm_rows.append({
-                'ts_code': ts_code,
-                'ttm_profit': ttm,
-                'latest_net_assets': latest['net_assets'],
-                'latest_stat_date': latest['stat_date'],
-            })
-        return pd.DataFrame(ttm_rows)
+        return _ttm_frame_impl(reports)
 
     def _write_report(self, result: Dict[str, Any]) -> Optional[str]:
         stats = result['stats']

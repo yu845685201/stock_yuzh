@@ -1,0 +1,24 @@
+chain: strategy_scan
+description: 策略截面扫描（P1-7 §4.6 C + P1-12：均线金叉放量/海龟突破/高窄旗形/RPS突破，独立按需跑，不进 daily_review）
+domain: a_share
+
+# 策略链窗口：30 个交易日（海龟突破需 21 日前高 + 缓冲；金叉需 MA20 warmup）。
+lookback: 30d
+
+# a_share_rps：截面 RPS 装配（P1-12）——rps_breakout 的排名输入
+# （一次查询 + pandas rank 向量化；模块纯函数红线不变）。
+env:
+  - a_share_rps
+
+modules:
+  # 放量倍数为 ma_cross_volume 的前置（链内先算）
+  - name: volume_surge           # 放量倍数（前置）
+  # ---- 策略截面（P1-7 C 2026-10-22 / P1-12 2026-10-22）----
+  # 与 R 系列职责分离：本链按需跑（用户显式触发），不接入 sync-review-all /
+  # daily_review（策略是观察工具不是每日必经步骤）。
+  - name: ma_cross_volume        # 均线金叉放量（MA5/20 金叉 + 放量）
+  - name: turtle_breakout        # 海龟突破（21 日突破 + 反高开低走 + 流通市值）
+  - name: narrow_flag            # 高窄旗形（旗杆 + 窄旗面 + 收复）
+  - name: rps_breakout           # RPS 突破（截面 RPS20≥90，env a_share_rps）
+
+# 运行：backend/run_cli.py analyze run --chain strategy_scan [--as-of yyyyMMdd]

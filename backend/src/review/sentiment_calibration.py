@@ -9,7 +9,10 @@
 1. 现行规则逐条：命中天数、命中后次日溢价均值/上涨概率、未命中对照；
 2. 网格搜索建议值（climax/ice/ebb 按方案网格）；命中数 ≥30 才采纳，样本不足标"不可校准"
    （第三轮 T15：climax/ebb 单年样本不足，须全 5 年区间；ebb 放宽 -0.5 档兜底）；
-3. 四态覆盖率检查（回暖/震荡兜底态占比，防规则过严导致全部落兜底）。
+3. 四态覆盖率检查（回暖/震荡兜底态占比，防规则过严导致全部落兜底）；
+4. **历史分位标定**（P1-10 §4.4，2026-10-22 增量）：对核心读数 max_streak /
+   premium_mean / burst_rate 输出 p10/p60/p90 分位——报告层「分位标定四态」
+   的并列列即用此分位框架（规则四态保持基线不替换，回归红线）。
 
 判据口径与 aggregator._sentiment_cycle 一致（高潮→冰点→退潮→回暖/震荡，先命中先定位）。
 """
@@ -161,6 +164,79 @@ def grid_lines(df: pd.DataFrame, rule_name: str, combos: List[Tuple[Dict[str, fl
     return rows
 
 
+# ---------- 历史分位标定（P1-10 §4.4 增量） ----------
+
+#: 分位标定读数（与 aggregator._sentiment_cycle 同口径字段）
+_QUANTILE_READINGS = ('max_streak', 'premium_mean', 'burst_rate')
+
+#: 默认分位档（config review.sentiment_rules.quantile 可覆盖）
+DEFAULT_QUANTILES = {'p_low': 10, 'p_mid': 60, 'p_high': 90}
+
+
+def quantile_calibration(df: pd.DataFrame,
+                         quantiles: Optional[Dict[str, float]] = None
+                         ) -> Dict[str, Dict[str, Optional[float]]]:
+    """核心读数的历史分位标定（P1-10 §4.4）。
+
+    Returns:
+        ``{读数: {'p10': v, 'p60': v, 'p90': v, 'n': 样本数}}``；读数为空 →
+        各档 None（不硬造）。
+    """
+    q = {**DEFAULT_QUANTILES, **(quantiles or {})}
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    for col in _QUANTILE_READINGS:
+        if col not in df.columns:
+            continue
+        s = pd.to_numeric(df[col], errors='coerce').dropna()
+        if s.empty:
+            out[col] = {'p10': None, 'p60': None, 'p90': None, 'n': 0}
+            continue
+        out[col] = {
+            'p10': round(float(s.quantile(q['p_low'] / 100.0)), 3),
+            'p60': round(float(s.quantile(q['p_mid'] / 100.0)), 3),
+            'p90': round(float(s.quantile(q['p_high'] / 100.0)), 3),
+            'n': int(len(s)),
+        }
+    return out
+
+
+def quantile_state(m: Dict[str, Any],
+                   calib: Dict[str, Dict[str, Optional[float]]]) -> Tuple[str, List[str]]:
+    """分位标定四态（报告层并列列；与规则四态同序同义，判定基准换成分位）。
+
+    - 高潮：max_streak ≥ p90 且 premium_mean ≥ p90；
+    - 冰点：max_streak ≤ p10 或 burst_rate ≥ p90；
+    - 退潮：premium_mean ≤ p10；
+    - 兜底：回暖/震荡（分位数据不足时同归兜底并标注）。
+    """
+    def _val(col: str, key: str) -> Optional[float]:
+        node = calib.get(col) or {}
+        v = node.get(key)
+        return float(v) if v is not None else None
+
+    ms = m.get('max_streak') or 0
+    pm = m.get('premium_mean')
+    br = m.get('burst_rate')
+    basis: List[str] = []
+    if not calib:
+        return '回暖/震荡', ['分位标定数据不足']
+    p90_ms, p90_pm = _val('max_streak', 'p90'), _val('premium_mean', 'p90')
+    p10_ms, p90_br = _val('max_streak', 'p10'), _val('burst_rate', 'p90')
+    p10_pm = _val('premium_mean', 'p10')
+    if p90_ms is not None and p90_pm is not None and pm is not None \
+            and ms >= p90_ms and pm >= p90_pm:
+        return '高潮', [f"高度{ms}≥p90({p90_ms})", f"溢价{pm}≥p90({p90_pm})"]
+    if p10_ms is not None and ms <= p10_ms:
+        basis.append(f"高度{ms}≤p10({p10_ms})")
+    if p90_br is not None and br is not None and br >= p90_br:
+        basis.append(f"炸板率{br}≥p90({p90_br})")
+    if basis:
+        return '冰点', basis
+    if p10_pm is not None and pm is not None and pm <= p10_pm:
+        return '退潮', [f"溢价均值{pm}≤p10({p10_pm})"]
+    return '回暖/震荡', ['未达分位极值档']
+
+
 # ---------- 主流程 ----------
 
 def run_calibration(config_manager: ConfigManager, start: str, end: str) -> Dict[str, Any]:
@@ -252,7 +328,26 @@ def run_calibration(config_manager: ConfigManager, start: str, end: str) -> Dict
         lines.extend('| ' + ' | '.join(str(c) for c in row) + ' |'
                      for row in grid_lines(df, rule_name, combos))
         lines.append('')
-    lines.append('## 四、定稿提示')
+    # 4. 历史分位标定（P1-10 增量）
+    lines.append('## 四、历史分位标定（P1-10：报告层分位四态的基准）')
+    lines.append('')
+    calib = quantile_calibration(df)
+    lines.append('| 读数 | p10 | p60 | p90 | 样本天数 |')
+    lines.append('|---|---|---|---|---|')
+    for col in _QUANTILE_READINGS:
+        node = calib.get(col)
+        if not node:
+            continue
+        lines.append(f"| {col} | {node['p10']} | {node['p60']} | {node['p90']} "
+                     f"| {node['n']} |")
+    lines.append('')
+    lines.append('> 用法：报告层「分位标定四态」列 = 上述分位为动态阈值的同序判定'
+                 '（高潮=高度/溢价双超 p90；冰点=高度≤p10 或 炸板率≥p90；'
+                 '退潮=溢价≤p10）。分位随样本滚动，**规则四态仍是基线列不替换**；'
+                 '两列不一致时（规则高潮 vs 分位未达极值）点名「判据与分位背离」，'
+                 '属校准观察项非故障。')
+    lines.append('')
+    lines.append('## 五、定稿提示')
     lines.append('')
     lines.append('- 本报告只产出提案；定稿动作（修改 config `review.sentiment_rules` 与 '
                  '复盘框架.MD §3）由用户完成，工具不自动改配置。')

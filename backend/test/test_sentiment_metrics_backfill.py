@@ -137,7 +137,7 @@ def test_table_row_roundtrip_matches_recompute():
 # ---------- 聚合器先查表 / miss 回退 ----------
 
 class FakeReader:
-    """_query 桩：按 SQL 片段分发（单日行 / 分位历史）"""
+    """_query 桩：按 SQL 片段分发（单日行 / 分位历史；四期新增查询返回空走降级）"""
 
     def __init__(self, today_row=None, history=None, fail=False):
         self.today_row = today_row
@@ -149,6 +149,9 @@ class FakeReader:
             raise RuntimeError('db down')
         if 'LIMIT 251' in sql:
             return self.history
+        # 四期新增查询（周期走向 LIMIT 10 / 封板时段 ANY(%s) / 预测表）→ 空走降级
+        if 'LIMIT 10' in sql or 'ANY(%s)' in sql or 'review_prediction_daily' in sql:
+            return []
         return [self.today_row] if self.today_row else []
 
 

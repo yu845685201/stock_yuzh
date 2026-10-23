@@ -138,5 +138,48 @@ class AnalysisModule(ABC):
             ModuleResult。数据不足时返回 ``数据不足``，不要抛异常。
         """
 
+    # ------------------------------------------------------------------ 命中统计
+    #: 档位分桶命中值：命中统计按值分桶计数（如 ``["大涨", "大跌"]``）；
+    #: 空 = 不分桶。档位类模块声明此项，布尔/数值类用 ``hit_rule``。
+    hit_buckets: ClassVar[List[str]] = []
+    #: 数值/理由串类命中规则（方案 §2.5）：
+    #: ``positive``（>0，默认口径）/ ``signed``（正负分桶，如溢价）/
+    #: ``threshold``（≥ ``hit_threshold`` 参数，默认 2.0，链 YAML 可覆盖）/
+    #: ``sample``（可算样本数，连续比率类）/ ``reason``（理由串：非「否/数据不足」即命中）
+    hit_rule: ClassVar[str] = "positive"
+
+    #: 理由串类的非命中值（hit_rule="reason" 用）
+    _NO_HIT_STRINGS = (DATA_INSUFFICIENT, "否")
+
+    def hit_keys(self, value: Any) -> List[str]:
+        """命中统计的桶名列表（引擎按桶计数；空列表 = 不计入）。
+
+        默认口径与历史行为一致：布尔原样 / ``是`` 计「命中」/ 数值 >0 计「命中」，
+        其余字符串不计。声明 ``hit_buckets`` / ``hit_rule`` 的模块按 §2.5 规格分桶，
+        未声明模块零行为变化。
+        """
+        if self.hit_rule == "reason":
+            return [] if value in self._NO_HIT_STRINGS else ["命中"]
+        if isinstance(value, bool):
+            return ["命中"] if value else []
+        if value == "是":
+            return ["命中"]
+        if isinstance(value, (int, float)):
+            if self.hit_rule == "sample":
+                return ["可算"]
+            if self.hit_rule == "signed":
+                if value > 0:
+                    return ["正"]
+                if value < 0:
+                    return ["负"]
+                return []
+            if self.hit_rule == "threshold":
+                threshold = float(self.params.get("hit_threshold", 2.0))
+                return [f"≥{threshold}x"] if value >= threshold else []
+            return ["命中"] if value > 0 else []
+        if self.hit_buckets:
+            return [str(value)] if value in self.hit_buckets else []
+        return []
+
     def __repr__(self) -> str:  # pragma: no cover - 仅日志用
         return f"<{type(self).__name__} {self.name_en} params={self.params}>"

@@ -41,7 +41,7 @@ BASE_COLUMNS = ("ts_code", "stock_code", "trade_date")
 _ALLOWED_COLUMNS = {
     "ts_code", "stock_code", "stock_name", "trade_date", "open", "high", "low",
     "close", "preclose", "volume", "amount", "is_st", "change_rate", "turnover_rate",
-    "raw_close", "adjust_flag", "trade_status",
+    "raw_close", "adjust_flag", "trade_status", "float_share",
 }
 
 

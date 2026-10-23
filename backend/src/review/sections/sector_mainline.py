@@ -64,6 +64,12 @@ def build(sector: Dict[str, Any]) -> List[Dict[str, Any]]:
                        'rows': [[c['concept'], c['count'],
                                  f"{c['share']:.1%}" if c.get('share') is not None else '—']
                                 for c in clusters]})
+        conc = data.get('theme_concentration')
+        if conc:
+            blocks.append({'type': 'para',
+                           'text': f'头部集中度：{conc["concept"]} {conc["count"]} 家 ÷ '
+                                   f'全市场涨停，占 {conc["rate"]:.0%}'
+                                   '（越高越是一枝独秀，散乱轮动期通常 <10%）'})
 
     # 主线候选：5 日行业榜前列 且 当日涨停聚集前列 的交叉
     if industry_5d and clusters:
@@ -81,7 +87,40 @@ def build(sector: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks.append({'type': 'note',
                        'text': '行业榜为 sw_2021/sina_hy 等权口径；涨停聚集为 sina_gn 概念口径，'
                                '两套分类体系不同，交叉结果仅供观察'})
+
+    # 题材事件树（四期 §3：聚集前列概念的跨日复盘）
+    blocks.extend(_theme_tree_blocks(data.get('theme_tree')))
     return blocks
+
+
+def _theme_tree_blocks(tree: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """题材事件树表：昨日题材强势股今日反馈 → 扩散/收敛 → 炸板/最高板 → 首封范围。"""
+    if not tree:
+        return []
+    rows = []
+    for r in tree:
+        perf = '—'
+        if r.get('prev_mean') is not None:
+            perf = f'{r["prev_mean"]:+.2f}%'
+            if r.get('red_rate') is not None:
+                perf += f' / 翻红 {r["red_rate"]:.0%}'
+        seal = ('—' if not r.get('seal_first')
+                else (f'{r["seal_first"]}' if r.get('seal_first') == r.get('seal_last')
+                      else f'{r["seal_first"]}~{r["seal_last"]}'))
+        rows.append([r['concept'], f'{r["prev_up"]} → {r["today_up"]}（{r["flow"]}）',
+                     perf, f'{r["relimit"]} 只', r['burst'],
+                     f'{r["max_streak"]} 板' if r['max_streak'] else '—', seal])
+    return [
+        {'type': 'heading', 'level': 3, 'text': '题材事件树（聚集前列概念跨日复盘）'},
+        {'type': 'table',
+         'headers': ['概念', '涨停家数（昨→今）', '昨日题材股今日表现', '晋级', '今日炸板',
+                     '最高板', '首封时间范围'],
+         'rows': rows},
+        {'type': 'note',
+         'text': '口径：按真实事件题材复盘（sina_gn 概念时点匹配）；昨日该题材涨停股今日'
+                 '反馈看承接，首封与末封时间拉开=持续发酵；归因是待核对的解释，'
+                 '不是已证实因果'},
+    ]
 
 
 def _rank_table(rows: List[Dict[str, Any]], top: int, bottom: int) -> Dict[str, Any]:

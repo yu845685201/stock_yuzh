@@ -1,4 +1,4 @@
-"""R4 ``r4_institution_seat`` 机构席位候选（转天买入候选链）。
+"""R4 ``r4_institution_seat`` 机构席位候选（daily_review 链 R 列；2026-10-18 自独立候选链合入）。
 
 判定（candidate_rules.is_r4 同口径 + 链侧叠加 is_st 列）：龙虎榜机构净买为正
 且 非 ST。机构净买读环境装配 ``cand_institution_net_map``（lhb_detail 席位
@@ -34,6 +34,8 @@ class R4InstitutionSeat(AnalysisModule):
     )
     required_columns: ClassVar[List[str]] = ['is_st']
     default_params: ClassVar[Dict[str, object]] = {}
+    # 命中统计口径（方案 §2.5）：理由串类，非「否 / 数据不足」即命中
+    hit_rule: ClassVar[str] = 'reason'
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
         for pre in ('R1梯队接力', 'R2主线跟随', 'R3趋势新高'):

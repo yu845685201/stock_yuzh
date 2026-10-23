@@ -17,13 +17,36 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..analysis.data_reader import DataReader
+from ..database.connection import DatabaseConnection
 from .aggregator import ReviewAggregator
 from .renderer import blocks_to_html, blocks_to_markdown
 from .sections import conclusion, fundamentals, market_env, sector_mainline, sentiment, stock_movers
+from .sections import yesterday_review
+from .verifier import build_predictions
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = 'doc/reports'
+
+
+def generator_lede(agg: Dict[str, Any]) -> list:
+    """结论先行导语（四期 §1.4）：情绪定位 + 核心读数一句话，置于全文最前。"""
+    sent = (agg.get('sentiment') or {}).get('data') or {}
+    cycle = sent.get('cycle') or {}
+    position = cycle.get('position')
+    if not position:
+        return []
+    bits = []
+    if sent.get('max_streak') is not None:
+        bits.append(f"空间板 {sent['max_streak']} 板")
+    if sent.get('limit_up_count') is not None:
+        bits.append(f"涨停 {sent['limit_up_count']} 家")
+    if sent.get('burst_rate') is not None:
+        bits.append(f"炸板率 {sent['burst_rate']:.0%}")
+    if sent.get('premium_mean') is not None:
+        bits.append(f"昨日涨停溢价均值 {sent['premium_mean']:+.2f}%")
+    text = f"结论先行：情绪定位 {position}" + (f"（{'；'.join(bits)}）" if bits else '')
+    return [{'type': 'para', 'text': text}]
 
 
 class ReviewReportGenerator:
@@ -52,6 +75,9 @@ class ReviewReportGenerator:
         finally:
             reader.close()
 
+        # 预期落库 + 核验落库（四期方案 §1；写库失败不影响报告输出）
+        self._persist_prediction_and_verification(as_of, agg)
+
         blocks = self._render_blocks(agg, self.config.get('review') or {})
         md_text = blocks_to_markdown(blocks)
         html_text = blocks_to_html(f'每日复盘 {self._fmt_date(as_of)}', blocks)
@@ -77,6 +103,13 @@ class ReviewReportGenerator:
         cross = ((agg.get('movers') or {}).get('data') or {}).get('cross_check')
         if cross:
             meta['cross_check'] = cross
+        # P0-4：估值 calc 库版本（同日重算一致，原则 P7）
+        from .valuation_calc import VALUATION_CALC_VERSION
+        meta['valuation_calc_version'] = VALUATION_CALC_VERSION
+        ind_parity = ((agg.get('indicators') or {}).get('data') or {}).get('parity') \
+            if hasattr(agg.get('indicators'), 'get') else None
+        if ind_parity:
+            meta['indicator_parity'] = ind_parity
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2),
                              encoding='utf-8')
         logger.info(f'复盘报告已生成: {md_path}（{duration:.1f}s）')
@@ -88,7 +121,7 @@ class ReviewReportGenerator:
 
     @staticmethod
     def _render_blocks(agg: Dict[str, Any], review_cfg: Dict[str, Any]) -> list:
-        """报告头 + 六维章节 + 交叉校验尾注"""
+        """报告头（结论先行导语）+ 昨日核验 + 六维章节 + 交叉校验尾注"""
         as_of = agg['as_of']
         blocks = [
             {'type': 'heading', 'level': 1,
@@ -98,15 +131,23 @@ class ReviewReportGenerator:
                      f"指标窗口 60 交易日（起点 {agg.get('window_start') or '全历史'}，"
                      f"面板 {agg.get('panel_rows', 0)} 行）；"
                      f"上一交易日 {agg.get('prev_date') or '—'}。"},
+            *generator_lede(agg),
+            *yesterday_review.build(agg.get('verification') or {}),
             {'type': 'note',
              'text': '本报告指标由报告层基于库内日K独立重算（不依赖当日链运行）；'
                      '涨停/连板/炸板等判定与 daily_review 链模块同口径。'
                      '各章节数据口径详见 doc/复盘框架.MD。'},
-            *market_env.build(agg.get('market_env'), agg.get('sentiment'), agg.get('margin')),
-            *sentiment.build(agg.get('sentiment')),
+            *market_env.build(agg.get('market_env'), agg.get('sentiment'), agg.get('margin'),
+                              volume_price=agg.get('volume_price'),
+                              capital_anchors=agg.get('capital_anchors'),
+                              news=agg.get('news')),
+            *sentiment.build(agg.get('sentiment'), agg.get('money_effect')),
             *sector_mainline.build(agg.get('sector')),
-            *stock_movers.build(agg.get('movers'), agg.get('lhb'), agg.get('money_flow')),
-            *fundamentals.build(agg.get('fundamentals'), agg.get('announcement')),
+            *stock_movers.build(agg.get('movers'), agg.get('lhb'), agg.get('money_flow'),
+                                sector_money=agg.get('sector_money'),
+                                indicators=agg.get('indicators')),
+            *fundamentals.build(agg.get('fundamentals'), agg.get('announcement'),
+                                valuation_digest=agg.get('valuation_digest')),
             *conclusion.build(agg, review_cfg),
         ]
         cross = ((agg.get('movers') or {}).get('data') or {}).get('cross_check')
@@ -122,7 +163,44 @@ class ReviewReportGenerator:
                                        '（可能是链运行时点与库内数据不一致，请复跑链后重出报告）'})
             elif cross.get('note'):
                 blocks.append({'type': 'note', 'text': f'交叉校验：{cross["note"]}'})
+        # P0-1 指标对拍校验（链 CSV 指标列 vs 报告层面板复算，同一实现两入口）
+        ind_res = agg.get('indicators')
+        ind_data = (ind_res.data or {}) if hasattr(ind_res, 'data') else {}
+        if ind_data.get('parity'):
+            p = ind_data['parity']
+            if p.get('ok'):
+                blocks.append({'type': 'note',
+                               'text': f"✓ 指标对拍：报告层复算与链 CSV 指标列一致"
+                                       f"（{p['compared']} 股×列，{p['columns']} 列）"})
+            else:
+                blocks.append({'type': 'note',
+                               'text': f"⚠ 指标对拍不一致：{p['mismatch_count']} 处"
+                                       f"（样本 {p['mismatches'][:3]}）——链与报告层"
+                                       f"窗口或数据时点可能不一致，请复跑链后重出报告"})
+        elif ind_data:
+            blocks.append({'type': 'note',
+                           'text': '指标对拍：链 CSV 未跑，本报告为面板独立复算'
+                                   '（与链同一实现，跑链后可交叉校验）'})
         return blocks
+
+    def _persist_prediction_and_verification(self, as_of: str, agg: Dict[str, Any]) -> None:
+        """预期落库（当日）+ 核验落库（对昨日的核验结果）。
+
+        失败仅告警不阻塞报告生成——落库服务闭环战绩，报告正文数据独立于落库。
+        连接为按操作上下文管理（连接池），无需手动关闭。
+        """
+        try:
+            pred = build_predictions(agg, self.config.get('review') or {})
+            db = DatabaseConnection(self.config_manager)
+            db.ensure_review_tables()   # 新表建表兜底（幂等；同 SentimentMetricsManager 模式）
+            db.upsert_review_prediction(as_of, pred)
+            ver = agg.get('verification')
+            # AggregationResult（dataclass）非 dict：用属性访问判断
+            if ver is not None and getattr(ver, 'available', False) \
+                    and getattr(ver, 'data', None):
+                db.upsert_review_verification(as_of, agg.get('prev_date'), ver.data)
+        except Exception as e:
+            logger.warning(f'预期/核验落库失败（不影响报告输出）: {e}')
 
     @staticmethod
     def _fmt_date(ymd: str) -> str:
