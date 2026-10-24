@@ -64,6 +64,7 @@ class TestChainConfig:
             "candle_pattern",
             "valuation_digest",
             "limit_up_attribution",
+            "chan_divergence_buy",
         ]
         assert chain.env_list() == ["a_share_candidates", "a_share_valuation"]
         assert chain.lookback.is_all is False

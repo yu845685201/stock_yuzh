@@ -358,6 +358,39 @@ class ReviewAggregator:
             })
         return AggregationResult(available=bool(out), data={'anchors': out})
 
+    def industry_map(self, as_of: str) -> Dict[str, str]:
+        """ts_code → 行业名归属映射（C2/P0-6：同数据同结果）。
+
+        sw_2021 优先、sina_hy 兜底（config review.industry_sources 声明的
+        优先级在此落地）：SQL 稳定排序后逐股取首行，不再依赖 DB 返回顺序。
+        结果按 as_of 缓存，行业榜（_sector_money）与缠论候选行业列
+        （_aggregate_chan）共用同一归属结果。
+        """
+        cached = getattr(self, '_industry_map_cache', None)
+        if cached is not None and cached[0] == as_of:
+            return cached[1]
+        try:
+            ind_rows = self.db._query(
+                """
+                SELECT m.ts_code, c.concept_name FROM sector_concept_map m
+                JOIN sector_concept c ON c.concept_code = m.concept_code
+                WHERE c.source IN ('sw_2021', 'sina_hy')
+                  AND (m.in_date IS NULL OR m.in_date <= %s)
+                  AND (m.out_date IS NULL OR m.out_date > %s)
+                ORDER BY m.ts_code,
+                         CASE c.source WHEN 'sw_2021' THEN 0 ELSE 1 END,
+                         c.concept_code
+                """, (as_of, as_of))
+        except Exception as e:
+            logger.warning(f'行业映射读取失败: {e}')
+            ind_rows = []
+        mapping: Dict[str, str] = {}
+        for ts_code, ind in ind_rows:
+            if ind and str(ts_code) not in mapping:
+                mapping[str(ts_code)] = str(ind)
+        self._industry_map_cache = (as_of, mapping)
+        return mapping
+
     def _sector_money(self, as_of: str) -> AggregationResult:
         """板块资金流向（行业 sw_2021 聚合大单净额；概念 sina_gn Top5）。
 
@@ -385,26 +418,13 @@ class ReviewAggregator:
         except Exception:
             traded = 0
         mf_map = {str(t): float(net) for t, net in rows}
-        # 行业映射（sw_2021 主 + sina_hy 回退）
-        try:
-            ind_rows = self.db._query(
-                """
-                SELECT m.ts_code, c.concept_name FROM sector_concept_map m
-                JOIN sector_concept c ON c.concept_code = m.concept_code
-                WHERE c.source IN ('sw_2021', 'sina_hy')
-                  AND (m.in_date IS NULL OR m.in_date <= %s)
-                  AND (m.out_date IS NULL OR m.out_date > %s)
-                """, (as_of, as_of))
-        except Exception as e:
-            logger.warning(f'行业映射读取失败: {e}')
-            ind_rows = []
+        # 行业归属（sw_2021 主 + sina_hy 回退，稳定排序+缓存共用，C2/P0-6）
+        ind_map = self.industry_map(as_of)
         industry_net: Dict[str, float] = {}
         industry_in: Dict[str, int] = {}
-        seen: set = set()
-        for ts_code, ind in ind_rows:
-            if ts_code in seen or ts_code not in mf_map:
+        for ts_code, ind in ind_map.items():
+            if ts_code not in mf_map:
                 continue
-            seen.add(ts_code)
             net = mf_map[ts_code]
             industry_net[ind] = industry_net.get(ind, 0.0) + net
             if net > 0:
@@ -416,7 +436,7 @@ class ReviewAggregator:
                    'in_count': industry_in.get(k, 0)} for k, v in ranked[-5:][::-1]]
         # 净流入 Top3 行业的成分股集（候选证据标记"板块"用；量价资金 V1.1）
         top3_industries = {k for k, _ in ranked[:3]}
-        top3_members = {str(ts) for ts, ind in ind_rows
+        top3_members = {ts for ts, ind in ind_map.items()
                         if ind in top3_industries}
         return AggregationResult(data={
             'industry_top': top, 'industry_bottom': bottom,
@@ -1974,6 +1994,11 @@ class ReviewAggregator:
         两路查询：① base_financial_report 最新报告期 net_profit_yoy（暴雷
         阈值）；② announcement_daily 前 3 个自然日 ann_type='增减持'（大股东
         减持）。查询失败 → 对应项不过滤（不硬造否决）。
+
+        ① 加披露日约束（C3 前视偏差）：只取 disclosure_date <= as_of 的行，
+        防止用 as_of 之后才公告的财报否决历史候选（历史 as-of 重跑不可复现）。
+        disclosure_date 缺失时回退保守估计"报告期 + 304 天"（≈10 个月，覆盖
+        年报最晚披露期限），即无法证明 as_of 前已披露的一律不采纳。
         """
         profit_map: Dict[str, float] = {}
         try:
@@ -1982,8 +2007,15 @@ class ReviewAggregator:
                 SELECT DISTINCT ON (ts_code) ts_code, net_profit_yoy
                 FROM base_financial_report
                 WHERE net_profit_yoy IS NOT NULL
-                ORDER BY ts_code, stat_date DESC
-                """)
+                  AND COALESCE(disclosure_date,
+                               to_char(to_date(stat_date, 'YYYYMMDD') + 304,
+                                       'YYYYMMDD')) <= %s
+                ORDER BY ts_code,
+                         COALESCE(disclosure_date,
+                                  to_char(to_date(stat_date, 'YYYYMMDD') + 304,
+                                          'YYYYMMDD')) DESC,
+                         stat_date DESC
+                """, (str(as_of),))
             profit_map = {str(t): float(v) for t, v in rows if v is not None}
         except Exception as e:
             logger.warning(f'VETO 业绩同比读取失败: {e}')

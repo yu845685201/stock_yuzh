@@ -318,11 +318,13 @@ def rolling_stats(as_of: str, current: Dict[str, Any], reader) -> Optional[Dict[
     payloads: List[Dict[str, Any]] = []
     try:
         rows = reader._query(
-            "SELECT payload FROM review_verification_daily WHERE trade_date <= %s "
+            "SELECT payload FROM review_verification_daily WHERE trade_date < %s "
             "ORDER BY trade_date DESC LIMIT %s", (as_of, ROLLING_DAYS))
         payloads = [r[0] for r in rows if r[0]]
     except Exception as e:
         logger.warning(f'滚动战绩历史读取失败: {e}')
+    # current（当日核验）由这里单独补位；历史查询用 < 严格小于，
+    # 否则当日核验已落库时（同日重跑）会被计入两次（C8）
     if current:
         payloads.insert(0, current)
     if len(payloads) < 2:

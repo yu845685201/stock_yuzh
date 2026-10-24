@@ -35,6 +35,9 @@ DEFAULT_SOURCES = [
     'index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
     'disclosure', 'lhb', 'margin', 'ths_finance', 'money_flow', 'valuation_calc',
     'sentiment_metrics', 'industry', 'bj_kline', 'news',
+    # 资金锚两源（B7）： runners/波次/labels 早已就绪，仅默认集漏配导致
+    # sync-review-all 永不执行、--sources 显式指定报"未知源名"
+    'hkex_connect', 'etf_scale',
 ]
 # 周频任务（周末执行，--sources 显式指定；ths_l2=申万二级增量，N3 2026-10-04 挂载）
 WEEKLY_SOURCES = ['concept', 'unlock', 'ths_l2']

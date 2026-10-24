@@ -98,7 +98,8 @@ def test_one_key_wave_layout(monkeypatch):
 
     assert [name for name, _ in order] == [
         'kline', 'index', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
-        'disclosure', 'lhb', 'margin', 'industry', 'news', 'bj_kline',
+        'disclosure', 'lhb', 'margin', 'industry', 'hkex_connect', 'etf_scale',
+        'news', 'bj_kline',
         'factor', 'money_flow', 'ths_finance',
         'valuation_calc', 'sentiment_metrics',
     ]
