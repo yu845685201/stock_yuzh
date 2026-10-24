@@ -169,9 +169,9 @@ class _RoutingDB:
 
 
 class TestP06IndustryMapDeterministic:
-    IND = [('sh.600000', '银行'),          # sw_2021（SQL 排序后首行）
-           ('sh.600000', '房地产'),        # sina_hy 兜底行（应被忽略）
-           ('sz.000001', '银行')]
+    IND = [('sh.600000', '银行', 'sw_2021'),         # sw_2021（SQL 排序后首行）
+           ('sh.600000', '房地产', 'sina_hy'),       # sina_hy 兜底行（应被忽略）
+           ('sz.000001', '银行', 'sw_2021')]
     MF = [('sh.600000', 2e8), ('sz.000001', -1e8)]
 
     def test_first_row_wins_sw_priority(self):
@@ -198,12 +198,26 @@ class TestP06IndustryMapDeterministic:
         assert run() == run()
 
     def test_sector_money_uses_shared_map(self):
-        """行业榜净额按共用归属聚合：600000(银行,+2亿)+000001(银行,-1亿)→银行+1亿"""
+        """行业榜净额按共用归属聚合：600000(银行,+2亿)+000001(银行,-1亿)→银行+1亿；
+        sw 成分板不打概念标（评价-3）"""
         agg = ReviewAggregator(_RoutingDB(self.MF, self.IND), {'review': {}})
         data = agg._sector_money('20261023').data
         top = {r['industry']: r['net_yi'] for r in data['industry_top']}
         assert top.get('银行') == 1.0                    # (2e8-1e8)/1e8
         assert '房地产' not in top                       # 兜底行不参与
+        assert all(not r.get('is_concept') for r in data['industry_top'])
+
+    def test_source_map_and_concept_board(self):
+        """来源缓存随行（sina_hy 兜底股可识别）；纯 sina 成分板打概念标"""
+        ind = self.IND + [('sz.000009', '次新股', 'sina_hy')]
+        mf = self.MF + [('sz.000009', 5e8)]
+        agg = ReviewAggregator(_RoutingDB(mf, ind), {'review': {}})
+        src = agg.industry_source_map('20261023')
+        assert src['sh.600000'] == 'sw_2021'
+        data = agg._sector_money('20261023').data
+        flags = {r['industry']: r.get('is_concept') for r in data['industry_top']}
+        assert flags.get('次新股') is True               # 纯 sina 成分 → 概念板
+        assert flags.get('银行') is False
 
 
 # ---------------------------------------------------------------- P3-3 / P3-4（步骤 7）

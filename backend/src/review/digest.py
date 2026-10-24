@@ -523,7 +523,8 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     # ---- 图表数据 ----
     a_idx = [(i['name'], i['change_rate']) for i in (env.get('indices') or [])]
     a_idx_pos = [(i['name'], i.get('position_pct')) for i in (env.get('indices') or [])]
-    ind_today = [(r['industry'], r['mean_change'])
+    ind_today = [(f"{r['industry']}（概念）" if r.get('is_concept') else r['industry'],
+                  r['mean_change'])
                  for r in (sector.get('industry_today') or [])]
     ind_chart = ind_today[:8] + ind_today[-4:] if len(ind_today) > 12 else ind_today
     ov = [(i['name'], i['change_pct'], i.get('chg_5d'), i.get('position_pct'))

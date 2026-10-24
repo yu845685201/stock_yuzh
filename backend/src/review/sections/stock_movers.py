@@ -269,7 +269,9 @@ def _sector_money_blocks(sector_money: Dict[str, Any]) -> List[Dict[str, Any]]:
     for tag, lst in (('净流入', d.get('industry_top') or []),
                      ('净流出', d.get('industry_bottom') or [])):
         for e in lst:
-            rows.append([tag, e['industry'], f"{e['net_yi']:+.2f}",
+            name = (f"{e['industry']}（概念）" if e.get('is_concept')
+                    else e['industry'])
+            rows.append([tag, name, f"{e['net_yi']:+.2f}",
                          f"{e.get('in_count', 0)} 只"])
     if rows:
         blocks.append({'type': 'table',

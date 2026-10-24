@@ -125,6 +125,10 @@ def _theme_tree_blocks(tree: List[Dict[str, Any]] = None) -> List[Dict[str, Any]
 
 def _rank_table(rows: List[Dict[str, Any]], top: int, bottom: int) -> Dict[str, Any]:
     shown = rows[:top] + rows[-bottom:] if len(rows) > top + bottom else rows
+    # 评价-3：纯 sina_hy 兜底板（次新股/ST 板等概念板）打（概念）标签，
+    # 不再以真实行业身份出现在行业榜
+    def _name(r):
+        return f"{r['industry']}（概念）" if r.get('is_concept') else r['industry']
     return {'type': 'table',
             'headers': ['行业', '等权涨跌幅%', '样本数'],
-            'rows': [[r['industry'], r['mean_change'], r['stocks']] for r in shown]}
+            'rows': [[_name(r), r['mean_change'], r['stocks']] for r in shown]}

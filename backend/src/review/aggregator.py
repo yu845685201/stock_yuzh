@@ -138,7 +138,7 @@ class ReviewAggregator:
     # ------------------------------------------------------------------ 入口
 
     #: P3-2（C5）聚合缓存版本号：聚合层任何影响产出的代码变更时手动 +1（防陈旧缓存）
-    AGG_CACHE_VERSION = 'v1-20261025'
+    AGG_CACHE_VERSION = 'v2-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -409,7 +409,7 @@ class ReviewAggregator:
         try:
             ind_rows = self.db._query(
                 """
-                SELECT m.ts_code, c.concept_name FROM sector_concept_map m
+                SELECT m.ts_code, c.concept_name, c.source FROM sector_concept_map m
                 JOIN sector_concept c ON c.concept_code = m.concept_code
                 WHERE c.source IN ('sw_2021', 'sina_hy')
                   AND (m.in_date IS NULL OR m.in_date <= %s)
@@ -422,11 +422,23 @@ class ReviewAggregator:
             logger.warning(f'行业映射读取失败: {e}')
             ind_rows = []
         mapping: Dict[str, str] = {}
-        for ts_code, ind in ind_rows:
+        sources: Dict[str, str] = {}
+        for ts_code, ind, src in ind_rows:
             if ind and str(ts_code) not in mapping:
                 mapping[str(ts_code)] = str(ind)
+                sources[str(ts_code)] = str(src)
         self._industry_map_cache = (as_of, mapping)
+        self._industry_source_cache = (as_of, sources)
         return mapping
+
+    def industry_source_map(self, as_of: str) -> Dict[str, str]:
+        """ts_code → 行业归属来源（'sw_2021'/'sina_hy'；评价-3 概念板打标用）。
+
+        与 industry_map 同一次查询缓存；未加载时返回 {}。
+        """
+        self.industry_map(as_of)
+        cached = getattr(self, '_industry_source_cache', None)
+        return dict(cached[1]) if cached is not None and cached[0] == as_of else {}
 
     def _sector_money(self, as_of: str) -> AggregationResult:
         """板块资金流向（行业 sw_2021 聚合大单净额；概念 sina_gn Top5）。
@@ -460,6 +472,7 @@ class ReviewAggregator:
         mf_map = {str(t): float(net) for t, net in rows}
         # 行业归属（sw_2021 主 + sina_hy 回退，稳定排序+缓存共用，C2/P0-6）
         ind_map = self.industry_map(as_of)
+        src_map = self.industry_source_map(as_of)
         industry_net: Dict[str, float] = {}
         industry_in: Dict[str, int] = {}
         for ts_code, ind in ind_map.items():
@@ -470,10 +483,19 @@ class ReviewAggregator:
             if net > 0:
                 industry_in[ind] = industry_in.get(ind, 0) + 1
         ranked = sorted(industry_net.items(), key=lambda kv: -kv[1])
+        # 评价-3：纯 sina_hy 成分板 = 概念板，渲染层打（概念）标签
+        def _is_concept(board: str) -> bool:
+            members = [ts for ts, ind in ind_map.items() if ind == board]
+            return bool(members) and all(src_map.get(ts) != 'sw_2021'
+                                         for ts in members)
+        concept_boards = {k: _is_concept(k) for k, _ in ranked}
         top = [{'industry': k, 'net_yi': round(v / 1e8, 2),
-                'in_count': industry_in.get(k, 0)} for k, v in ranked[:5]]
+                'in_count': industry_in.get(k, 0),
+                'is_concept': concept_boards.get(k, False)} for k, v in ranked[:5]]
         bottom = [{'industry': k, 'net_yi': round(v / 1e8, 2),
-                   'in_count': industry_in.get(k, 0)} for k, v in ranked[-5:][::-1]]
+                   'in_count': industry_in.get(k, 0),
+                   'is_concept': concept_boards.get(k, False)}
+                  for k, v in ranked[-5:][::-1]]
         # 净流入 Top3 行业的成分股集（候选证据标记"板块"用；量价资金 V1.1）
         top3_industries = {k for k, _ in ranked[:3]}
         top3_members = {ts for ts, ind in ind_map.items()
@@ -1362,9 +1384,12 @@ class ReviewAggregator:
                                      reason='sector_concept_map 为空（未跑 sync-industry/sync-concept）')
         data: Dict[str, Any] = {}
         if industry_map:
-            data['industry_today'] = self._industry_ranking(panel, industry_map, [as_of])
+            source_map = self.industry_source_map(as_of)
+            data['industry_today'] = self._industry_ranking(
+                panel, industry_map, [as_of], source_map)
             last5 = self._last_n_dates(as_of, 5)
-            data['industry_5d'] = self._industry_ranking(panel, industry_map, last5)
+            data['industry_5d'] = self._industry_ranking(
+                panel, industry_map, last5, source_map)
         # N3（2026-10-04）：申万二级行业 Top10 子表（THS 快照口径）
         l2_map = self._industry_l2_map(as_of)
         if l2_map:
@@ -1381,25 +1406,9 @@ class ReviewAggregator:
         return AggregationResult(data=data)
 
     def _industry_map(self, as_of: str) -> Dict[str, str]:
-        """ts_code → 行业名（按 industry_sources 优先级，时点匹配）"""
-        result: Dict[str, str] = {}
-        for source in self.industry_sources:
-            try:
-                rows = self.db._query(
-                    """
-                    SELECT m.ts_code, c.concept_name
-                    FROM sector_concept_map m
-                    JOIN sector_concept c ON c.concept_code = m.concept_code
-                    WHERE c.source = %s
-                      AND (m.in_date IS NULL OR m.in_date <= %s)
-                      AND (m.out_date IS NULL OR m.out_date > %s)
-                    """, (source, as_of, as_of))
-            except Exception as e:
-                logger.warning(f'行业映射读取失败（{source}）: {e}')
-                continue
-            for ts_code, name in rows:
-                result.setdefault(ts_code, name)
-        return result
+        """ts_code → 行业名（评价-3 收口：委托 industry_map 统一实现——
+        原分源循环查询无稳定排序，归属依赖 DB 返回顺序，与 C2 同源）"""
+        return self.industry_map(as_of)
 
     def _industry_l2_map(self, as_of: str) -> Dict[str, str]:
         """ts_code → 申万二级行业名（source=sw_2021_l2_ths，时点匹配；N3 2026-10-04）。
@@ -1451,8 +1460,15 @@ class ReviewAggregator:
 
     @staticmethod
     def _industry_ranking(panel: pd.DataFrame, industry_map: Dict[str, str],
-                          dates: List[str]) -> List[Dict[str, Any]]:
-        """行业等权涨跌幅榜（§5.3 口径：行业内个股等权均值）"""
+                          dates: List[str],
+                          source_map: Optional[Dict[str, str]] = None
+                          ) -> List[Dict[str, Any]]:
+        """行业等权涨跌幅榜（§5.3 口径：行业内个股等权均值）。
+
+        评价-3：成分全部来自 sina_hy 兜底（无任何 sw_2021 成分）的板为概念板
+        （如"次新股""ST 板"），条目带 ``is_concept=True``——渲染层打（概念）标签，
+        不再以真实行业身份入榜。
+        """
         df = panel[panel['trade_date'].isin(dates) & panel['ts_code'].isin(industry_map)]
         if df.empty:
             return []
@@ -1461,8 +1477,16 @@ class ReviewAggregator:
         df = df.assign(change=change)
         g = df.groupby('industry')['change'].agg(['mean', 'count']).dropna()
         g = g.sort_values('mean', ascending=False)
+        concept_boards: Dict[str, bool] = {}
+        if source_map:
+            src = df.assign(_src=df['ts_code'].map(source_map))
+            comp = src.groupby('industry')['_src'].apply(
+                lambda s: (s == 'sw_2021').any())
+            concept_boards = {k: not v for k, v in comp.items()}
         return [{'industry': idx, 'mean_change': round(float(r['mean']), 2),
-                 'stocks': int(r['count'])} for idx, r in g.iterrows()]
+                 'stocks': int(r['count']),
+                 'is_concept': concept_boards.get(idx, False)}
+                for idx, r in g.iterrows()]
 
     @staticmethod
     def _limit_up_clusters(cs_today: pd.DataFrame,
