@@ -151,9 +151,12 @@ class EtfScaleManager:
         if start_date:
             start = datetime.strptime(start_date, '%Y%m%d').date()
         else:
-            rows = self.db._query(
-                "SELECT MAX(trade_date) FROM etf_scale_daily WHERE exchange='sse'")
-            last = rows[0][0] if rows and rows[0][0] else None
+            # P0-3 首跑修正：DatabaseConnection 无 _query，用 execute_query（dict 行）
+            rows = self.db.execute_query(
+                "SELECT MAX(trade_date) AS max_date FROM etf_scale_daily "
+                "WHERE exchange='sse'")
+            last = (rows[0]['max_date'] if rows and rows[0]['max_date']
+                    else None)
             start = ((datetime.strptime(str(last), '%Y%m%d').date() + timedelta(days=1))
                      if last else end - timedelta(days=self.backfill_days))
         stats: Dict[str, Any] = {

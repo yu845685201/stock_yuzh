@@ -147,9 +147,11 @@ class HkexConnectManager:
         if start_date:
             start = datetime.strptime(start_date, '%Y%m%d').date()
         else:
-            latest = self.db._query(
-                "SELECT MAX(trade_date) FROM hkex_connect_daily")
-            last = latest[0][0] if latest and latest[0][0] else None
+            # P0-3 首跑修正：DatabaseConnection 无 _query，用 execute_query（dict 行）
+            latest = self.db.execute_query(
+                "SELECT MAX(trade_date) AS max_date FROM hkex_connect_daily")
+            last = (latest[0]['max_date'] if latest and latest[0]['max_date']
+                    else None)
             if last:
                 start = (datetime.strptime(str(last), '%Y%m%d').date()
                          + timedelta(days=1))

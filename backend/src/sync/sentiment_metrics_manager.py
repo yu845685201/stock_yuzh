@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 #: 面板业务列（与 aggregator.aggregate 完全一致）
 PANEL_COLS = ['stock_name', 'open', 'high', 'low', 'close', 'preclose',
-              'change_rate', 'volume', 'amount', 'is_st']
+              'change_rate', 'volume', 'amount', 'is_st', 'raw_close']
 #: 块首前推交易日数（连板 lookback=60 + 余量）
 PANEL_LOOKBACK_DAYS = 62
 
