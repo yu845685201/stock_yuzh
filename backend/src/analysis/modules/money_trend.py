@@ -1,8 +1,9 @@
 """``money_trend`` 个股资金趋势（量价资金方案 V1.1 §3.1②）。
 
 数据源：环境装配 ``mf_history_map``（money_flow_daily 最近 10 行，引擎装配进
-upstream——模块不查库，纯函数红线不变）。**口径注记**：money_flow_daily 为分笔
-分桶口径，P2 全市场扩面后覆盖全市场；历史行可能仅异动子集（calib_note 区分）。
+upstream——模块不查库，纯函数红线不变）。**口径注记**（P1-7 动态）：行级口径受
+money_flow_daily.calib_note 约束——20260917 起全市场分笔分桶；历史行为异动子集
+近似口径，跨期解读以当日 calib_note 为准。
 
 计算：今日大单净额、5 日累计净额、连续净流入天数（big_net_amt>0 计数）。
 
@@ -31,7 +32,7 @@ class MoneyTrend(AnalysisModule):
         "个股资金趋势：今日大单净额、5 日累计净额与连续净流入天数（money_flow_daily "
         "big_net_amt>0 计数），数据来自环境装配 mf_history_map（链须配 "
         "env: a_share_candidates）。返回理由串（如「净流入1.20亿/连3天」「净流出0.50亿」）"
-        "或 否（无资金行）/ 数据不足；分笔分桶口径，历史行覆盖受异动子集限制"
+        "或 否（无资金行）/ 数据不足；行级口径受 calib_note 约束（20260917 起全市场，历史为异动子集）"
     )
     required_columns: ClassVar[List[str]] = []
     default_params: ClassVar[Dict[str, object]] = {}

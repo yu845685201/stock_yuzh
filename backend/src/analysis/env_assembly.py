@@ -424,7 +424,8 @@ def _institution_net_map(reader, as_of: str) -> Dict[str, float]:
 
 def _mf_history_map(reader, as_of: str) -> Dict[str, List]:
     """ts_code → [(trade_date, big_net_amt)] 最近 10 行升序（money_trend 输入；
-    money_flow_daily 行级口径受 calib_note 约束——历史行可能仅异动子集）"""
+    行级口径受 calib_note 约束（P1-7）：20260917 起全市场分笔分桶，
+    历史行为异动子集近似口径——跨期解读须以当日 calib_note 为准）"""
     try:
         rows = reader._query(
             """

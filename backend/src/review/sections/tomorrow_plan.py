@@ -146,8 +146,9 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
                                f'变动触发情景；基准为报告锚定日口径（同锚定日可复现），'
                                '假期最新外围状态以链 CSV 与 digest 解读为准'})
 
-    # --- 盘中验证（三验点）---
-    blocks.append({'type': 'heading', 'level': 3, 'text': '盘中验证：三验点'})
+    # --- 盘中验证（V 系列验点：V1 量能 / V1.5 量价联动 / V2 梯队 / V3 溢价 / V4 缠论）---
+    blocks.append({'type': 'heading', 'level': 3,
+                   'text': '盘中验证：验点表（V1/V1.5/V2/V3/V4，可得几项算几项）'})
     v_rows: List[List[str]] = []
     turnover = ((agg.get('market_env') or {}).get('data') or {}).get('turnover') or {}
     amount_base = turnover.get('today_total')
@@ -186,6 +187,17 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
             f'今日涨停 {m.get("limit_up_count", "—")} 只的转天溢价 vs 均值基准 {m["premium_mean"]:+.2f}%',
             '溢价转正/扩大 = 接力修复',
             '续降/转负 = 亏钱效应扩散，降仓位',
+        ])
+    # V4 缠论验点（P1-8）：缠论池次日开盘相对全市场中位超额——核验闭环
+    # （verifier CHAN 池 excess_median）已积累该数据，此处补预案层展示
+    chan_n = len(((agg.get('chan') or {}).get('data') or {}).get('items') or [])
+    if chan_n:
+        v_rows.append([
+            'V4 缠论池',
+            f'缠论候选 {chan_n} 只的次日开盘相对全市场中位超额'
+            '（收盘确认→次日开盘口径，与验证回测撮合一致）',
+            '超额 ≥0 = 左侧池互补性初步兑现，维持观察池权重',
+            '连续为负 = 左侧池与右侧体系互斥性存疑，降观察权重（联动分级复核）',
         ])
     if v_rows:
         blocks.append({'type': 'table',

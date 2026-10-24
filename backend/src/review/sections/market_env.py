@@ -110,28 +110,39 @@ def build(env: Dict[str, Any], sentiment: Dict[str, Any],
                                    '放量涨=健康 / 缩量涨=背离 / 放量跌=恐慌 / 缩量跌=阴跌；'
                                    '双锚独立判定，矛盾时点名分歧；阈值判据初版待校准'})
 
-    # 市场级资金锚（P3）
+    # 市场级资金锚（P3 + P1-6 质量标签：实测/代理/停旧值 + 综合置信度）
     ca = (capital_anchors or {})
     if ca.get('available'):
         cdata = ca.get('data') or {}
+        tags = cdata.get('anchor_tags') or {}
         if cdata.get('hkex_date') or cdata.get('etf'):
             blocks.append({'type': 'heading', 'level': 3, 'text': '资金锚（互联互通/ETF 份额）'})
             rows = []
             if cdata.get('hkex_date'):
                 rows.append(['北向成交总额', f"{cdata['north_total_yi']:,.1f} 亿",
+                             tags.get('north_total', '—'),
                              '外资活跃度（买+卖合计，停披露分项，禁止解读净额）'])
                 rows.append(['南向净买入', f"{cdata['south_net_yi']:+,.1f} 亿港元",
+                             tags.get('south_net', '—'),
                              '内地资金买港股（Buy−Sell 真净额；0=港股通关闭）'])
             etf = cdata.get('etf') or {}
             if etf.get('chg_yi_fen') is not None:
                 rows.append(['头部宽基ETF份额变动', f"{etf['chg_yi_fen']:+.2f} 亿份",
+                             tags.get('etf', '—'),
                              f"沪深300/上证50/科创50/创业板等合计（{etf.get('date')} vs {etf.get('prev_date')}）"])
             elif etf.get('note'):
-                rows.append(['头部宽基ETF份额变动', '—', etf['note']])
+                rows.append(['头部宽基ETF份额变动', '—', tags.get('etf', '—'), etf['note']])
             if rows:
                 blocks.append({'type': 'table',
-                               'headers': ['锚', '当日值', '口径'],
+                               'headers': ['锚', '当日值', '质量', '口径'],
                                'rows': rows})
+                conf = cdata.get('confidence')
+                if conf:
+                    blocks.append({'type': 'note',
+                                   'text': f'综合置信度：{conf}（实测=表内直取；代理=以关联量'
+                                           '替代目标量；停旧值=快照日期早于锚定日，红色警示'
+                                           '按停更对待）；北向个股明细锚为停旧值（披露止于'
+                                           ' 20240816），不参与综合推导'})
 
         # ---------- 第三阶段新锚（2026-10-23） ----------
         # 宏观指标锚（低频背景；各指标按自身发布日展示，禁混同日）
@@ -252,15 +263,46 @@ def build(env: Dict[str, Any], sentiment: Dict[str, Any],
                                     for o in fallback]})
 
     # ② 汇率与其他（快照补充项：A50/汇率，含 fx_shkdcny）
+    # P1-5（评价-8）：快照陈旧度分级——>10 天涨跌幅停显、>3 天标注"累计值非隔夜"
     overseas = data.get('overseas') or []
     if overseas:
-        blocks.append({'type': 'heading', 'level': 3,
-                       'text': f"汇率与其他（{overseas[0].get('date', '最新可得')}）"})
-        blocks.append({'type': 'table', 'headers': ['市场', '收盘', '涨跌幅%'],
-                       'rows': [[o['name'], o['close'], o['change_pct']] for o in overseas]})
-        blocks.append({'type': 'note',
-                       'text': '口径：overseas_market_daily 快照最新可得；A50 期货涨跌幅为'
-                               '本地昨收自算（快照无昨结字段）；汇率为采集时点最新值'})
+        stale_days = _snapshot_stale_days(overseas[0].get('date'),
+                                          data.get('as_of'))
+        if stale_days is not None and stale_days > 10:
+            blocks.append({'type': 'heading', 'level': 3,
+                           'text': f"汇率与其他（{overseas[0].get('date', '最新可得')}，"
+                                   f"快照过期 {stale_days} 天）"})
+            blocks.append({'type': 'table', 'headers': ['市场', '收盘'],
+                           'rows': [[o['name'], o['close']] for o in overseas]})
+            blocks.append({'type': 'note',
+                           'text': f'快照过期 {stale_days} 天（overseas_market_daily '
+                                   '最新可得为上述日期），涨跌幅为跨期累计值无隔夜含义，'
+                                   '整列停显；汇率为采集时点最新值'})
+        else:
+            stale_mark = ''
+            note_extra = ''
+            if stale_days is not None and stale_days > 3:
+                stale_mark = f'（快照 {stale_days} 天前，累计值非隔夜）'
+                note_extra = f'快照距锚定日 {stale_days} 天，涨跌幅为跨期累计值非隔夜变化；'
+            elif stale_days is not None and stale_days < 0:
+                # 历史锚定日重跑：快照比锚定日"新"——涨跌幅属快照日口径而非锚定日
+                note_extra = (f'快照日期晚于锚定日（{-stale_days} 天，历史重跑场景），'
+                              '涨跌幅为快照日口径非锚定日值；')
+            blocks.append({'type': 'heading', 'level': 3,
+                           'text': f"汇率与其他（{overseas[0].get('date', '最新可得')}）"})
+            ov_rows = []
+            for o in overseas:
+                chg = o.get('change_pct')
+                if o['name'] == '富时A50期货' and chg is not None:
+                    chg = f"{chg}{stale_mark}"
+                ov_rows.append([o['name'], o['close'], chg])
+            blocks.append({'type': 'table', 'headers': ['市场', '收盘', '涨跌幅%'],
+                           'rows': ov_rows})
+            blocks.append({'type': 'note',
+                           'text': '口径：overseas_market_daily 快照最新可得；'
+                                   + note_extra
+                                   + 'A50 期货涨跌幅为本地昨收自算（快照无昨结字段）；'
+                                     '汇率为采集时点最新值'})
 
     # ③ 假期外围观察（B4/B5 未触发时为 None）
     hol = data.get('holiday_overseas')
@@ -307,6 +349,25 @@ def build(env: Dict[str, Any], sentiment: Dict[str, Any],
     # ⑤ 市场要闻（四期方案 §4；news_telegraph 当日快讯，importance 优先）
     blocks.extend(_news_blocks(news))
     return blocks
+
+
+def _snapshot_stale_days(snap_date: Any, as_of: Any) -> Optional[int]:
+    """快照日期与锚定日的自然日差（P1-5；任一不可解析 → None 不标注）。"""
+    from datetime import datetime
+
+    def _parse(v: Any) -> Optional[datetime]:
+        s = ''.join(ch for ch in str(v or '') if ch.isdigit())
+        if len(s) != 8:
+            return None
+        try:
+            return datetime.strptime(s, '%Y%m%d')
+        except ValueError:
+            return None
+
+    d_snap, d_asof = _parse(snap_date), _parse(as_of)
+    if d_snap is None or d_asof is None:
+        return None
+    return (d_asof - d_snap).days
 
 
 def _news_blocks(news: Dict[str, Any] = None) -> List[Dict[str, Any]]:

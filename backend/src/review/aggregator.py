@@ -394,8 +394,11 @@ class ReviewAggregator:
     def _sector_money(self, as_of: str) -> AggregationResult:
         """板块资金流向（行业 sw_2021 聚合大单净额；概念 sina_gn Top5）。
 
-        **口径**：聚合自 money_flow_daily 异动子集（P2 前约 300-400 股/日），
-        系统性偏向异动板块——仅供观察不作排序结论；子集覆盖率随行展示。
+        **口径（P1-7 动态）**：行级口径受 money_flow_daily.calib_note 约束——
+        20260917 起为全市场分笔分桶（'分笔分桶:全市场'）；更早 as_of 为异动
+        子集近似口径（'近似口径:分笔分桶'，系统性偏向异动板块）。当日
+        calib_note 随 data['calib_note'] 带回，渲染层据此动态生成注记；
+        子集覆盖率随行展示。
         """
         try:
             rows = self.db._query(
@@ -438,11 +441,21 @@ class ReviewAggregator:
         top3_industries = {k for k, _ in ranked[:3]}
         top3_members = {ts for ts, ind in ind_map.items()
                         if ind in top3_industries}
+        # P1-7（评价-4）：当日行级口径随数据带回，渲染层按此动态生成注记
+        # （20260917 起全市场分笔分桶；更早 as_of 为异动子集近似口径）
+        try:
+            calib_rows = self.db._query(
+                "SELECT DISTINCT calib_note FROM money_flow_daily "
+                "WHERE trade_date = %s LIMIT 2", (as_of,))
+            calib_note = str(calib_rows[0][0]) if calib_rows else ''
+        except Exception:
+            calib_note = ''
         return AggregationResult(data={
             'industry_top': top, 'industry_bottom': bottom,
             'top3_members': top3_members,
             'subset_count': len(mf_map), 'traded_count': traded,
             'coverage': round(len(mf_map) / traded * 100, 1) if traded else None,
+            'calib_note': calib_note,
         })
 
     def _capital_anchors(self, as_of: str) -> AggregationResult:
@@ -512,6 +525,33 @@ class ReviewAggregator:
         except Exception as e:
             logger.warning(f'北向个股明细锚读取失败: {e}')
             data['north_detail'] = None
+
+        # P1-6 资金锚质量标签（评价-9/B5）：实测/代理/停旧值 + 综合置信度。
+        # 规则表 config review.money_anchor_tags；快照日期 < as_of 一律覆盖为停旧值
+        tag_rules = dict(((self.config.get('review') or {})
+                          .get('money_anchor_tags')) or {})
+        tags = {
+            'south_net': tag_rules.get('south_net', '实测'),
+            'north_total': tag_rules.get('north_total', '代理'),
+            'etf': tag_rules.get('etf', '代理'),
+            'macro': tag_rules.get('macro', '实测'),
+            'option': tag_rules.get('option', '实测'),
+            'north_detail': tag_rules.get('north_detail', '停旧值'),
+        }
+        hkex_date = str(data.get('hkex_date') or '')
+        if hkex_date and hkex_date < str(as_of):
+            tags['south_net'] = tags['north_total'] = '停旧值'
+        etf_date = str((data.get('etf') or {}).get('date') or '')
+        if etf_date and etf_date < str(as_of):
+            tags['etf'] = '停旧值'
+        data['anchor_tags'] = tags
+        # 综合置信度按决策锚（南向/北向总额/ETF/宏观/期权）推导；
+        # north_detail 恒为停旧值（披露止于 20240816），不参与综合推导只在行内标注
+        decision_vals = [tags[k] for k in
+                         ('south_net', 'north_total', 'etf', 'macro', 'option')]
+        data['confidence'] = ('低' if '停旧值' in decision_vals
+                              else ('高' if all(v == '实测' for v in decision_vals)
+                                    else '中'))
         return AggregationResult(available=bool(data), data=data)
 
     def _macro_anchor(self) -> Optional[Dict[str, Any]]:
@@ -1038,26 +1078,51 @@ class ReviewAggregator:
 
     def _sentiment_cycle(self, m: Dict[str, Any],
                          as_of: Optional[str] = None) -> Dict[str, Any]:
-        """情绪周期定位（判据阈值取 config review.sentiment_rules，试用期水印）"""
+        """情绪周期定位（判据阈值取 config review.sentiment_rules，试用期水印）。
+
+        返回含结构化 ``criteria``（P1-1：判据对照表数据——判据|阈值|当日值|命中，
+        digest 与报告层直接渲染，回答"为什么不是 X"）与 ``trial``（P1-4：
+        config review.sentiment_calibrated=False 时展示"判据试用版"水印）。
+        """
         rules = self.sentiment_rules
         max_streak = m.get('max_streak') or 0
         burst_rate = m.get('burst_rate')
         premium_mean = m.get('premium_mean')
         cycle, basis = '试用版判据待校准', []
+        criteria: List[Dict[str, Any]] = []
         try:
             climax = rules.get('climax') or {}
             ice = rules.get('ice') or {}
             ebb = rules.get('ebb') or {}
+            criteria = [
+                {'name': '高潮',
+                 'expr': f"高度≥{climax.get('max_streak_gte')} 且 "
+                         f"溢价≥{climax.get('premium_mean_gte')}%",
+                 'values': f"高度{max_streak} / 溢价{premium_mean}%",
+                 'hit': False},
+                {'name': '冰点',
+                 'expr': f"高度≤{ice.get('max_streak_lte')} 或 "
+                         f"炸板率≥{ice.get('burst_rate_gte')}",
+                 'values': f"高度{max_streak} / 炸板率{burst_rate}",
+                 'hit': False},
+                {'name': '退潮',
+                 'expr': f"溢价均值≤{ebb.get('premium_mean_lte')}%",
+                 'values': f"溢价均值{premium_mean}%",
+                 'hit': False},
+            ]
             if (max_streak >= climax.get('max_streak_gte', 99)
                     and (premium_mean is not None and premium_mean >= climax.get('premium_mean_gte', 99))):
                 cycle, basis = '高潮', [f"高度{max_streak}≥{climax.get('max_streak_gte')}",
                                         f"溢价{premium_mean}≥{climax.get('premium_mean_gte')}"]
+                criteria[0]['hit'] = True
             elif (max_streak <= ice.get('max_streak_lte', -1)
                     or (burst_rate is not None and burst_rate >= ice.get('burst_rate_gte', 99))):
                 cycle, basis = '冰点', [f"高度{max_streak}≤{ice.get('max_streak_lte')}"
                                         f" 或 炸板率{burst_rate}≥{ice.get('burst_rate_gte')}"]
+                criteria[1]['hit'] = True
             elif premium_mean is not None and premium_mean <= ebb.get('premium_mean_lte', 999):
                 cycle, basis = '退潮', [f"溢价均值{premium_mean}≤{ebb.get('premium_mean_lte')}"]
+                criteria[2]['hit'] = True
             else:
                 cycle, basis = '回暖/震荡', ['未命中冰点/高潮/退潮判据']
         except Exception as e:
@@ -1074,12 +1139,13 @@ class ReviewAggregator:
         divergence = (q_cycle in ('高潮', '冰点', '退潮')
                       and cycle in ('高潮', '冰点', '退潮')
                       and q_cycle != cycle)
-        return {'position': cycle, 'basis': basis,
+        # P1-4（C1）：原第二个不可达 return（trial 水印永不显示）删除，
+        # trial 并入本 return——sentiment.py/conclusion.py 的水印消费恢复生效
+        return {'position': cycle, 'basis': basis, 'criteria': criteria,
+                'trial': not self.sentiment_calibrated,
                 'quantile_position': q_cycle, 'quantile_basis': q_basis,
                 'quantile_calibration': q_calib,
                 'quantile_divergence': divergence}
-        return {'position': cycle, 'basis': basis,
-                'trial': not self.sentiment_calibrated}
 
     def _sentiment_cycle_trend(self, as_of: Optional[str],
                                metrics: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1588,8 +1654,9 @@ class ReviewAggregator:
     def _aggregate_money_flow(self, as_of: str) -> AggregationResult:
         """D3 分笔资金流 → 维度4：big_net_amt 降序/升序 Top10。
 
-        口径：异动子集近似口径（涨停∪跌停∪|涨跌幅|≥7%∪成交额Top50，单笔≥50 万
-        分桶），非全市场。
+        口径（P1-7 动态）：行级口径受 money_flow_daily.calib_note 约束——
+        20260917 起全市场分笔分桶（单笔≥50 万分桶）；更早 as_of 为异动子集
+        近似口径（涨停∪跌停∪|涨跌幅|≥7%∪成交额Top50），非全市场。
         """
         try:
             top = self.db._query(

@@ -276,9 +276,19 @@ def _sector_money_blocks(sector_money: Dict[str, Any]) -> List[Dict[str, Any]]:
                        'headers': ['方向', '行业', '大单净额(亿)', '净流入家数'],
                        'rows': rows})
     coverage = d.get('coverage')
+    # P1-7（评价-4）：口径注记按当日行级 calib_note 动态生成，不再硬编码"异动子集"
+    calib = str(d.get('calib_note') or '')
+    if '全市场' in calib:
+        calib_txt = f'全市场分笔分桶（calib_note={calib}）'
+    elif calib:
+        calib_txt = f'异动子集近似口径（calib_note={calib}），系统性偏向异动板块' \
+                    '（涨停多的板块天然净额大）'
+    else:
+        calib_txt = '异动子集近似口径，系统性偏向异动板块' \
+                    '（涨停多的板块天然净额大；calib_note 不可得）'
     blocks.append({'type': 'note',
-                   'text': f"口径：聚合自 money_flow_daily 异动子集（{d.get('subset_count', 0)} 只，"
-                           f"覆盖率 {coverage if coverage is not None else '—'}%），"
-                           '系统性偏向异动板块（涨停多的板块天然净额大），仅供观察不作排序结论；'
+                   'text': f"口径：聚合自 money_flow_daily（{d.get('subset_count', 0)} 只，"
+                           f"覆盖率 {coverage if coverage is not None else '—'}%），{calib_txt}；"
+                           '仅供观察不作排序结论；'
                            '行业为 sw_2021 主 + sina_hy 回退等权归属'})
     return blocks

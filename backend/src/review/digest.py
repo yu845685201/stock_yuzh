@@ -359,6 +359,134 @@ def _pct_cell(v: Any, signed: bool = True) -> str:
     return f'<span class="{cls}">{txt}</span>' if cls else txt
 
 
+#: 口径字典条目（P1-2，评价-1）：术语|口径一句话定义；与报告/配置单一出处
+_GLOSSARY_ROWS = [
+    ('涨停家数', '收盘价≥涨停价的非 ST 家数（精确涨停价 = round(昨收×(1+板块涨幅上限),2)）'),
+    ('炸板率', '炸板家数 /（封板家数 + 炸板家数）；越高=封板资金越弱'),
+    ('溢价均值', '昨日涨停股今日平均涨幅（开盘/收盘口径见情绪章图注）——接力情绪核心指标'),
+    ('score（周期走向）', '近 10 个交易日"涨停家数/高度/炸板率(反向)"归一均值——窗口相对读数，'
+                          '样本小仅作方向参考，无绝对含义'),
+    ('首封 / 开板 / 一次未炸', '封板时段五桶（9:25 集合竞价/9:30-10:00/10:00-11:00/'
+                               '13:00-14:00/14:00 后）；开板次数=当日开板回封次数；'
+                               '一次未炸=全天无开板（封板质量指标，分笔口径）'),
+    ('翻红 / 炸板修复（题材反馈）', '昨日炸板股今日收红占比 / 昨日炸板股今日平均涨幅'
+                                    '（板块主线章题材反馈指标）'),
+    ('R1-R4', '转天候选四类：R1 梯队接力（连板≥2）/ R2 主线跟随 / R3 趋势新高 /'
+              ' R4 机构席位；报告层带弱档否决与情绪开放度闸门，链 CSV 列为全量'
+              '（链命中≠报告入池）'),
+    ('P1-P3', '盘前外围情景三档：P1 外围续弱 / P2 外围平稳 / P3 外围反弹'
+              '（恒指/纳指较锚定日收盘 ±1.5% 触发）'),
+    ('弱档否决', '情绪弱档（冰点/退潮/ADX closed）时 R 系列候选按规则整类不开放'
+                 '或压档——报告层 R1=0 而链命中 N 只即此设计行为'),
+    ('一买（缠论）', '下跌两中枢依次下移 + MACD 背驰后的左侧买点；锚定日收盘确认，'
+                     '操作口径=次日开盘；历史 60 日费后均值 +6.8%/胜率 53.1%'
+                     '（2015-2026 全A验证，见数据/chan_validation/report.md）'),
+    ('二买（缠论）', '一买后回踩不创新低确认的第二个左侧买点；历史 +5.1%/51.6%'),
+    ('背驰强度', '|Σhist₂|/|Σhist₁|（两段 MACD 柱面积比），<1 即背驰，越小越强；'
+                 '本表按强度升序展示'),
+    ('中枢 [ZD,ZG]', '缠论中枢区间（重叠价位区），ZD=中枢下沿 / ZG=中枢上沿'),
+]
+
+
+def _render_glossary() -> str:
+    """折叠式口径字典（P1-2）：模板直拼 HTML（details 默认收起，不干扰阅读流）。"""
+    rows = ''.join(f'<tr><td>{_esc(t)}</td><td>{_esc(d)}</td></tr>'
+                   for t, d in _GLOSSARY_ROWS)
+    return (f'<details><summary>口径字典（点击展开——全文术语定义，'
+            f'首次出现不随文重复）</summary>'
+            f'<table><thead><tr><th>术语</th><th>口径</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></details>')
+
+
+def _chan_linkage_state(position: str, review_cfg: Dict[str, Any]) -> str:
+    """缠论池情绪联动状态（P1-8；规则表 config review.chan_pool_linkage）。"""
+    rules = dict((review_cfg or {}).get('chan_pool_linkage') or {})
+    rules.setdefault('回暖', '弱化观察')
+    rules.setdefault('震荡', '弱化观察')
+    rules.setdefault('冰点', '升主关注')
+    rules.setdefault('退潮', '升主关注')
+    rules.setdefault('高潮', '仅记录')
+    tokens = [t for t in str(position or '').split('/') if t]
+    states = []
+    for t in tokens:
+        s = rules.get(t)
+        if s and s not in states:
+            states.append(s)
+    return '/'.join(states) if states else rules.get('回暖', '弱化观察')
+
+
+def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
+                        industry_map: Dict[str, str],
+                        review_cfg: Dict[str, Any]) -> Optional[str]:
+    """六、缠论背驰候选（P1-8 digest 固化）：表格（含行业/数据标记列）+
+    情绪联动状态 + 三条口径注记 + HIST_NOTE 先验 + 数据质量脚注。
+
+    数据复用 agg['chan']（与 md 报告同一聚合产物，不二次计算）；
+    缠论面板失败/缺失 → 不渲染该节（digest 其余部分不受影响）。
+    """
+    from .sections.chan_candidates import HIST_NOTE
+    chan = agg.get('chan')
+    if not chan or not getattr(chan, 'available', False):
+        return None
+    data = getattr(chan, 'data', None) or {}
+    items = data.get('items') or []
+    parts: List[str] = ['<h2>六、缠论背驰候选（左侧观察池）</h2>']
+    if not items:
+        parts.append('<p class="note">今日无一买/二买信号确认（正常态：全市场年均约'
+                     ' 480+250 个，单日 0~16 个常见；冰点/退潮期密度上升）。</p>')
+    else:
+        rows = []
+        for it in items[:10]:
+            marks = []
+            if it.get('data_flag'):
+                marks.append(str(it['data_flag']))
+            if it.get('suspect_reason'):
+                marks.append('链存疑')
+            ind = industry_map.get(it.get('ts_code') or '', '—')
+            stop = (f"{it.get('trigger_low', '—')}（止损 {it.get('stop', '—')}）"
+                    if it.get('stop') is not None else str(it.get('trigger_low', '—')))
+            div = (f"{it['divergence']:.2f}"
+                   if it.get('divergence') is not None else '—')
+            rows.append(f'<tr><td>{_esc(it.get("code", "—"))}</td>'
+                        f'<td>{_esc(it.get("name") or "—")}</td>'
+                        f'<td>{_esc(it.get("kind", "—"))}</td>'
+                        f'<td>{_esc(div)}</td>'
+                        f'<td>{_esc(ind)}</td>'
+                        f'<td>{_esc(stop)}</td>'
+                        f'<td>{_esc("；".join(marks) or "—")}</td></tr>')
+        parts.append('<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>'
+                     '<th>背驰强度</th><th>行业</th><th>触发低点(止损)</th>'
+                     '<th>数据标记</th></tr></thead><tbody>'
+                     + ''.join(rows) + '</tbody></table>')
+        state = _chan_linkage_state(cycle.get('position', ''), review_cfg)
+        parts.append(f'<p>当前情绪档 <strong>{_esc(cycle.get("position", "—"))}</strong>'
+                     f' → 缠论池处理：<strong>{_esc(state)}</strong>'
+                     f'（联动规则 config review.chan_pool_linkage；'
+                     f'回暖/震荡期新确认一买=逆势新低弱股，降权；冰点/退潮期一买='
+                     f'深度洗脱后的左侧点，升主关注）</p>')
+        flagged = sum(1 for it in items
+                      if it.get('data_flag') or it.get('suspect_reason'))
+        dq = (f'数据质量：本日 {len(items)} 只候选中 {flagged} 只带缺日/断裂标记'
+              f'（缺日>2% 已剔除不判定）')
+        overlap = data.get('suspect_overlap')
+        if isinstance(overlap, dict) and overlap.get('available'):
+            dq += (f"；缠论候选×存疑清单交叉：命中 {overlap.get('hit_count', 0)} 只"
+                   f"（全链存疑股票 {overlap.get('suspect_total', 0)} 只）")
+        elif isinstance(overlap, dict):
+            dq += f"；缠论候选×存疑清单交叉未执行（{overlap.get('note', '不可得')}）"
+        parts.append(f'<p class="note">{_esc(dq)}。</p>')
+        more = len(items) - min(len(items), 10)
+        if more > 0:
+            parts.append(f'<p class="note">仅展示前 10 只，全量 {len(items)} 只见'
+                         ' daily_review CSV「缠论背驰买点」列。</p>')
+    parts.append('<p class="note">口径：背驰入选 |Σhist₂|/|Σhist₁| &lt; 1 即背驰，'
+                 '本表按强度升序取前 10；背驰段须为已完成笔（分型确认），短笔柱面积'
+                 '天然偏小（回测口径一致，偏倚已定价）；信号为锚定日收盘确认，'
+                 '操作口径=次日开盘，一买止损=触发低点。</p>')
+    parts.append(f'<p class="note">{_esc(HIST_NOTE)}</p>')
+    return ''.join(parts)
+
+
 def build_digest(config_manager, as_of: Optional[str] = None,
                  interpretation_path: Optional[str] = None,
                  output_dir: Optional[str] = None) -> Dict[str, Any]:
@@ -421,6 +549,8 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts.append(f'<p class="note">数据口径与 <code>daily_review_{_esc(as_of)}.md</code> '
                  f'六维报告同源（ReviewAggregator 同一次聚合）；外围为市场自身交易日历'
                  f'（qfq/指数原值），A 股锚定日 {as_of}、前一交易日 {prev_date or "—"}。</p>')
+    # P1-2 口径字典（评价-1：三源术语不自解释）：折叠式固定渲染，术语与报告口径单一出处
+    parts.append(_render_glossary())
 
     # 〇、昨日核验摘要（四期 §1.4：复盘先对账，置于大盘环境之前）
     ver = agg.get('verification') or {}
@@ -471,21 +601,45 @@ def build_digest(config_manager, as_of: Optional[str] = None,
 
     parts.append('<h2>二、市场情绪</h2>')
     cycle = (senti.get('cycle') or {})
+    trial_mark = '（判据试用版）' if cycle.get('trial') else ''
     parts.append(f'<p>情绪周期定位：<strong>{_esc(cycle.get("position", "—"))}</strong>'
+                 f'{_esc(trial_mark)}'
                  f'（{"；".join(_esc(b) for b in (cycle.get("basis") or [])) or "—"}）</p>')
+    # P1-1 判据对照表（评价-2）：判据|阈值|当日值|命中 + 分位四态并列——
+    # 直接回答"为什么不是 X"（数据已算出，此前只渲染结论一行）
+    criteria = cycle.get('criteria') or []
+    if criteria:
+        crit_rows = ''.join(
+            f'<tr><td>{_esc(c["name"])}</td><td>{_esc(c["expr"])}</td>'
+            f'<td>{_esc(c["values"])}</td><td>{_esc("✓ 是" if c.get("hit") else "否")}</td></tr>'
+            for c in criteria)
+        parts.append(f'<table><thead><tr><th>判据</th><th>阈值</th><th>当日值</th>'
+                     f'<th>命中</th></tr></thead><tbody>{crit_rows}</tbody></table>')
+    parts.append(f'<p class="note">分位标定四态：{_esc(cycle.get("quantile_position", "—"))}'
+                 f'（{"；".join(_esc(b) for b in (cycle.get("quantile_basis") or [])) or "—"}）'
+                 + (f'<br>⚠ 规则四态与分位四态分歧（{_esc(cycle.get("position"))} vs '
+                    f'{_esc(cycle.get("quantile_position"))}）——以规则判据为主定位，'
+                    '分歧本身是观察信息' if cycle.get('quantile_divergence') else '')
+                 + '</p>')
     trend = senti.get('cycle_trend')
     if trend:
         complete = '' if trend.get('complete') else f"（窗口仅 {trend['window']} 天，读数不完整）"
         parts.append(f'<p>周期走向：10 日窗口 score <strong>{_fmt(trend.get("score"), 2)}</strong>'
                      f'（窗口分位 {_esc(trend.get("window_pct"))}%），'
                      f'{_esc(trend.get("direction"))}（首尾差 {_fmt(trend.get("delta"), 2, True)}），'
-                     f'距窗口最低点第 {_esc(trend.get("days_since_low"))} 天{complete}</p>')
+                     f'距窗口最低点第 {_esc(trend.get("days_since_low"))} 天{complete}'
+                     f'<span class="note">（score 为 10 日窗口相对读数，样本小仅作方向参考）</span></p>')
     parts.append('<div class="chart">' + svg_ladder(ladder) + '</div>')
     parts.append('<div class="chart">' + svg_position_bars(pct_items) + '</div>')
-    parts.append(f'<p class="note">涨停 {_esc(senti.get("limit_up_count"))} 家 / '
-                 f'炸板率 {_fmt(senti.get("burst_rate"), 1, True)}% / '
-                 f'溢价均值 {_fmt(senti.get("premium_mean"), 2, True)}%（分位条为过去 250 '
-                 f'交易日历史分位）。</p>')
+    # P1-3 图注统一（评价-1）：分位类图注统一"当日值 X（250 日分位 Y%）"格式
+    def _p(key):
+        return _esc((pcts.get(key) or {}).get('pct'))
+    parts.append(f'<p class="note">涨停 {_esc(senti.get("limit_up_count"))} 家'
+                 f'（250 日分位 {_p("limit_up_count")}%）/ '
+                 f'炸板率 当日 {_fmt(senti.get("burst_rate"), 1, True)}%'
+                 f'（分位 {_p("burst_rate")}%）/ '
+                 f'溢价均值 {_fmt(senti.get("premium_mean"), 2, True)}%'
+                 f'（分位 {_p("premium_mean")}%）；分位条为过去 250 交易日历史分位。</p>')
 
     parts.append('<h2>三、板块主线（等权口径）</h2>')
     if ind_chart:
@@ -522,8 +676,18 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                      'A 收盘/(H 收盘×港元兑人民币快照)−1。两侧复权基准独立滚动、时点错位，'
                      '只作观察不作结论；"未对齐/无A股映射"行不参与。</p>')
 
+    # P1-8 缠论背驰候选（digest 固定渲染位，五节之后、解读区之前）：
+    # 复用 agg['chan']（与 md 报告第六章同一聚合数据，不二次计算）
+    try:
+        industry_map = aggregator.industry_map(as_of)
+    except Exception:
+        industry_map = {}
+    chan_html = _render_chan_digest(agg, cycle, industry_map, review_cfg)
+    if chan_html:
+        parts.append(chan_html)
+
     if holiday:
-        parts.append(f'<h2>六、假期外围观察（{holiday.get("prev_date")} 后休市区间，'
+        parts.append(f'<h2>七、假期外围观察（{holiday.get("prev_date")} 后休市区间，'
                      f'截至 {holiday.get("last_date") or "—"}）</h2>')
         hol_items = [(r['name'], r.get('accum_pct')) for r in (holiday.get('rows') or [])]
         parts.append('<div class="chart">' + svg_vbars(hol_items) + '</div>')
