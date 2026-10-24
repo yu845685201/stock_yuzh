@@ -1723,8 +1723,15 @@ class ReviewAggregator:
         排序：一买在前、背驰强度升序（越小越强）；失败/空面板 → available=False。
         独立性红线（报告不依赖链运行）+ 逐股引擎逐K计算（向量化红线豁免同链），
         实测全市场 +20~30 秒（520 日窗口，指标面板先例 +33 秒）。
+
+        P0-7（2026-10-24）输入完整性门控：逐股 expected_bars 按
+        ``[max(窗口起点, list_date), as_of]`` 交易日数计算（防次新误判缺日），
+        缺日 >2% 不判定、≤2% 保留判定带 ``data_flag``；并与链 meta 存疑清单
+        （链 CSV「是否存疑/存疑原因」列）交叉 → ``suspect_overlap``。
         """
-        from ..chan.scan import CHAN_WINDOW_DAYS, hit_label, scan_stock_anchor
+        from ..chan.scan import CHAN_WINDOW_DAYS, DEFAULT_MIN_COVERAGE
+        from ..chan.scan import hit_label, scan_stock_anchor
+        from bisect import bisect_left
         try:
             start = self.reader.nth_trading_day_back(as_of, CHAN_WINDOW_DAYS - 1)
             if start is None:
@@ -1734,16 +1741,30 @@ class ReviewAggregator:
                                            as_of, start_date=start)
             if panel.empty:
                 return AggregationResult(available=False, reason='缠论面板窗口内无日K数据')
+            min_coverage = float((self.config.get('chan') or {})
+                                 .get('min_coverage', DEFAULT_MIN_COVERAGE))
+            window_td = self.reader.trading_days(as_of, start)
+            list_dates = {s.ts_code: (s.list_date or '') for s in
+                          self.reader.load_stock_universe()}
             items: List[Dict[str, Any]] = []
             for code, g in panel.groupby('ts_code', sort=False):
-                status, hit, _reason = scan_stock_anchor(g, as_of)
+                # 次新股按上市日起算应含K数（上市晚 ≠ 缺日）
+                eff_start = max(start, list_dates.get(code) or start)
+                idx = bisect_left(window_td, eff_start)
+                expected = len(window_td) - idx
+                status, hit, flag = scan_stock_anchor(
+                    g, as_of, expected_bars=expected or None,
+                    min_coverage=min_coverage)
                 if status != 'hit' or hit is None:
                     continue
+                label = hit_label(hit)
+                if flag:                      # 缺日标记并入理由串（与链侧同规则，保对拍）
+                    label = f'{label}/{flag}'
                 items.append({
                     'ts_code': code,
                     'code': str(g['stock_code'].iloc[-1]),
                     'name': str(g['stock_name'].iloc[-1]) if 'stock_name' in g else '',
-                    'label': hit_label(hit),
+                    'label': label,
                     'kind': hit.kind,
                     'stop': round(hit.stop_price, 2),
                     'trigger_low': round(hit.trigger_low, 2),
@@ -1751,6 +1772,7 @@ class ReviewAggregator:
                     'zd': round(hit.zd, 2),
                     'divergence': round(hit.divergence, 2) if hit.divergence is not None else None,
                     'refire': hit.refire,
+                    'data_flag': flag,
                 })
             items.sort(key=lambda x: (0 if x['kind'] == '一买' else 1,
                                       x['divergence'] if x['divergence'] is not None else 9.99))
@@ -1759,10 +1781,39 @@ class ReviewAggregator:
             parity = self._chan_parity(items, as_of)
             if parity is not None:
                 data['parity'] = parity
+            data['suspect_overlap'] = self._chan_suspect_overlap(items, as_of)
             return AggregationResult(data=data)
         except Exception as e:
             logger.warning(f'缠论背驰候选复算失败: {e!r}')
             return AggregationResult(available=False, reason=f'缠论面板复算失败: {e!r}')
+
+    def _chan_suspect_overlap(self, items: List[Dict[str, Any]],
+                              as_of: str) -> Dict[str, Any]:
+        """缠论候选 × 链存疑清单交叉（P0-7 报告层披露，覆盖 data_flag 之外的
+        前复权断裂等存疑原因）。链未跑/无存疑列 → available=False 不硬造。"""
+        csv_path = self._csv_path(as_of)
+        if csv_path is None:
+            return {'available': False, 'note': '存疑清单不可得（链未跑）'}
+        try:
+            csv_df = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
+            col = '是否存疑'
+            if col not in csv_df.columns:
+                return {'available': False, 'note': '链 CSV 无存疑列'}
+            sus = csv_df[csv_df[col] == '是']
+            reason_map = {str(r['股票代码']): str(r.get('存疑原因') or '')
+                          for _, r in sus.iterrows()}
+            hits = []
+            for it in items:
+                reason = reason_map.get(it['code'])
+                if reason:
+                    it['suspect_reason'] = reason     # 逐只随行（表格数据标记列引用）
+                    hits.append({'code': it['code'], 'name': it['name'],
+                                 'reason': reason[:60]})
+            return {'available': True, 'suspect_total': int(len(sus)),
+                    'hit_count': len(hits), 'hits': hits}
+        except Exception as e:
+            logger.warning(f'缠论存疑交叉读取失败（跳过）: {e!r}')
+            return {'available': False, 'note': f'存疑清单读取失败: {e!r}'}
 
     def _chan_parity(self, items: List[Dict[str, Any]],
                      as_of: str) -> Optional[Dict[str, Any]]:

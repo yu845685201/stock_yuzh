@@ -22,6 +22,9 @@ SCAN_KINDS = (KIND_B1, KIND_B2)
 MIN_BARS = 120
 #: 扫描窗口（交易日）：笔中枢结构约需 2 年日K + MACD warmup 130
 CHAN_WINDOW_DAYS = 520
+#: 窗口覆盖率下限（P0-7）：低于此值 insufficient 不判定；[下限,1) 打标记保留。
+#: 缺口 >2%（约 >10 天/520 日）的残缺序列上笔/中枢划分失真 → 假背驰风险。
+DEFAULT_MIN_COVERAGE = 0.98
 
 
 @dataclass
@@ -82,17 +85,29 @@ def hit_label(h: ChanHit) -> str:
     return f"二买/触发{h.trigger_low:.2f}/止损{h.stop_price:.2f}/{pivot}"
 
 
-def scan_stock_anchor(df: pd.DataFrame, as_of: str) -> Tuple[str, Optional[ChanHit], Optional[str]]:
+def scan_stock_anchor(df: pd.DataFrame, as_of: str,
+                      expected_bars: Optional[int] = None,
+                      min_coverage: float = DEFAULT_MIN_COVERAGE
+                      ) -> Tuple[str, Optional[ChanHit], Optional[str]]:
     """单股锚定日扫描（链模块与报告层共用入口）。
 
     Args:
         df: 单只股票日K（需含 trade_date/high/low/close/is_st，乱序自动排序）。
         as_of: 锚定日 yyyyMMdd；锚定日无K线 → insufficient。
+        expected_bars: 窗口应含的交易日数（P0-7 输入完整性门控）——由调用方
+            按 ``[max(窗口起点, list_date), as_of]`` 的交易日数计算（防次新股
+            被误判缺日）；``None`` = 不做覆盖检查（行为与旧版完全一致）。
+            引擎不依赖日历保持纯函数，两入口各自传入。
+        min_coverage: 覆盖率下限；``len(df)/expected_bars`` 低于它 →
+            insufficient（缺日过多，笔/中枢划分失真，假背驰风险）；
+            [下限, 1) → 保留判定但 reason 承载数据标记（如 ``缺日3天``）。
 
     Returns:
         (status, hit, reason)：status ∈ ``hit`` / ``no`` / ``insufficient``。
         前置过滤与链模块口径一致：锚定日 ST → no（ST剔除）、K线不足
-        MIN_BARS → insufficient（次新）、非正价 → insufficient。
+        MIN_BARS → insufficient（次新）、非正价 → insufficient、
+        窗口缺日超限 → insufficient（P0-7）。
+        hit 且窗口有缺日时 reason = 数据标记（原为 None）。
     """
     if df is None or df.empty:
         return "insufficient", None, "无K线数据"
@@ -102,6 +117,15 @@ def scan_stock_anchor(df: pd.DataFrame, as_of: str) -> Tuple[str, Optional[ChanH
         return "insufficient", None, f"锚定日{as_of}无K线"
     if len(ordered) < MIN_BARS:
         return "insufficient", None, f"历史不足{MIN_BARS}根(次新)"
+    data_flag: Optional[str] = None
+    if expected_bars and expected_bars > 0:
+        missing = int(expected_bars) - len(ordered)
+        if missing > 0:
+            coverage = len(ordered) / expected_bars
+            if coverage < min_coverage:
+                return ("insufficient", None,
+                        f"窗口缺日{missing}天(覆盖{coverage:.0%}<{min_coverage:.0%})")
+            data_flag = f"缺日{missing}天"
     high = pd.to_numeric(ordered["high"], errors="coerce").to_numpy(float)
     low = pd.to_numeric(ordered["low"], errors="coerce").to_numpy(float)
     close = pd.to_numeric(ordered["close"], errors="coerce").to_numpy(float)
@@ -115,4 +139,4 @@ def scan_stock_anchor(df: pd.DataFrame, as_of: str) -> Tuple[str, Optional[ChanH
     hits = scan_buy_hits(high, low, close, fire_i=len(ordered) - 1)
     if not hits:
         return "no", None, None
-    return "hit", hits[-1], None  # 同日多信号取最后一个（极少见）
+    return "hit", hits[-1], data_flag  # 同日多信号取最后一个（极少见）

@@ -9,6 +9,10 @@
   超额 +3.87pp / +2.26pp，BH q≈0）；**三买负超额（−2.53pp）不引入**；
 - 剔除口径与回测一致：锚定日 ST、K线不足 120 根（次新）——判定主体在
   ``chan.scan.scan_stock_anchor``，与复盘报告层同一实现两入口（对拍保一致）；
+- **输入完整性门控（P0-7，2026-10-24）**：引擎按 ``expected_bars``（链引擎按
+  ``max(窗口起点, list_date)`` 逐股计算）做窗口覆盖检查——缺日 >2%（约 >10
+  天/520 日）→ 数据不足不判定（残缺序列上笔/中枢划分失真，假背驰风险）；
+  缺日 ≤2% → 正常判定但理由串尾部带 ``缺日N天`` 标记（报告层表格逐只披露）。
 - **向量化红线豁免**：结构引擎为逐K增量计算（分型/笔/中枢的固有形态），
   链内实测全市场 +20~25 秒（520 日窗口）；
 - 信号语义：锚定日**收盘确认**，操作口径 = 次日开盘（与验证回测撮合一致）；
@@ -24,7 +28,7 @@ from typing import ClassVar, Dict, List
 
 import pandas as pd
 
-from ...chan.scan import hit_label, scan_stock_anchor
+from ...chan.scan import (DEFAULT_MIN_COVERAGE, hit_label, scan_stock_anchor)
 from ..module_base import AnalysisModule, ChainContext, ModuleResult
 
 
@@ -45,17 +49,27 @@ class ChanDivergenceBuy(AnalysisModule):
     required_columns: ClassVar[List[str]] = ['low', 'is_st']
     max_lookback: ClassVar[int] = 520
     hit_rule: ClassVar[str] = 'reason'
+    #: P0-7 窗口覆盖率下限（链 YAML params 可覆盖；与 config chan.min_coverage 同口径）
+    default_params: ClassVar[Dict[str, Any]] = {'min_coverage': DEFAULT_MIN_COVERAGE}
 
     def analyze(self, df: pd.DataFrame, ctx: ChainContext) -> ModuleResult:
-        status, hit, reason = scan_stock_anchor(df, ctx.as_of)
+        # P0-7 输入完整性门控：expected_bars 由引擎按 max(窗口起点, list_date)
+        # 逐股计算；缺日 >2% → 数据不足，≤2% → 命中但带缺日标记
+        status, hit, flag = scan_stock_anchor(
+            df, ctx.as_of, expected_bars=ctx.expected_bars,
+            min_coverage=float(self.params.get('min_coverage') or DEFAULT_MIN_COVERAGE))
         if status == 'insufficient':
-            return ModuleResult.insufficient(reason)
+            return ModuleResult.insufficient(flag)
         if status == 'no':
-            return ModuleResult('否', {'reason': reason} if reason else None)
+            return ModuleResult('否', {'reason': flag} if flag else None)
         assert hit is not None
+        label = hit_label(hit)
+        if flag:                      # 缺日标记并入理由串尾部（报告层对拍同规则）
+            label = f"{label}/{flag}"
         detail = {
             'kind': hit.kind, 'stop': hit.stop_price, 'trigger_low': hit.trigger_low,
             'zg': hit.zg, 'zd': hit.zd, 'pivot_pid': hit.pivot_pid,
             'refire': hit.refire, 'divergence': hit.divergence,
+            'data_flag': flag,
         }
-        return ModuleResult(hit_label(hit), detail)
+        return ModuleResult(label, detail)

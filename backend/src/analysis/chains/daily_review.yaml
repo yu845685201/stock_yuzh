@@ -92,3 +92,4 @@ modules:
   #   同结果（40 例抽样对拍复现率 100%）。左侧信号与 R 系列右侧候选互斥不混排，
   #   报告层第六章独立小节呈现，不参与 R 池计数交叉校验。
   - name: chan_divergence_buy     # 缠论背驰买点（锚定日确认的一买/二买）
+    params: {min_coverage: 0.98}  # P0-7 窗口覆盖率下限（与 config chan.min_coverage 保持一致）

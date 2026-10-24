@@ -67,12 +67,16 @@ class ChainContext:
         suspect_reasons: 数据预检发现的存疑原因（供模块参考）。
         upstream: 前序模块结果 + 引擎装配的环境值（如外围域 fx_hkdcny，
                   整合方案 §4.2；键名与模块名不冲突）。逐股独立副本。
+        expected_bars: 本股分析窗口应含的交易日数（P0-7，按
+                  ``max(窗口起点, list_date)`` 起算，防次新股被误判缺日）；
+                  ``None`` = 引擎未提供（外围域等），模块侧不做覆盖检查。
     """
 
     as_of: str
     stock: StockInfo
     suspect_reasons: List[str] = field(default_factory=list)
     upstream: Dict[str, Any] = field(default_factory=dict)
+    expected_bars: Optional[int] = None
 
     @property
     def is_suspect(self) -> bool:

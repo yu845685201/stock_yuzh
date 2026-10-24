@@ -72,7 +72,8 @@ class TestChainConfig:
         assert chain.modules[1].params == {"max_lookback": 60}
         # new_high_low（60日窗口）与 money_trend（无参数）两模块 params
         assert chain.modules[8].params == {"window": 60}
-        assert chain.modules[-1].params == {}
+        # 末位缠论模块 P0-7 门控参数（与 config chan.min_coverage 同口径）
+        assert chain.modules[-1].params == {"min_coverage": 0.98}
 
     def test_list_chains_contains_daily_review(self):
         assert "daily_review" in [c.chain for c in list_chains()]

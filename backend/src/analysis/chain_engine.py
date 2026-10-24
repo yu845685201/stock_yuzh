@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -129,6 +130,11 @@ class ChainEngine:
             lookback_desc = load.lookback_desc
             window_start = load.window_start
             window_expanded = load.window_expanded
+            # P0-7：窗口交易日列表（升序）——模块侧输入完整性门控
+            # （scan_stock_anchor expected_bars）按此逐股计算应含K数；
+            # 必须在 reader 关闭前取好
+            window_trading_days = (reader.trading_days(as_of, window_start)
+                                   if window_start else [])
             # 截面环境装配（env_assembly；链未声明 env 时零行为变化；
             # env 为列表时依序装配合并，后者键覆盖同名键）
             for env_name in chain.env_list():
@@ -179,7 +185,9 @@ class ChainEngine:
                     if reasons:
                         suspect_count += 1
                     results = self._run_modules(modules, g, as_of, stock, reasons,
-                                                load.env_extras)
+                                                load.env_extras,
+                                                window_trading_days=window_trading_days,
+                                                window_start=window_start)
                     for mod in modules:
                         for key in mod.hit_keys(results[mod.name].value):
                             bucket = hit_buckets[mod.name]
@@ -262,11 +270,23 @@ class ChainEngine:
         stock: StockInfo,
         reasons: List[str],
         env_extras: Optional[Dict[str, Any]] = None,
+        window_trading_days: Optional[List[str]] = None,
+        window_start: Optional[str] = None,
     ) -> Dict[str, ModuleResult]:
         # env_extras：域装配的环境值（如 fx_hkdcny）预置进 upstream（方案 §4.2），
         # 模块只读；逐股拷贝，防模块写入相互泄漏
+        # expected_bars（P0-7）：[max(窗口起点, list_date), as_of] 的交易日数，
+        # 次新股按上市日起算，防止把"上市晚"误判成"缺日"
+        expected_bars: Optional[int] = None
+        if window_trading_days:
+            eff_start = window_start or ""
+            if stock.list_date and stock.list_date > eff_start:
+                eff_start = stock.list_date
+            idx = bisect_left(window_trading_days, eff_start)
+            expected_bars = len(window_trading_days) - idx or None
         ctx = ChainContext(as_of=as_of, stock=stock, suspect_reasons=list(reasons),
-                           upstream=dict(env_extras or {}))
+                           upstream=dict(env_extras or {}),
+                           expected_bars=expected_bars)
         results: Dict[str, ModuleResult] = {}
         for mod in modules:
             try:

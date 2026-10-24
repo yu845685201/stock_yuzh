@@ -273,3 +273,12 @@ class DataReader:
         sql += " ORDER BY calendar_date"
         rows = self._query(sql, tuple(params))
         return [_plain_date(v) for (v,) in rows]
+
+    # ------------------------------------------------------------ 交易日历（公开读取面，P0-7）
+    def trading_days(self, as_of: str, start_date: Optional[str] = None) -> List[str]:
+        """窗口内交易日列表（升序 yyyyMMdd）。缠论窗口覆盖检查等公开用途。"""
+        return self._load_trading_days(as_of, start_date)
+
+    def trading_days_between(self, start_date: str, end_date: str) -> int:
+        """区间交易日数（含两端）。"""
+        return len(self.trading_days(end_date, start_date))
