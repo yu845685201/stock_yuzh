@@ -133,7 +133,8 @@ def test_domain_registry_and_chain_config():
         get_domain('bogus')
     # A 股域基列与空池文案保持原样（回归红线）
     d = AShareDomain()
-    assert d.base_columns == ['change_rate', 'is_st']
+    # P0-1 增 raw_close 动态阈值数据源（有意扩展，非回归）
+    assert d.base_columns == ['change_rate', 'is_st', 'raw_close']
     assert "base_stock_info" in d.universe_empty_error
 
 

@@ -52,7 +52,8 @@ class BurstLimit(AnalysisModule):
         if as_of < LIMIT_SYSTEM_START:
             return ModuleResult.insufficient("1996-12-16前无涨跌停制度")
 
-        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board)
+        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board,
+                                   list_date=ctx.stock.list_date)
         row = ann.iloc[-1]
         if not bool(row["_limit_known"]):
             return ModuleResult.insufficient("板块未知或缺 change_rate")

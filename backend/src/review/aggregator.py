@@ -37,7 +37,7 @@ from .cross_section import (
     annotate_panel,
     cross_section_at,
     sentiment_metrics,
-    suppress_first_day,
+    suppress_no_limit_window,
 )
 from . import money_effect as _money_effect
 from .sentiment_calibration import quantile_calibration, quantile_state
@@ -147,7 +147,7 @@ class ReviewAggregator:
         """
         start = self.reader.nth_trading_day_back(as_of, 62)
         cols = ['stock_name', 'open', 'high', 'low', 'close', 'preclose',
-                'change_rate', 'volume', 'amount', 'is_st']
+                'change_rate', 'volume', 'amount', 'is_st', 'raw_close']
         df = self.reader.load_kline(cols, as_of, start_date=start)
         if df.empty:
             raise ValueError(f'锚定日 {as_of} 窗口内无日K数据')
@@ -156,7 +156,8 @@ class ReviewAggregator:
         panel = annotate_panel(df)
         # 新股上市首日不判定（与链模块口径对齐；北交所 N 前缀兜底）
         list_dates = {s.ts_code: s.list_date for s in self.reader.load_stock_universe()}
-        panel = suppress_first_day(panel, list_dates)
+        # P0-2：注册制次新前 5 交易日（北交所首日）不判定、不计分母
+        panel = suppress_no_limit_window(panel, list_dates)
         cs_today = cross_section_at(panel, as_of)
         cs_prev = cross_section_at(panel, prev_date) if prev_date else cs_prev_empty()
 

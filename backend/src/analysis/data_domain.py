@@ -105,7 +105,8 @@ class AShareDomain(DataDomain):
     """A 股域：引擎现状逻辑的搬运封装（行为逐字节不变——回归红线）。"""
 
     name = "a_share"
-    base_columns = ["change_rate", "is_st"]
+    # P0-1：raw_close 为动态涨停阈值（真实昨收估计）的数据源，两入口同实现
+    base_columns = ["change_rate", "is_st", "raw_close"]
     universe_empty_error = "股票池为空（base_stock_info.list_status='L' ∩ his_kline_day）"
 
     def resolve_as_of(self, reader, as_of: Optional[str]) -> str:

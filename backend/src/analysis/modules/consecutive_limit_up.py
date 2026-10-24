@@ -46,7 +46,8 @@ class ConsecutiveLimitUp(AnalysisModule):
         if as_of < LIMIT_SYSTEM_START:
             return ModuleResult.insufficient("1996-12-16前无涨跌停制度")
 
-        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board)
+        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board,
+                                   list_date=ctx.stock.list_date)
         known = ann["_limit_known"].to_numpy(dtype=bool)
         up = ann["_limit_up"].to_numpy(dtype=bool)
 

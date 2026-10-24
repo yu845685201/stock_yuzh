@@ -57,7 +57,8 @@ class LimitUpPremium(AnalysisModule):
         if pd.isna(volume.iloc[-1]) or float(volume.iloc[-1]) <= 0:
             return ModuleResult.insufficient("锚定日无成交(停牌标记行)")
 
-        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board)
+        ann = annotate_limit_up(ordered, ctx.stock.stock_code, ctx.stock.board,
+                                   list_date=ctx.stock.list_date)
         prev = ann.iloc[-2]
         if not bool(prev["_limit_known"]):
             return ModuleResult.insufficient("前一交易日涨停不可判定(制度不适用或缺涨跌幅)")

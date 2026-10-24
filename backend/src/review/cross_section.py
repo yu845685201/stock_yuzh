@@ -28,6 +28,8 @@ from ..analysis.limit_up_rules import (
     annotate_limit_down,
     annotate_limit_up,
     board_of,
+    dynamic_thresholds,
+    _new_stock_no_limit_mask,
 )
 
 #: 连板数回看上限（与链 daily_review.yaml 的 consecutive_limit_up.params.max_lookback 一致）
@@ -59,12 +61,15 @@ def annotate_panel(df: pd.DataFrame) -> pd.DataFrame:
         parts.append(g)
     out = pd.concat(parts) if parts else out
 
-    # 炸板 = 触板 ∧ 未封住（preclose>0 且 high 可得才可判；封住的不算炸板）
+    # 炸板 = 触板 ∧ 未封住（preclose>0 且 high 可得才可判；封住的不算炸板）。
+    # P0-1：触板阈值与涨停判定共用动态阈值（低价股触板 +9.80% 同样漏判修复）
     high = pd.to_numeric(out['high'], errors='coerce')
     preclose = pd.to_numeric(out['preclose'], errors='coerce')
     with np.errstate(divide='ignore', invalid='ignore'):
         high_gain = (high - preclose) / preclose * 100.0
-    threshold = out['_limit_pct'] - THRESHOLD_OFFSET
+    threshold, _exact = dynamic_thresholds(
+        out['_limit_pct'], out['change_rate'],
+        out['raw_close'] if 'raw_close' in out.columns else None, signed='up')
     touched = high_gain.ge(threshold) & preclose.gt(0) & high.notna()
     out['_burst'] = (touched & ~out['_limit_up'] & out['_limit_known']).fillna(False).astype(bool)
 
@@ -127,20 +132,31 @@ def _add_prev_limit_up(out: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def suppress_first_day(panel: pd.DataFrame, list_dates: Dict[str, Optional[str]]) -> pd.DataFrame:
-    """新股上市首日不判定（与链模块「上市首日不判定」口径对齐，§5.7 对拍前提）。
+def suppress_no_limit_window(panel: pd.DataFrame, list_dates: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """注册制新股无涨跌幅窗口不判定（P0-2，2026-10-24；取代 suppress_first_day）。
 
-    - 沪深：按 universe 的 ``list_date`` 匹配首日行（链 ctx.stock.list_date 同源）；
-    - 北交所：cod 无上市日（list_date=NULL，§2.5 已声明退化），以名称 ``N`` 前缀
-      （A股新股命名惯例）兜底识别首日。
-
-    首日行的涨停/跌停/炸板/连板/昨日涨停判定清零（无涨跌幅限制期间的触板回落
-    属正常波动，非炸板）。返回新面板。
+    - 注册制上市前 5 个交易日（主板 20230410 起/创业板 20200824 起/科创板开板起）
+      与北交所首日：涨停/跌停/炸板/连板/昨日涨停判定清零，``_limit_known`` 同步
+      置 False（情绪分母不计入）——窗口内触板回落属正常波动非炸板，涨 25% 非涨停；
+    - 与链模块 annotate_limit_up(list_date=...) 同一掩码实现
+      （limit_up_rules._new_stock_no_limit_mask），两入口同口径；
+    - 北交所无上市日（list_date=NULL，§2.5 声明退化）保留 ``N`` 前缀首日兜底。
     """
     if panel.empty or not list_dates:
         return panel
-    mask = panel['ts_code'].map(list_dates).notna() \
-        & (panel['trade_date'] == panel['ts_code'].map(list_dates))
+    parts = []
+    for ts, g in panel.groupby('ts_code', sort=False):
+        ld = list_dates.get(ts)
+        if not ld:
+            continue
+        board = g['_board'].iloc[0] if '_board' in g.columns and len(g) else board_of(str(g['stock_code'].iloc[0]))
+        m = _new_stock_no_limit_mask(
+            g['trade_date'].astype(str).to_numpy(), board, ld)
+        if m.any():
+            parts.append(pd.Series(m, index=g.index))
+    mask = pd.concat(parts).reindex(panel.index).fillna(False).astype(bool) if parts \
+        else pd.Series(False, index=panel.index)
+    # 北交所 N 前缀首日兜底（list_date 缺失退化场景）
     mask = mask | panel['stock_name'].astype(str).str.startswith('N')
     if not mask.any():
         return panel
@@ -148,9 +164,20 @@ def suppress_first_day(panel: pd.DataFrame, list_dates: Dict[str, Optional[str]]
     for col in ('_limit_up', '_limit_down', '_burst', '_prev_limit_up'):
         if col in out.columns:
             out.loc[mask, col] = False
+    for col in ('_limit_known', '_limit_down_known'):
+        if col in out.columns:
+            out.loc[mask, col] = False
     if '_streak' in out.columns:
         out.loc[mask, '_streak'] = 0
     return out
+
+
+def suppress_first_day(panel: pd.DataFrame, list_dates: Dict[str, Optional[str]]) -> pd.DataFrame:
+    """新股上市首日不判定（P0-2 后为 suppress_no_limit_window 的首日子集，保留兼容）。
+
+    沪深按 universe ``list_date`` 匹配首日行；北交所以 ``N`` 前缀兜底。
+    """
+    return suppress_no_limit_window(panel, list_dates)
 
 
 def cross_section_at(panel: pd.DataFrame, trade_date: str,

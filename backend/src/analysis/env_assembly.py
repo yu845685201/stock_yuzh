@@ -38,7 +38,7 @@ from ..review.valuation_calc import (
     OK, pe_deducted_annualized, pe_digestion_years, peg, profit_cagr_hist,
 )
 from ..utils.financial_ttm import single_quarter, ttm_series
-from .limit_up_rules import board_of, limit_pct_series
+from .limit_up_rules import board_of, dynamic_thresholds, limit_pct_series
 
 logger = logging.getLogger(__name__)
 
@@ -318,24 +318,28 @@ def _limit_up_codes(reader, as_of: str) -> set:
     """锚定日全市场涨停代码集（change_rate 阈值 + close≥high，同链模块口径）。"""
     try:
         rows = reader._query(
-            "SELECT ts_code, stock_code, trade_date, change_rate, close, high, is_st "
-            "FROM his_kline_day WHERE trade_date = %s", (as_of,))
+            "SELECT ts_code, stock_code, trade_date, change_rate, close, high, is_st, "
+            "raw_close FROM his_kline_day WHERE trade_date = %s", (as_of,))
     except Exception as e:  # pragma: no cover - 库异常兜底
         logger.warning('涨停截面读取失败: %r', e)
         return set()
     if not rows:
         return set()
     df = pd.DataFrame(rows, columns=['ts_code', 'stock_code', 'trade_date',
-                                     'change_rate', 'close', 'high', 'is_st'])
+                                     'change_rate', 'close', 'high', 'is_st',
+                                     'raw_close'])
     codes: set = set()
     for board, g in df.groupby(df['stock_code'].astype(str).map(board_of)):
+        # P0-1：与 limit_up_rules.annotate_limit_up 同一动态阈值（低价股补判）
         pct = limit_pct_series(g, board)
         change = pd.to_numeric(g['change_rate'], errors='coerce')
-        hit = change.ge(pct - 0.10)
+        threshold, _exact = dynamic_thresholds(
+            pct, change, g['raw_close'] if 'raw_close' in g.columns else None,
+            signed='up')
         close = pd.to_numeric(g['close'], errors='coerce')
         high = pd.to_numeric(g['high'], errors='coerce')
         guard = close.ge(high).where(high.notna(), True)
-        hit = (hit & guard & pct.notna() & change.notna()).fillna(False)
+        hit = (change.ge(threshold) & guard & pct.notna() & change.notna()).fillna(False)
         codes.update(g.loc[hit, 'ts_code'].astype(str))
     return codes
 
