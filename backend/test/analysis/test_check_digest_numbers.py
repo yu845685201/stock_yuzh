@@ -125,3 +125,104 @@ class TestNormalize:
         assert cdn._normalize("9.99") == "9.99"
         assert cdn._normalize("13,860") == "13860"
         assert cdn._normalize("0.50") == "0.5"
+
+
+# ---------------------------------------------------------------- P2-5 结构规则库
+
+_CFG = """
+review:
+  sentiment_calibrated: true
+  sentiment_rules:
+    ice: {max_streak_lte: 2, burst_rate_gte: 0.5}
+    ebb: {premium_mean_lte: 0}
+    climax: {max_streak_gte: 5, premium_mean_gte: 4.0}
+"""
+
+_GOOD_DIGEST = """
+<details><summary>口径字典（点击展开）</summary><table>…</table></details>
+<p class="note">口径：背驰入选 |Σhist₂|/|Σhist₁| &lt; 1 即背驰，本表按强度升序取前 10。</p>
+<table><thead><tr><th>判据</th></tr></thead><tbody>
+<tr><td>高潮</td><td>高度≥5 且 溢价≥4.0%</td><td>…</td><td>否</td></tr>
+<tr><td>冰点</td><td>高度≤2 或 炸板率≥0.5</td><td>…</td><td>否</td></tr>
+<tr><td>退潮</td><td>溢价均值≤0%</td><td>…</td><td>否</td></tr>
+</tbody></table>
+"""
+
+_GOOD_NOTE = "缠论候选×存疑清单交叉：命中 0 只。\n\n精选观察池（非推荐）\n"
+
+
+class TestStructuralRules:
+    def test_all_green(self, workdir, csv_file):
+        note = workdir / "n.md"
+        note.write_text(_GOOD_NOTE, encoding="utf-8")
+        digest = workdir / "d.html"
+        digest.write_text(_GOOD_DIGEST, encoding="utf-8")
+        cfg = workdir / "config.yaml"
+        cfg.write_text(_CFG, encoding="utf-8")
+        assert cdn.run_structural_rules(note, digest, cfg) == []
+
+    def test_missing_glossary_fails(self, workdir):
+        note = workdir / "n.md"
+        note.write_text(_GOOD_NOTE, encoding="utf-8")
+        digest = workdir / "d.html"
+        digest.write_text("<html>无字典</html>", encoding="utf-8")
+        cfg = workdir / "config.yaml"
+        cfg.write_text(_CFG, encoding="utf-8")
+        fails = cdn.run_structural_rules(note, digest, cfg)
+        assert any('glossary' in f for f in fails)
+        assert any('criteria_cfg' in f for f in fails)
+        assert any('chan_criteria' in f for f in fails)
+
+    def test_note_rules(self, workdir):
+        note = workdir / "n.md"
+        note.write_text("正文没有交叉披露，也没有观察池表头。", encoding="utf-8")
+        digest = workdir / "d.html"
+        digest.write_text(_GOOD_DIGEST, encoding="utf-8")
+        fails = cdn.run_structural_rules(note, digest, None)
+        assert any('chan_cross' in f for f in fails)
+        assert any('pool_style' in f for f in fails)
+        assert not any('glossary' in f for f in fails)   # digest 规则通过
+        # digest 提供但 config 缺失 → criteria_cfg 报需要 --config（流程纪律保证完整入参）
+        assert any('criteria_cfg' in f and '--config' in f for f in fails)
+
+    def test_criteria_cfg_threshold_mismatch(self, workdir):
+        note = workdir / "n.md"
+        note.write_text(_GOOD_NOTE, encoding="utf-8")
+        digest = workdir / "d.html"
+        # 判据表阈值写成 6（config 为 5）→ 必须失败
+        digest.write_text(_GOOD_DIGEST.replace("高度≥5", "高度≥6").replace(
+            "<details><summary>口径字典（点击展开）</summary><table>…</table></details>", "")
+            + "<details>口径字典</details>" + "|Σhist₂|/|Σhist₁| &lt; 1 即背驰",
+            encoding="utf-8")
+        cfg = workdir / "config.yaml"
+        cfg.write_text(_CFG, encoding="utf-8")
+        fails = cdn.run_structural_rules(note, digest, cfg)
+        assert any('criteria_cfg' in f for f in fails)
+
+    def test_main_exit_code_hard_fail(self, workdir, csv_file):
+        """结构规则失败 → 退出码 1（不受 --strict 影响，硬失败阻断发布）"""
+        note = workdir / "n.md"
+        note.write_text("无结构要素。", encoding="utf-8")
+        digest = workdir / "d.html"
+        digest.write_text("<html>缺字典</html>", encoding="utf-8")
+        rc = cdn.main(['--note', str(note), '--csv', str(csv_file),
+                       '--digest', str(digest)])
+        assert rc == 1
+
+    def test_main_skip_without_digest(self, csv_file, note_file):
+        """未提供 --digest → 结构规则整体跳过，行为与旧版一致（WARN 级）"""
+        note = note_file("今日涨停 1 家。")
+        rc = cdn.main(['--note', str(note), '--csv', str(csv_file)])
+        assert rc == 0
+
+    def test_main_green_full_args(self, workdir, csv_file):
+        """完整入参全绿 → 0"""
+        note = workdir / "n.md"
+        note.write_text(_GOOD_NOTE, encoding="utf-8")
+        digest = workdir / "d.html"
+        digest.write_text(_GOOD_DIGEST, encoding="utf-8")
+        cfg = workdir / "config.yaml"
+        cfg.write_text(_CFG, encoding="utf-8")
+        rc = cdn.main(['--note', str(note), '--csv', str(csv_file),
+                       '--digest', str(digest), '--config', str(cfg)])
+        assert rc == 0
