@@ -27,7 +27,8 @@ from .data_domain import WINDOW_BUFFER, get_domain
 from .data_reader import MISSING_MODE_GAP, DataReader
 from .env_assembly import assemble_env
 from .lookback import Lookback
-from .module_base import DATA_INSUFFICIENT, ChainContext, ModuleResult, StockInfo
+from .module_base import (DATA_ERROR, DATA_INSUFFICIENT, ChainContext,
+                          ModuleResult, StockInfo)
 from .module_registry import build
 from .progress_tracker import ProgressTracker
 from .result_writer import RunMeta, ResultWriter, now_iso
@@ -138,8 +139,12 @@ class ChainEngine:
             # 截面环境装配（env_assembly；链未声明 env 时零行为变化；
             # env 为列表时依序装配合并，后者键覆盖同名键）
             for env_name in chain.env_list():
-                load.env_extras.update(assemble_env(env_name, reader, as_of,
-                                                    self.config_manager))
+                # P3-3（C7）：env 装配失败降级跳过（留空 env_extras），不炸整链
+                try:
+                    load.env_extras.update(assemble_env(env_name, reader, as_of,
+                                                        self.config_manager))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("env 装配 %s 失败（降级跳过）: %r", env_name, exc)
             reader.close()
 
         logger.info(
@@ -213,7 +218,8 @@ class ChainEngine:
         # 它们同样写「数据不足」行，只在逐股循环里计数会漏掉）
         for name in module_names:
             insufficient_summary[name] = sum(
-                1 for r in rows if r.get(name) == DATA_INSUFFICIENT)
+                1 for r in rows
+                if r.get(name) in (DATA_INSUFFICIENT, DATA_ERROR))
         rows.sort(key=lambda r: r["股票代码"])  # 固定行序，保证同锚定日重复运行逐字节一致
         csv_path = writer.write_csv(chain.chain, as_of, module_names, rows)
         duration = time.monotonic() - started
@@ -294,8 +300,10 @@ class ChainEngine:
                 if result is None:
                     result = ModuleResult.insufficient("模块返回 None")
             except Exception as exc:  # 单模块失败不中断整链
+                # P3-3（C6）：异常落"错误"行（区别于"数据不足"），原因进 detail
+                # 可查——不再吞成数据不足伪装成数据问题
                 logger.warning("模块 %s 在 %s 执行失败: %r", mod.name_en, stock.ts_code, exc)
-                result = ModuleResult.insufficient(repr(exc))
+                result = ModuleResult(DATA_ERROR, {"reason": repr(exc)})
             results[mod.name] = result
             ctx.upstream[mod.name] = result
         return results

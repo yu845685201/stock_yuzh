@@ -137,14 +137,50 @@ class ReviewAggregator:
 
     # ------------------------------------------------------------------ 入口
 
+    #: P3-2（C5）聚合缓存版本号：聚合层任何影响产出的代码变更时手动 +1（防陈旧缓存）
+    AGG_CACHE_VERSION = 'v1-20261025'
+
+    def _agg_cache_path(self, as_of: str):
+        """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
+        if not bool((self.config.get('review') or {}).get('agg_cache', True)):
+            return None
+        root = Path(__file__).resolve().parents[3]
+        d = root / 'tmp' / 'agg_cache'
+        d.mkdir(parents=True, exist_ok=True)
+        return d / f'{as_of}_{self.AGG_CACHE_VERSION}.pkl'
+
     def aggregate(self, as_of: str) -> Dict[str, Any]:
         """全量聚合：加载 60d 面板 → 截面（今/昨）→ 六维结果。
+
+        P3-2（C5）：结果 pickle 落盘（config review.agg_cache，默认开），generate 与
+        digest 复用同一份聚合（缠论 520d 面板双跑成本消除）；键含代码版本号，
+        读取异常回退直算。
 
         Returns:
             {as_of, prev_date, window_start, trading_days, panel_rows,
              market_env, sentiment, sector, movers, fundamentals,
              cross_check} 各键为 AggregationResult 或原始 dict。
         """
+        cache_file = self._agg_cache_path(as_of)
+        if cache_file is not None and cache_file.exists():
+            try:
+                import pickle
+                cached = pickle.loads(cache_file.read_bytes())
+                logger.info('聚合缓存命中: %s', cache_file.name)
+                return cached
+            except Exception as e:  # noqa: BLE001 —— 缓存坏即回退直算
+                logger.warning('聚合缓存读取失败（回退直算）: %r', e)
+        out = self._aggregate_uncached(as_of)
+        if cache_file is not None:
+            try:
+                import pickle
+                cache_file.write_bytes(pickle.dumps(out))
+            except Exception as e:  # noqa: BLE001 —— 落盘失败不影响结果
+                logger.warning('聚合缓存写入失败: %r', e)
+        return out
+
+    def _aggregate_uncached(self, as_of: str) -> Dict[str, Any]:
+        """aggregate 的直算本体（缓存未命中时执行）。"""
         start = self.reader.nth_trading_day_back(as_of, 62)
         cols = ['stock_name', 'open', 'high', 'low', 'close', 'preclose',
                 'change_rate', 'volume', 'amount', 'is_st', 'raw_close']
@@ -2349,7 +2385,9 @@ class ReviewAggregator:
             if not is_r2(streak, bool(r.get('is_st')), concepts, top_concepts, rules,
                          big_net=big_net_map.get(ts_code), cluster_count=cc):
                 continue
-            hit = next(c for c in top_concepts if c in set(concepts))
+            # P3-4（C9）：补 default——is_r2 通过但交集为空的退化态不抛 StopIteration
+            hit = next((c for c in top_concepts if c in set(concepts)),
+                       (concepts[0] if concepts else '未知'))
             vs = (_f(r.get('_volume_surge'))
                   if pd.notna(r.get('_volume_surge')) else None)
             big_net = big_net_map.get(ts_code)

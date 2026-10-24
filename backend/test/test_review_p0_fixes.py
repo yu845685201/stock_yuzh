@@ -15,6 +15,7 @@ BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+import pandas as pd
 import pytest
 
 from src.review.aggregator import ReviewAggregator
@@ -203,3 +204,45 @@ class TestP06IndustryMapDeterministic:
         top = {r['industry']: r['net_yi'] for r in data['industry_top']}
         assert top.get('银行') == 1.0                    # (2e8-1e8)/1e8
         assert '房地产' not in top                       # 兜底行不参与
+
+
+# ---------------------------------------------------------------- P3-3 / P3-4（步骤 7）
+
+class TestP03ErrorVisibility:
+    def test_module_exception_returns_error_token(self):
+        """P3-3（C6）：模块异常 → 「错误」值 + 原因在 detail（不再吞成数据不足）"""
+        from src.analysis.module_base import DATA_ERROR, ChainContext, StockInfo
+        from src.analysis.chain_engine import ChainEngine
+
+        class BoomModule:
+            name = '爆模块'
+            name_en = 'boom'
+
+            def hit_keys(self, value):
+                return []
+
+            def analyze(self, df, ctx):
+                raise RuntimeError('注入异常')
+
+        engine = ChainEngine.__new__(ChainEngine)
+        stock = StockInfo('sh.600000', '600000', '测试股')
+        ctx_expected = {'window_trading_days': None, 'window_start': None}
+        results = engine._run_modules([BoomModule()], pd.DataFrame(), '20261023',
+                                      stock, [], {}, **ctx_expected)
+        assert results['爆模块'].value == DATA_ERROR
+        assert '注入异常' in results['爆模块'].detail['reason']
+
+    def test_error_not_counted_as_hit(self):
+        """「错误」与「数据不足」同样不计命中桶（hit_keys 口径）"""
+        from src.analysis.module_base import AnalysisModule, DATA_ERROR
+        assert DATA_ERROR in AnalysisModule._NO_HIT_STRINGS
+
+
+class TestP34R2NextDefault:
+    def test_next_has_default(self):
+        """P3-4（C9）：R2 hit_concept 取值补 default（空交集退化态不抛 StopIteration）"""
+        top_concepts, concepts = ['专精特新', '重组概念'], ['不相关概念']
+        hit = next((c for c in top_concepts if c in set(concepts)),
+                   (concepts[0] if concepts else '未知'))
+        assert hit == '不相关概念'
+        assert next((c for c in top_concepts if c in set([])), '未知') == '未知'

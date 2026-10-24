@@ -23,6 +23,9 @@ import pandas as pd
 
 #: 数据不足时的统一返回值（§2.5：不允许空串或静默丢弃）
 DATA_INSUFFICIENT = "数据不足"
+#: 模块执行异常时的返回值（P3-3/C6：异常与"数据不足"区分，错误摘要进 detail——
+#: 异常可见可查，不与正常数据不足混同）
+DATA_ERROR = "错误"
 
 
 @dataclass(frozen=True)
@@ -153,7 +156,7 @@ class AnalysisModule(ABC):
     hit_rule: ClassVar[str] = "positive"
 
     #: 理由串类的非命中值（hit_rule="reason" 用）
-    _NO_HIT_STRINGS = (DATA_INSUFFICIENT, "否")
+    _NO_HIT_STRINGS = (DATA_INSUFFICIENT, DATA_ERROR, "否")
 
     def hit_keys(self, value: Any) -> List[str]:
         """命中统计的桶名列表（引擎按桶计数；空列表 = 不计入）。

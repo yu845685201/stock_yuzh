@@ -198,11 +198,12 @@ def assemble_valuation(reader, as_of: str, config_manager) -> Dict[str, Valuatio
         prev_same['year'] = (prev_same['year'].astype(int) + 1).astype(str)
         prev_same = prev_same.rename(columns={'net_profit': 'prev_same_cum'})
         merged = fin_df.merge(prev_same, on=['ts_code', 'year', 'md'], how='inner')
+        # P3-1（C4）：市值查表 O(1) 化（原 iterrows 内全表布尔过滤 O(N×M)）
+        mv_map = anchor.set_index('ts_code')['total_mv'].to_dict()
         for _, r in merged.iterrows():
             sq = single_quarter(r['net_profit'], r['prev_same_cum'])
-            hit = anchor[anchor['ts_code'] == r['ts_code']]
-            mv = (float(hit['total_mv'].iloc[0])
-                  if not hit.empty and pd.notna(hit['total_mv'].iloc[0]) else None)
+            mv = mv_map.get(r['ts_code'])
+            mv = float(mv) if mv is not None and pd.notna(mv) else None
             annualized_map[r['ts_code']] = pe_deducted_annualized(sq, mv)
 
     out: Dict[str, ValuationDigest] = {}
