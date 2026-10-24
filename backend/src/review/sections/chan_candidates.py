@@ -1,0 +1,78 @@
+"""维度6 子节：缠论背驰候选（左侧，观察池；2026-10-24 引入）。
+
+数据来自聚合器 ``agg['chan']``（520d 面板独立复算，与链 chan_divergence_buy
+模块同一实现两入口）。呈现锚定日收盘确认的一买/二买：观察池非推荐；
+与 R 系列右侧候选互斥不混排、不参与 R 池计数交叉校验。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+DEFAULT_RULES = {
+    'max_rows': 10,   # 表格 ≤10 行惯例；全量在链 CSV 缠论列
+    'enabled': True,
+}
+
+#: 固定历史统计注记（验证报告 data/chan_validation/report.md，2015-01~2026-09 全A费后）
+HIST_NOTE = (
+    '历史统计（2015-01~2026-09 全A验证，费后）：一买 60 日均值 +6.8%、胜率 53.1%；'
+    '二买 60 日均值 +5.1%、胜率 51.6%（对随机基线超额 +3.87pp / +2.26pp）。'
+    '历史统计非预测；级联下跌中一买约半数失败，本表为观察池非推荐，'
+    '候选池+人工确认使用（验证报告 data/chan_validation/report.md）。'
+)
+
+
+def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """缠论背驰候选 blocks；数据缺失/未启用时降级（缺数据标注规范）。"""
+    rules = dict(DEFAULT_RULES)
+    rules.update((review_cfg or {}).get('chan_candidates') or {})
+    if not rules.get('enabled', True):
+        return []
+    blocks: List[Dict[str, Any]] = [
+        {'type': 'heading', 'level': 3, 'text': '缠论背驰候选（左侧，观察池）'},
+    ]
+    chan = agg.get('chan')
+    available = bool(chan) and getattr(chan, 'available', True)
+    data = (getattr(chan, 'data', None) or {}) if chan is not None else {}
+    if not available:
+        blocks.append({'type': 'note',
+                       'text': f"⏳ 待补：缠论面板数据缺失"
+                               f"（{getattr(chan, 'reason', '未知原因') if chan is not None else '未聚合'}）"})
+        return blocks
+    items = data.get('items') or []
+    if not items:
+        blocks.append({'type': 'para',
+                       'text': '今日无一买/二买信号确认（正常状态：全市场年均约 480+250 个，'
+                               '单日 0~16 个常见；冰点/退潮期密度上升）'})
+        blocks.append({'type': 'note', 'text': HIST_NOTE})
+        return blocks
+
+    max_rows = int(rules.get('max_rows', 10))
+    rows = []
+    for it in items[:max_rows]:
+        rows.append([
+            it.get('code', '—'), it.get('name') or '—', it.get('kind', '—'),
+            f"{it.get('trigger_low', '—')}（止损参考 {it.get('stop', '—')}）"
+            if it.get('stop') is not None else str(it.get('trigger_low', '—')),
+            f"[{it.get('zd', '—')},{it.get('zg', '—')}]",
+            f"{it['divergence']:.2f}" if it.get('divergence') is not None else '—',
+        ])
+    blocks.append({'type': 'table',
+                   'headers': ['代码', '名称', '信号', '触发低点(止损)', '参照中枢[ZD,ZG]', '背驰强度'],
+                   'rows': rows})
+    more = len(items) - len(rows)
+    tail = f'；全量 {len(items)} 个见 daily_review CSV「缠论背驰买点」列' if more > 0 else ''
+    refire_n = sum(1 for it in items if it.get('refire'))
+    if refire_n:
+        tail += f'；{refire_n} 个为同中枢重发（此前已有信号，事件语义正常）'
+    blocks.append({'type': 'note',
+                   'text': '信号为锚定日**收盘确认**，操作口径 = 次日开盘（与验证回测撮合一致）；'
+                           '背驰强度 = |Σhist₂|/|Σhist₁|，越小背驰越强' + tail})
+    blocks.append({'type': 'note', 'text': HIST_NOTE})
+    parity = data.get('parity')
+    if parity is not None and not parity.get('match', True):
+        blocks.append({'type': 'note',
+                       'text': f"⚠ 缠论对拍不一致：报告复现 {parity.get('report_n')} vs 链 CSV "
+                               f"{parity.get('chain_n')}，差异 {parity.get('diff')}"})
+    return blocks

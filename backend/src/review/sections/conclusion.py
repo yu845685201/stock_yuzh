@@ -67,6 +67,10 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
     # 转天交易预案（情景应对；判据初版，阈值 config review.tomorrow_plan）
     blocks.extend(tomorrow_plan.build(agg, review_cfg))
 
+    # 缠论背驰候选（2026-10-24 引入；左侧观察池，与 R 系列右侧互斥独立小节）
+    from . import chan_candidates
+    blocks.extend(chan_candidates.build(agg, review_cfg))
+
     # D4 解禁子块（开发项 D；依赖 L 项 ratio 回填，按解禁日升序）
     unlock = agg.get('unlock')
     if unlock is not None:

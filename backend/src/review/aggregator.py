@@ -204,6 +204,9 @@ class ReviewAggregator:
             self._seal_map_of_day(as_of),
             lhb_data.get('institution') or [],
             top3_members=sm_data.get('top3_members') or set())
+        # 缠论背驰候选（2026-10-24 引入）：520d 面板独立复算，与链
+        # chan_divergence_buy 模块同一实现两入口（chan.scan.scan_stock_anchor）
+        out['chan'] = self._aggregate_chan(as_of)
         return out
 
     # ------------------------------------------------------------------ 维度1
@@ -1691,6 +1694,77 @@ class ReviewAggregator:
     #: 指标对拍列（报告层面板 vs 链 CSV，同一实现两入口的运行时校验）
     _INDICATOR_PARITY_COLUMNS = ['MACD状态', 'KDJ状态', 'RSI状态', 'BOLL位置%',
                                  'ATR波动%', 'OBV趋势', '均线排列']
+
+    # ------------------------------------------------------------------ 缠论背驰候选
+    def _aggregate_chan(self, as_of: str) -> AggregationResult:
+        """缠论背驰候选（2026-10-24）：520d 面板复算一买/二买锚定日确认信号。
+
+        与链 chan_divergence_buy 模块同一实现（chan.scan.scan_stock_anchor）；
+        排序：一买在前、背驰强度升序（越小越强）；失败/空面板 → available=False。
+        独立性红线（报告不依赖链运行）+ 逐股引擎逐K计算（向量化红线豁免同链），
+        实测全市场 +20~30 秒（520 日窗口，指标面板先例 +33 秒）。
+        """
+        from ..chan.scan import CHAN_WINDOW_DAYS, hit_label, scan_stock_anchor
+        try:
+            start = self.reader.nth_trading_day_back(as_of, CHAN_WINDOW_DAYS - 1)
+            if start is None:
+                return AggregationResult(available=False,
+                                         reason=f'交易日历不足 {CHAN_WINDOW_DAYS} 日')
+            panel = self.reader.load_kline(['stock_name', 'low', 'is_st'],
+                                           as_of, start_date=start)
+            if panel.empty:
+                return AggregationResult(available=False, reason='缠论面板窗口内无日K数据')
+            items: List[Dict[str, Any]] = []
+            for code, g in panel.groupby('ts_code', sort=False):
+                status, hit, _reason = scan_stock_anchor(g, as_of)
+                if status != 'hit' or hit is None:
+                    continue
+                items.append({
+                    'ts_code': code,
+                    'code': str(g['stock_code'].iloc[-1]),
+                    'name': str(g['stock_name'].iloc[-1]) if 'stock_name' in g else '',
+                    'label': hit_label(hit),
+                    'kind': hit.kind,
+                    'stop': round(hit.stop_price, 2),
+                    'trigger_low': round(hit.trigger_low, 2),
+                    'zg': round(hit.zg, 2),
+                    'zd': round(hit.zd, 2),
+                    'divergence': round(hit.divergence, 2) if hit.divergence is not None else None,
+                    'refire': hit.refire,
+                })
+            items.sort(key=lambda x: (0 if x['kind'] == '一买' else 1,
+                                      x['divergence'] if x['divergence'] is not None else 9.99))
+            data: Dict[str, Any] = {'items': items, 'count': len(items),
+                                    'window_start': start}
+            parity = self._chan_parity(items, as_of)
+            if parity is not None:
+                data['parity'] = parity
+            return AggregationResult(data=data)
+        except Exception as e:
+            logger.warning(f'缠论背驰候选复算失败: {e!r}')
+            return AggregationResult(available=False, reason=f'缠论面板复算失败: {e!r}')
+
+    def _chan_parity(self, items: List[Dict[str, Any]],
+                     as_of: str) -> Optional[Dict[str, Any]]:
+        """链 CSV 缠论列 vs 报告层复算（命中集逐股对拍）；CSV 未跑/无列 → None。"""
+        csv_path = self._csv_path(as_of)
+        if csv_path is None:
+            return None
+        try:
+            csv_df = pd.read_csv(csv_path, dtype=str, encoding='utf-8-sig')
+            col = '缠论背驰买点'
+            if col not in csv_df.columns:
+                return None
+            hits_csv = csv_df[csv_df[col].str.startswith(('一买', '二买'), na=False)]
+            mine = {r['code']: r['label'] for r in items}
+            theirs = {str(r): str(lbl) for r, lbl in
+                      zip(hits_csv['股票代码'], hits_csv[col])}
+            diff = sorted(set(mine.items()) ^ set(theirs.items()))
+            return {'match': not diff, 'report_n': len(mine), 'chain_n': len(theirs),
+                    'diff': diff[:5]}
+        except Exception as e:
+            logger.warning(f'缠论对拍读取失败（跳过）: {e!r}')
+            return None
 
     def _indicator_parity(self, states: pd.DataFrame,
                           as_of: str) -> Optional[Dict[str, Any]]:

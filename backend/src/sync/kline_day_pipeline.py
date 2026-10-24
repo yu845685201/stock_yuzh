@@ -68,6 +68,9 @@ def process_one_stock(
     ts_code = stock_item.get('ts_code')
     stock_code = stock_item.get('stock_code')
     stock_name = stock_item.get('stock_name') or ''
+    # API 代码用带市场前缀格式（SH600000/SZ000001）：裸 6 位代码在 tdx-api 服务端
+    # 走另一路服务器解析，节后首两日数据可能不全（2026-10-24 实测 6409 vs 6411 条）
+    api_code = ts_code.replace('.', '').upper() if ts_code else stock_code
     if not ts_code or not stock_code:
         return {
             'records': 0,
@@ -103,11 +106,11 @@ def process_one_stock(
         api_start_wall = fetch_start
 
     if deps.fetch_full:
-        qfq_list = deps.tdx_api_source.get_kline_qfq_full(stock_code)
-        raw_list = deps.tdx_api_source.get_kline_raw_full(stock_code)
+        qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code)
+        raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
     else:
-        qfq_list = deps.tdx_api_source.get_kline_qfq_tail(stock_code, deps.tail_limit)
-        raw_list = deps.tdx_api_source.get_kline_raw_tail(stock_code, deps.tail_limit)
+        qfq_list = deps.tdx_api_source.get_kline_qfq_tail(api_code, deps.tail_limit)
+        raw_list = deps.tdx_api_source.get_kline_raw_tail(api_code, deps.tail_limit)
     api_end_wall = time.time()
     local_api_time += api_end_wall - fetch_start
     deps.log_progress('数据采集', stock_index, deps.total_stocks, stock_code, stock_name, api_end_wall - fetch_start)
@@ -132,8 +135,8 @@ def process_one_stock(
             deps.logger.warning(f"除权/修订检测命中，整股重拉: {ts_code} {detail}")
             refetch_start = time.time()
             # 增强路径下必须 refresh=True 绕过缓存回源，否则从同一份失效缓存取回同样错位的数据
-            qfq_list = deps.tdx_api_source.get_kline_qfq_full(stock_code, refresh=True)
-            raw_list = deps.tdx_api_source.get_kline_raw_full(stock_code)
+            qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code, refresh=True)
+            raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
             local_api_time += time.time() - refetch_start
             merged_records = deps.merge_sources(qfq_list, raw_list)
             stock_detection['refetched'] = 1

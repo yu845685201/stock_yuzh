@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 SCENARIO_ANCHORS = ('恒生指数', '纳斯达克')
 
 #: 池键与顺序
-POOL_KEYS = ('R1', 'R2', 'R3', 'R4')
+POOL_KEYS = ('R1', 'R2', 'R3', 'R4', 'CHAN')
 
 #: eps 阈值（"变了才算变"）：溢价均值 ±0.5pct、开盘平开带 ±0.3%
 EPS_PREMIUM = 0.5
@@ -80,6 +80,15 @@ def build_predictions(agg: Dict[str, Any], review_cfg: Dict[str, Any]) -> Dict[s
                        'name': r.get('name'), 'label': r.get('label'),
                        'evidence_count': r.get('evidence_count')}
                       for r in (cand.get(key) or [])]
+    # 缠论池（2026-10-24）：agg['chan'] 为 AggregationResult（dataclass），
+    # 与 R 池 dict 形态不同，单独抽取；日度核验为短窗代理（验证口径是 20/60 日持有）
+    chan = agg.get('chan')
+    chan_items = list((getattr(chan, 'data', None) or {}).get('items') or []) \
+        if chan is not None and getattr(chan, 'available', False) else []
+    pools['CHAN'] = [{'ts_code': r.get('ts_code'), 'code': r.get('code'),
+                      'name': r.get('name'), 'label': r.get('label'),
+                      'evidence_count': None}
+                     for r in chan_items]
     return {
         'sentiment': {'position': cycle.get('position'),
                       'max_streak': sent.get('max_streak'),
