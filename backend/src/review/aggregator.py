@@ -187,7 +187,8 @@ class ReviewAggregator:
     #: v5：P4-1 反抽板 veto（近 N 日高位板放量长阴，R1/R2 行 veto 列可新增理由）
     #: v6：指标面板窗口 133→522 与链对齐（指标状态/分布/对拍输出变更）
     #: v7：A50 日频优先（overseas 行 kline 覆盖 + a50_source 键）
-    AGG_CACHE_VERSION = 'v7-20261025'
+    #: v8：A50 日频 as_of 截断（防前视——v7 历史缓存含未来值须失效）
+    AGG_CACHE_VERSION = 'v8-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -307,7 +308,7 @@ class ReviewAggregator:
         overseas = [r for r in overseas_all if r['name'] in _OVERSEAS_SNAPSHOT_WHITELIST]
         # A50 日频优先（P1-5 采集侧收口，附录 C.5）：overseas_kline_day 有行时
         # 以日K两根收盘自算隔夜涨跌幅覆盖快照行；缺行/读失败回退快照（P1-5 降级）
-        a50 = self._a50_from_kline()
+        a50 = self._a50_from_kline(as_of)
         if a50:
             overseas = [a50 if o['name'] == '富时A50期货' else o
                         for o in overseas] or [a50]
@@ -838,16 +839,23 @@ class ReviewAggregator:
         return {'up': int((change > 0).sum()), 'down': int((change < 0).sum()),
                 'flat': int((change == 0).sum()), 'total': int(len(change))}
 
-    def _a50_from_kline(self) -> Optional[Dict[str, Any]]:
-        """A50 日频行（overseas_kline_day CHA50CFD 最新两根收盘；附录 C.5）。
+    def _a50_from_kline(self, as_of: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """A50 日频行（overseas_kline_day CHA50CFD；附录 C.5）。
 
-        涨跌幅 = 最新两根收盘环比（新交所自身交易日历，隔夜口径优于快照
-        本地昨收自算）。无行/仅一根/读失败 → None（回退快照，不硬造）。
+        涨跌幅 = 锚定日口径下最新两根收盘环比（新交所自身交易日历，隔夜口径
+        优于快照本地昨收自算）。**as_of 截断防前视**——历史重跑须取 ≤ as_of 的
+        两根（首版取"最新两根"，0929/0930 重跑曾显示 10-23 值，勘误见附录 D.2）。
+        无行/仅一根/读失败 → None（回退快照，不硬造）。
         """
         try:
-            rows = self.db._query(
-                'SELECT trade_date, close FROM overseas_kline_day '
-                "WHERE market_code = 'CHA50CFD' ORDER BY trade_date DESC LIMIT 2")
+            sql = ('SELECT trade_date, close FROM overseas_kline_day '
+                   "WHERE market_code = 'CHA50CFD'")
+            params: tuple = ()
+            if as_of:
+                sql += ' AND trade_date <= %s'
+                params = (str(as_of),)
+            sql += ' ORDER BY trade_date DESC LIMIT 2'
+            rows = self.db._query(sql, params)
         except Exception as e:
             logger.warning(f'A50 日K读取失败（回退快照）: {e}')
             return None

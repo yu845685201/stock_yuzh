@@ -90,9 +90,11 @@ class TestAggregatorA50Preference:
     class _DB:
         def __init__(self, rows):
             self.rows = rows
+            self.captured = []
 
         def _query(self, sql, params=None):
             if 'CHA50CFD' in sql and 'overseas_kline_day' in sql:
+                self.captured.append((sql, params))
                 return self.rows
             raise AssertionError(f'意外查询: {sql[:60]}')
 
@@ -105,6 +107,17 @@ class TestAggregatorA50Preference:
         out = agg._a50_from_kline()
         assert out['name'] == '富时A50期货'
         assert out['change_pct'] == 1.54 and out['close'] == 13200.0
+
+    def test_asof_cutoff_no_lookahead(self):
+        """历史重跑防前视（附录 D.2 勘误）：as_of 给定时只取 ≤ as_of 的两根"""
+        agg = self._agg([('20260929', 13100.0), ('20260926', 13000.0)])
+        out = agg._a50_from_kline('20260929')
+        assert out['close'] == 13100.0
+        sql, params = agg.db.captured[-1]
+        assert 'trade_date <= %s' in sql and params == ('20260929',)
+        # as_of 之前无两根 → None（回退快照）
+        agg2 = self._agg([('20261023', 13200.0)])
+        assert agg2._a50_from_kline('20260929') is None
 
     def test_missing_rows_fallback_none(self):
         agg = self._agg([('20261023', 13200.0)])
