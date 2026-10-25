@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- 多数据源支持（Tdx API、Baostock）
+- 多数据源支持（tdx-api 统一入口：K线/日历/股本/列表；同花顺/巨潮/交易所官网等复盘扩展源）
 - 双重存储（CSV文件 + PostgreSQL数据库）
 - 命令行工具接口
 - 模块化设计，易于扩展
@@ -121,10 +121,11 @@ python -m src.cli.main sync-anal-kline-rise-25pre [--init] [--codes]
 - 用于获取K线相关数据
 - 通过HTTP接口访问tdx-api服务
 
-### Baostock数据源
-- 提供免费、纯净的证券数据
-- 支持股票列表、财务数据等
-- 需要网络连接
+### Tdx API 扩展（2026-10-25 baostock 下线换源）
+- 交易日历：`/api/index/all` 沪深指数日K并集（真值口径）
+- 股本数据：`/api/xdxr` 全历史股本变动事件 → base_fundamentals_info
+- 股票列表：`/api/codes` 快照维护（新股/改名/退市标记）
+- 详见 `doc/数据源迁移方案-baostock下线-V1.0-20261025.md`
 
 ## 开发指南
 

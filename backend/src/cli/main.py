@@ -103,21 +103,23 @@ def sync_all(ctx, no_csv, no_db):
             click.echo(f"  错误: {error}")
 
 
-@cli.command()
-@csv_db_options
+@cli.command('sync-stocks')
+@click.option('--apply', is_flag=True, default=False,
+              help='落库（新股/改名/退市/list_date 回填）；缺省仅产出 diff 报告')
 @click.pass_context
-def sync_stocks(ctx, no_csv, no_db):
-    """同步股票列表"""
-    click.echo("同步股票列表...")
+def sync_stocks(ctx, apply):
+    """股票列表维护（tdx-api /api/codes 快照；baostock 下线换源 20261025）"""
+    from src.sync.stock_list_manager import StockListManager
 
-    # 默认都保存，除非明确指定不保存
-    save_to_csv = not no_csv
-    save_to_db = not no_db
+    click.echo("股票列表快照维护（tdx-api /api/codes）...")
+    report = StockListManager(ctx.obj['config_manager']).execute(apply=apply)
 
-    sync_manager = SyncManager(ctx.obj['config_manager'])
-    stocks = sync_manager.sync_stocks(save_to_csv=save_to_csv, save_to_db=save_to_db)
-
-    click.echo(f"\n✓ 股票列表同步完成，共 {len(stocks)} 只股票")
+    click.echo(f"\n✓ 股票列表维护完成（{'已落库' if apply else '仅报告，--apply 落库'}）")
+    click.echo(f"  - 快照: {report['snapshot']} 只 | 库内 type='1': {report['db_stocks']} 只")
+    click.echo(f"  - 新股: {len(report['new_stocks'])} | 改名: {len(report['renamed'])} | "
+               f"退市判定: {len(report['delisted'])} | list_date 回填候选: {len(report['list_date_backfill'])}")
+    click.echo(f"  - 报告: {report['report_path']}")
+    click.echo(f"  - 耗时: {report['duration']}s")
 
 
 @cli.command()
@@ -297,151 +299,34 @@ def sync_kline_1min_rollback(ctx):
         sys.exit(1)
 
 
-@cli.command()
-@csv_db_options
-@click.option('--batch-size', type=int, default=150, help='批次大小，默认150（性能优化后）')
-@click.option('--dry-run', is_flag=True, help='试运行模式，不实际写入数据')
-@click.option('--list-status', type=click.Choice(['L', 'D', 'P']), default='L',
-              help='股票上市状态过滤: L=上市, D=退市, P=暂停上市 (默认: L)')
-@click.option('--qps-limit', type=int, help='QPS限制，设置为0或负数表示不限流（覆盖配置文件设置）')
-@click.option('--max-workers', type=int, default=6, help='最大并发线程数，默认6（第三阶段优化）')
-@click.option('--concurrent', is_flag=True, default=True, help='启用并发处理（第三阶段优化）')
-@click.option('--init', 'init_mode', is_flag=True, help='数据初始化模式，采集全量股票全时段(1992Q3至今)')
-@click.option('--year', type=int, help='指定年份（与--quarter配合使用）')
-@click.option('--quarter', type=click.Choice(['1', '2', '3', '4']), help='指定季度1-4（与--year配合使用）')
-@click.option('--codes', help='指定股票ts_code列表，逗号分隔（如: sz.000001,sh.600000）')
-@click.option('--batch', type=int, help='指定批次编号（仅在init模式下有效，从1开始）')
-@click.pass_context
-def sync_fundamentals(ctx, no_csv, no_db, batch_size, dry_run, list_status, qps_limit, max_workers, concurrent, init_mode, year, quarter, codes, batch):
-    """同步股票基本面数据 - 支持三种采集方式：数据初始化/增量更新/指定股票和时间"""
-
-    # 默认都保存，除非明确指定不保存
-    save_to_csv = not no_csv
-    save_to_db = not no_db
-
-    click.echo("开始同步股票基本面数据...")
-    click.echo(f"  - 保存到CSV: {'是' if save_to_csv else '否'}")
-    click.echo(f"  - 保存到数据库: {'是' if save_to_db else '否'}")
-    click.echo(f"  - 批次大小: {batch_size}")
-    click.echo(f"  - 试运行模式: {'是' if dry_run else '否'}")
-    click.echo(f"  - 上市状态: {list_status}")
-
-    # 采集模式提示
-    if init_mode:
-        if batch:
-            click.echo(f"  - 采集模式: 数据初始化（批次{batch}）")
-        else:
-            click.echo(f"  - 采集模式: 数据初始化（全量股票全时段）")
-    elif year and quarter:
-        click.echo(f"  - 采集模式: 指定时间（{year}年Q{quarter}）")
-    else:
-        click.echo(f"  - 采集模式: 增量更新（最近两个季度）")
-
-    # batch参数验证
-    if batch is not None:
-        if not init_mode:
-            click.echo("\n✗ 错误: --batch参数仅在init模式(--init)下有效")
-            return
-        if batch < 1:
-            click.echo(f"\n✗ 错误: 批次编号必须从1开始，当前值: {batch}")
-            return
-
-    # 解析股票代码列表
-    ts_codes = None
-    if codes:
-        ts_codes = [code.strip() for code in codes.split(',')]
-        click.echo(f"  - 指定股票: {len(ts_codes)}只")
-
-    # 处理QPS限制
-    if qps_limit is not None:
-        click.echo(f"  - QPS限制: {'不限流' if qps_limit <= 0 else qps_limit}")
-        # 临时更新配置
-        config_manager = ctx.obj['config_manager']
-        rate_limit_config = config_manager.get('rate_limit', {})
-        rate_limit_config['calls_per_period'] = qps_limit
-        # 更新到配置中
-        config_manager.load_config()['rate_limit'] = rate_limit_config
-
-    sync_manager = SyncManager(ctx.obj['config_manager'])
-
-    # 构建选项字典
-    options = {
-        'batch_size': batch_size,
-        'dry_run': dry_run,
-        'list_status': list_status,
-        'max_workers': max_workers,
-        'concurrent': concurrent,
-        'init_mode': init_mode,
-        'year': year,
-        'quarter': int(quarter) if quarter else None,
-        'ts_codes': ts_codes,
-        'save_to_csv': save_to_csv,
-        'save_to_db': save_to_db,
-        'batch': batch
-    }
-
-    # 根据并发参数选择处理方式
-    if concurrent:
-        from src.sync.concurrent_fundamentals_manager import sync_fundamentals_data_concurrent
-        result = sync_fundamentals_data_concurrent(ctx.obj['config_manager'], **options)
-    else:
-        result = sync_manager.sync_fundamentals_data(**options)
-
-    if 'error' in result:
-        click.echo(f"\n✗ 基本面数据同步失败: {result['error']}")
-        return
-
-    click.echo("\n✓ 基本面数据同步完成!")
-    click.echo(f"  - 总股票数量: {result.get('total_stocks', 0)}")
-    click.echo(f"  - 成功采集: {result.get('successful', 0)}")
-    click.echo(f"  - 失败数量: {result.get('failed', 0)}")
-    click.echo(f"  - 处理批次数: {result.get('batch_count', 0)}")
-
-    if 'duration' in result:
-        click.echo(f"  - 耗时: {result['duration']:.2f} 秒")
-
-    if 'success_rate' in result:
-        click.echo(f"  - 成功率: {result['success_rate']:.2%}")
-
-
-@cli.command('rebuild-fundamentals')
-@click.option('--no-csv', is_flag=True, default=False, help='不保存到CSV文件')
-@click.option('--codes', help='指定股票ts_code列表，逗号分隔（默认全市场 type=股票）')
+@cli.command('sync-shares-xdxr')
+@click.option('--codes', help='指定股票ts_code列表，逗号分隔（默认全市场 type=1 含退市）')
 @click.option('--no-resume', is_flag=True, default=False, help='忽略 manifest 断点，从头开始')
-@click.option('--manifest-path', default=None, help='manifest 文件路径（默认 <仓库根>/tmp/fundamentals_rebuild_manifest.json）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.option('--manifest-path', default=None, help='manifest 路径（默认 <仓库根>/tmp/xdxr_share_manifest.json）')
 @click.pass_context
-def rebuild_fundamentals(ctx, no_csv, codes, no_resume, manifest_path):
-    """基本面全量重刷（串行+manifest断点，约9-10小时，支持中断续跑）"""
-    config_manager = ctx.obj['config_manager']
-    from src.sync.fundamentals_rebuild_manager import FundamentalsRebuildManager
+def sync_shares_xdxr(ctx, codes, no_resume, dry_run, manifest_path):
+    """股本数据同步（XDXR 源，baostock 下线换源 20261025；全量约 15 分钟）"""
+    from src.sync.xdxr_share_manager import sync_shares_xdxr as run
 
     ts_codes = [c.strip() for c in codes.split(',') if c.strip()] if codes else None
-    manager = FundamentalsRebuildManager(
-        config_manager,
-        manifest_path=manifest_path
-    )
-    result = manager.execute(
-        ts_codes=ts_codes,
-        resume=not no_resume,
-        save_to_csv=not no_csv,
-        save_to_db=True
-    )
+    options = {
+        'codes': ts_codes,
+        'resume': not no_resume,
+        'dry_run': dry_run,
+    }
+    if manifest_path:
+        options['manifest_path'] = manifest_path
 
-    stats = result.get('stats', {})
-    if result.get('success'):
-        click.echo("\n✓ 基本面全量重刷完成!")
-    else:
-        click.echo("\n✗ 基本面全量重刷异常终止（可用相同命令断点续跑）")
-        for err in result.get('errors', []):
-            click.echo(f"  - {err}")
-    click.echo(f"  - 本轮完成股票: {stats.get('stocks_done', 0)}（跳过 {stats.get('stocks_skipped', 0)}）")
-    click.echo(f"  - 季度调用: {stats.get('calls', 0)}")
-    click.echo(f"  - upsert 记录: {stats.get('records', 0)}")
-    click.echo(f"  - 零记录重试找回: {stats.get('stocks_zero_retry', 0)}，失败: {stats.get('failed_stocks', 0)}")
-    if result.get('duration') is not None:
-        click.echo(f"  - 耗时: {result['duration'] / 60:.0f} 分钟")
-    if result.get('report_path'):
-        click.echo(f"  - 报告: {result['report_path']}")
+    click.echo("开始 XDXR 股本同步（tdx-api /api/xdxr）...")
+    result = run(ctx.obj['config_manager'], **options)
+
+    click.echo("\n✓ XDXR 股本同步完成!" if not result.get('failed') else "\n✗ 部分失败（断点续跑同命令）")
+    click.echo(f"  - 目标: {result.get('total', 0)}，成功: {result.get('ok', 0)}，"
+               f"无事件: {result.get('no_data', 0)}，失败: {result.get('failed', 0)}，"
+               f"跳过断点: {result.get('skipped', 0)}")
+    click.echo(f"  - 写入行数: {result.get('rows', 0)}")
+    click.echo(f"  - 耗时: {result.get('duration', 0)} 秒")
 
 
 @cli.command('sync-financial-pdf')

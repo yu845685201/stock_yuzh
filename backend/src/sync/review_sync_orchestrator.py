@@ -50,7 +50,7 @@ KLINE_SOURCE = 'kline'
 SOURCE_WAVES = [
     ['index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
      'disclosure', 'lhb', 'margin', 'money_flow', 'industry', 'concept', 'unlock',
-     'hkex_connect', 'etf_scale', 'news',
+     'hkex_connect', 'etf_scale', 'news', 'shares_xdxr',
      'ths_l2', 'bj_kline'],
     ['ths_finance'],          # 依赖 announcement/disclosure 的当日披露清单
     ['valuation_calc', 'sentiment_metrics'],   # 依赖 ths_finance 财报 + 日K
@@ -67,6 +67,7 @@ SOURCE_LABELS = {
     'sentiment_metrics': '情绪指标日频',
     'industry': '行业分类', 'concept': '概念板块', 'unlock': '解禁日历',
     'news': '市场要闻(新浪7x24)',
+    'shares_xdxr': '股本(XDXR)',
     'ths_l2': '申万二级行业',
     'bj_kline': '北交所日K',
 }
@@ -252,6 +253,7 @@ class ReviewSyncOrchestrator:
         from .ths_industry_l2_manager import ThsIndustryL2Manager
         from .unlock_manager import UnlockManager
         from .valuation_calc_manager import ValuationCalcManager
+        from .xdxr_share_manager import XdxrShareManager
 
         cm = self.config_manager
         return {
@@ -282,6 +284,9 @@ class ReviewSyncOrchestrator:
             'etf_scale': lambda dry: EtfScaleManager(cm).execute(),
             # 市场要闻（四期方案 §4；独立源非日K依赖，失败不阻塞）
             'news': lambda dry: NewsTelegraphManager(cm).execute(dry_run=dry),
+            # 股本刷新（baostock 下线换源 20261025：XDXR 全刷约 15 分钟，
+            # resume=False 每次全量；先于 wave3 估值自算（fetch_total_shares_asof））
+            'shares_xdxr': lambda dry: XdxrShareManager(cm).execute(resume=False, dry_run=dry),
         }
 
     # ---------- 一键模式：内置日K ----------

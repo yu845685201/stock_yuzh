@@ -11,10 +11,9 @@ from decimal import Decimal, InvalidOperation
 from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..config import ConfigManager
-from ..data_sources import BaostockSource, TdxApiSource
+from ..data_sources import TdxApiSource
 from ..database import DatabaseConnection
 from .csv_writer import CsvWriter
-from .fundamentals_manager import FundamentalsManager
 from ..utils.data_transformer import DataTransformer
 from ..utils.kline_normalize import (
     normalize_date_str,
@@ -59,29 +58,18 @@ class SyncManager:
         self.logger = logging.getLogger(__name__)
 
         # 初始化数据源
-        self.baostock_source = None
         self.tdx_api_source = None
 
         self._init_data_sources()
 
     def _init_data_sources(self) -> None:
-        """初始化数据源"""
-        # 初始化Baostock数据源
-        if self.config_manager.get('data_sources.baostock.enabled', True):
-            baostock_config = {
-                'data_path': self.config_manager.get_data_paths().get('csv')
-            }
-            self.baostock_source = BaostockSource(baostock_config)
-
+        """初始化数据源（baostock 已于 2026-10-25 下线：日历/股本/列表全部走 tdx-api）"""
         # 初始化Tdx API数据源
         if self.config_manager.get('data_sources.tdx_api.enabled', True):
             tdx_api_config = self.config_manager.get('data_sources.tdx_api', {})
             # 中间件增强路径开关（V3.0 M-C），false 时保持 V2.0 直连路径
             tdx_api_config['use_enhanced_api'] = self.config_manager.get('sync.kline_day_use_enhanced_api', False)
             self.tdx_api_source = TdxApiSource(tdx_api_config)
-
-        # 初始化基本面数据管理器
-        self.fundamentals_manager = FundamentalsManager(self.config_manager)
 
     def sync_all(self, save_to_csv: bool = True, save_to_db: bool = True) -> Dict[str, Any]:
         """
@@ -117,68 +105,23 @@ class SyncManager:
         return result
 
     def sync_stocks(self, save_to_csv: bool = True, save_to_db: bool = True) -> List[Dict[str, Any]]:
-        """同步股票列表 - 严格按照要求使用纯baostock方案
+        """同步股票列表（baostock 下线换源 20261025：tdx-api /api/codes 快照维护）
+
+        快照 + 新股/改名/退市标记/list_date 回填，见 StockListManager；
+        save_to_db=False 时仅产出 diff 报告不落库（save_to_csv 保留参数兼容旧调用）
 
         Returns:
-            同步结果字典，包含stocks和耗时统计
+            快照股票列表（ts_code/name/exchange）
         """
-        result = {
-            'stocks': [],
-            'timing': {
-                'baostock_fetch': 0.0,
-                'csv_generation': 0.0,
-                'database_write': 0.0
-            }
-        }
+        from .stock_list_manager import StockListManager
+        report = StockListManager(self.config_manager).execute(apply=save_to_db)
 
-        # 1. 从Baostock获取股票列表（记录耗时）
-        baostock_start = time.time()
-        all_stocks = []
-        if self.baostock_source:
-            if self.baostock_source.connect():
-                stocks = self.baostock_source.get_stock_list()
-                all_stocks.extend(stocks)
-                self.baostock_source.disconnect()
-        baostock_end = time.time()
-        result['timing']['baostock_fetch'] = round(baostock_end - baostock_start, 2)
-
-        # 去重
-        unique_stocks = {}
-        for stock in all_stocks:
-            code = stock.get('stock_code')
-            ts_code = stock.get('ts_code')
-            unique_key = ts_code if ts_code else code
-            if unique_key and unique_key not in unique_stocks:
-                unique_stocks[unique_key] = stock
-            else:
-                print(f"⚠️  跳过重复股票: {unique_key}")
-
-        stocks_list = list(unique_stocks.values())
-        result['stocks'] = stocks_list
-
-        # 2. 生成CSV文件（记录耗时）
-        csv_start = time.time()
-        if save_to_csv:
-            self.csv_writer.write_stocks(stocks_list)
-        csv_end = time.time()
-        result['timing']['csv_generation'] = round(csv_end - csv_start, 2)
-
-        # 3. 写入数据库（记录耗时）
-        db_start = time.time()
-        if save_to_db:
-            self._save_stocks_to_db(stocks_list)
-        db_end = time.time()
-        result['timing']['database_write'] = round(db_end - db_start, 2)
-
-        # 打印汇总信息
-        total_time = sum(result['timing'].values())
-        print(f"同步股票列表完成，共 {len(stocks_list)} 只股票")
-        print(f"  - Baostock采集耗时: {result['timing']['baostock_fetch']:.2f}s")
-        print(f"  - CSV生成耗时: {result['timing']['csv_generation']:.2f}s")
-        print(f"  - 数据库写入耗时: {result['timing']['database_write']:.2f}s")
-        print(f"  - 总耗时: {total_time:.2f}s")
-
-        return stocks_list
+        stocks = [{'ts_code': s['ts_code'], 'stock_name': s['name'], 'market': s['exchange']}
+                  for s in report.get('_snapshot_rows', [])]
+        print(f"股票列表维护完成：快照 {report['snapshot']} 只 | 新股 {len(report['new_stocks'])} | "
+              f"改名 {len(report['renamed'])} | 退市 {len(report['delisted'])} | "
+              f"{'已落库' if report['apply'] else '仅报告'} | 报告: {report['report_path']}")
+        return stocks
 
     def sync_trade_calendar(self, start_year: int, end_year: int, save_to_db: bool = True) -> Dict[str, Any]:
         """
@@ -206,13 +149,21 @@ class SyncManager:
             if start_year > end_year:
                 raise ValueError(f"开始年份不能大于结束年份: {start_year} > {end_year}")
 
-            if not self.baostock_source:
-                raise RuntimeError("Baostock数据源未初始化")
+            # 数据源：tdx-api /api/workday/range（本地中间件；历史源自上证指数日K，
+            # 未来日期为中间件推断，故 end_year 限当年+1，baostock 已下线）
+            if not self.tdx_api_source:
+                raise RuntimeError("Tdx API数据源未初始化")
 
-            if not self.baostock_source.connect():
-                raise RuntimeError("Baostock连接失败")
+            max_year = datetime.now().year + 1
+            if end_year > max_year:
+                print(f"⚠️  结束年份 {end_year} 超出上限（未来日期为中间件推断），截断为 {max_year}")
+                end_year = max_year
+            result['end_year'] = end_year
 
-            calendar_data = self.baostock_source.get_trade_calendar(start_year, end_year)
+            if not self.tdx_api_source.connect():
+                raise RuntimeError("Tdx API连接失败")
+
+            calendar_data = self.tdx_api_source.get_trade_calendar(start_year, end_year)
             result['records'] = len(calendar_data)
 
             if save_to_db and calendar_data:
@@ -223,8 +174,8 @@ class SyncManager:
             result['errors'].append(str(e))
             print(f"同步交易日历失败: {e}")
         finally:
-            if self.baostock_source:
-                self.baostock_source.disconnect()
+            if self.tdx_api_source:
+                self.tdx_api_source.disconnect()
 
         end_time = time.time()
         result['duration'] = round(end_time - start_time, 2)
@@ -703,88 +654,6 @@ class SyncManager:
         result['report_path'] = self._write_anal_kline_report(result, timing)
         return result
 
-
-    def _save_stocks_to_db(self, stocks: List[Dict[str, Any]]) -> None:
-        """保存股票数据到数据库 - 修复表名和字段映射"""
-        batch_size = self.config_manager.get('sync.batch_size', 1000)  # 优化批次大小
-        for i in range(0, len(stocks), batch_size):
-            batch = stocks[i:i+batch_size]
-            values = []
-            for stock in batch:
-                # 处理日期格式转换
-                list_date = stock.get('list_date')
-                delist_date = stock.get('delist_date')
-
-                # 将日期对象转换为yyyyMMdd格式的字符串
-                if list_date and hasattr(list_date, 'strftime'):
-                    list_date = list_date.strftime('%Y%m%d')
-                elif list_date is None:
-                    list_date = None
-
-                if delist_date and hasattr(delist_date, 'strftime'):
-                    delist_date = delist_date.strftime('%Y%m%d')
-                elif delist_date is None:
-                    delist_date = None
-
-                # 直接从字典获取数据，避免模型转换问题
-                values.append((
-                    stock.get('ts_code'),
-                    stock.get('stock_code') or stock.get('code'),  # 兼容不同字段名
-                    stock.get('stock_name') or stock.get('name'),
-                    stock.get('cnspell'),
-                    stock.get('market_code') or stock.get('market'),
-                    stock.get('market_name'),
-                    stock.get('exchange_code'),
-                    stock.get('sector_code'),
-                    stock.get('sector_name'),
-                    stock.get('industry_code'),
-                    stock.get('industry_name') or stock.get('industry'),
-                    stock.get('list_status') or stock.get('status'),
-                    list_date,
-                    delist_date,
-                    stock.get('type')  # 新增type字段
-                ))
-
-            query = """
-                INSERT INTO base_stock_info (
-                    ts_code, stock_code, stock_name, cnspell, market_code, market_name,
-                    exchange_code, sector_code, sector_name, industry_code, industry_name,
-                    list_status, list_date, delist_date, type
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ts_code) DO UPDATE SET
-                    ts_code = EXCLUDED.ts_code,
-                    stock_name = EXCLUDED.stock_name,
-                    cnspell = EXCLUDED.cnspell,
-                    market_code = EXCLUDED.market_code,
-                    market_name = EXCLUDED.market_name,
-                    exchange_code = EXCLUDED.exchange_code,
-                    sector_code = EXCLUDED.sector_code,
-                    sector_name = EXCLUDED.sector_name,
-                    industry_code = EXCLUDED.industry_code,
-                    industry_name = EXCLUDED.industry_name,
-                    list_status = EXCLUDED.list_status,
-                    list_date = EXCLUDED.list_date,
-                    delist_date = EXCLUDED.delist_date,
-                    type = EXCLUDED.type,
-                    update_time = CURRENT_TIMESTAMP
-            """
-            self.db_conn.execute_batch(query, values)
-
-    def sync_fundamentals_data(self, **options) -> Dict[str, Any]:
-        """
-        同步基本面数据 - 新增方法
-
-        Args:
-            **options: 同步选项
-                - batch_size: 批次大小，默认50
-                - dry_run: 是否试运行，默认False
-                - list_status: 股票上市状态过滤，默认'L'（仅上市）
-
-        Returns:
-            同步统计信息
-        """
-        return self.fundamentals_manager.execute_sync(**options)
 
     def _get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
         start_date = self._normalize_calendar_date(start_date)

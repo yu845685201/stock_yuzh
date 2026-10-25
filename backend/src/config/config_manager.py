@@ -49,9 +49,7 @@ class ConfigManager:
                 'vipdoc': 'data/vipdoc'
             },
             'data_sources': {
-                'baostock': {
-                    'enabled': True
-                },
+                # baostock 已于 2026-10-25 下线（日历/股本/列表全部走 tdx-api）
                 'tdx_api': {
                     'enabled': True,
                     'base_url': os.getenv('TDX_API_BASE_URL', 'http://127.0.0.1:8000'),
