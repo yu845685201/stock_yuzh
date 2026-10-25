@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time as dtime
 from bisect import bisect_right
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -77,6 +77,20 @@ class AggregationResult:
 
     def __contains__(self, key: str) -> bool:
         return hasattr(self, key)
+
+
+#: P4-6（B10）：龙虎榜发布时点——交易所 17:30 后发布，当日盘后早跑不得把当日榜
+#: 当已发布呈现（防部分交易所先发布的部分数据被当全量 Top10 引用）
+LHB_PUBLISH_TIME = dtime(17, 30)
+
+
+def lhb_published(as_of: str, now: Optional[datetime] = None) -> bool:
+    """龙虎榜是否已到可引用时点（P4-6 门控；as_of=当天且未到 17:30 → False）。
+
+    历史 as_of（早于当天）恒为已发布；now 可注入便于测试。
+    """
+    now = now or datetime.now()
+    return str(as_of) != now.strftime('%Y%m%d') or now.time() >= LHB_PUBLISH_TIME
 
 
 def _values_match(mine: Any, theirs: Any) -> bool:
@@ -1586,6 +1600,8 @@ class ReviewAggregator:
 
     def _lhb_codes_of_day(self, as_of: str) -> set:
         """当日龙虎榜上榜代码集（D2 交叉标记；表空返回空集）"""
+        if not lhb_published(as_of):
+            return set()   # P4-6：早跑时当日榜未发布，不产生交叉标记
         try:
             rows = self.db._query(
                 "SELECT ts_code FROM lhb_stock_daily WHERE trade_date = %s", (as_of,))
@@ -1673,6 +1689,10 @@ class ReviewAggregator:
         金额口径：该上榜原因的前五席位合计（非全市场买卖总额）；成交额列
         沪市 secTxAmount / 深市列表成交金额。
         """
+        if not lhb_published(as_of):
+            return AggregationResult(
+                available=False,
+                reason='龙虎榜 17:30 后发布，当日报告早跑未到发布时点（P4-6 门控停显）')
         try:
             rows = self.db._query(
                 """

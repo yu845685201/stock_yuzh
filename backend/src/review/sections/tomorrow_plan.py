@@ -344,9 +344,19 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                        'text': '候选为规则筛选的观察名单，非推荐；判据初版待校准，'
                                '本报告不构成投资建议'})
         return blocks
-    else:
+    elif '回暖' in position or '震荡' in position:
         openness = '回暖/震荡：四类候选全开'
         open_types = ('R1', 'R2', 'R3', 'R4')
+    else:
+        # P4-4（B6）：异常/未知定位（试用版判据待校准、数据不足、空等）兜底
+        # 从"四类候选全开"改为"全关+人工复核"——判据异常时不得向激进方向兜底
+        blocks.append({'type': 'para',
+                       'text': f'情绪定位异常（{position or "空"}）：本轮不出买入候选，'
+                               '转人工复核——判据异常时兜底方向为全关而非全开（P4-4）'})
+        blocks.append({'type': 'note',
+                       'text': '候选为规则筛选的观察名单，非推荐；情绪定位恢复为'
+                               '四态判据之一后自动恢复开放'})
+        return blocks
     # ADX 闸门（P1-7 §4.6 E）：指数趋势强度挡位，叠加在情绪开放度之上
     adx_info = cand.get('adx_gate') or {}
     gate = str(adx_info.get('gate') or 'closed')

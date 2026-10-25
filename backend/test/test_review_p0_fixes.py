@@ -271,3 +271,93 @@ class TestP34R2NextDefault:
         from src.analysis.modules.r2_mainline_follow import hit_concept_top
         assert hit_concept_top([], ['x']) is None
         assert hit_concept_top(['x'], []) is None
+
+
+# ------------------------------------------------------------------ P4-4
+
+class TestP44SentimentFallback:
+    """P4-4（B6）：情绪定位异常/未知时候选兜底从"四类候选全开"改为"全关+人工复核"。
+
+    _buy_candidates 的 openness 匹配原为 else 大筐——'试用版判据待校准'/空定位
+    落入"回暖/震荡：四类候选全开"（异常时向激进方向兜底，方向性错误）。
+    """
+
+    @staticmethod
+    def _agg(position):
+        return {'candidates': {'available': True},
+                'sentiment': {'data': {'cycle': {'position': position}}}}
+
+    @staticmethod
+    def _text(blocks):
+        return ''.join(str(b.get('text', '')) for b in blocks)
+
+    def test_anomaly_position_closes_all(self):
+        from src.review.sections import tomorrow_plan
+        text = self._text(tomorrow_plan._buy_candidates(
+            self._agg('试用版判据待校准'), {}))
+        assert '情绪定位异常' in text and '转人工复核' in text
+
+    def test_empty_position_closes_all(self):
+        from src.review.sections import tomorrow_plan
+        text = self._text(tomorrow_plan._buy_candidates(self._agg(''), {}))
+        assert '转人工复核' in text
+
+    def test_normal_position_passes_through(self):
+        """回暖/震荡 仍走全开路径（不落入异常分支）——经 ADX 缺省 closed 正常返回"""
+        from src.review.sections import tomorrow_plan
+        text = self._text(tomorrow_plan._buy_candidates(
+            self._agg('回暖/震荡'), {}))
+        assert '情绪定位异常' not in text
+        assert '指数趋势闸门关闭' in text
+
+    def test_bingdian_still_closed(self):
+        """冰点行为保持：不出候选（回归保护）"""
+        from src.review.sections import tomorrow_plan
+        text = self._text(tomorrow_plan._buy_candidates(self._agg('冰点'), {}))
+        assert '本轮不出买入候选' in text and '情绪定位异常' not in text
+
+
+# ------------------------------------------------------------------ P4-6
+
+class TestP46LhbTimeGate:
+    """P4-6（B10）：龙虎榜 17:30 发布时点门控——当日盘后早跑不引用未发布数据。"""
+
+    def test_same_day_before_publish_time_blocked(self):
+        from src.review.aggregator import lhb_published
+        from datetime import datetime
+        assert lhb_published('20261023', now=datetime(2026, 10, 23, 16, 0)) is False
+
+    def test_same_day_after_publish_time_allowed(self):
+        from src.review.aggregator import lhb_published
+        from datetime import datetime
+        assert lhb_published('20261023', now=datetime(2026, 10, 23, 17, 31)) is True
+
+    def test_historical_date_always_allowed(self):
+        from src.review.aggregator import lhb_published
+        from datetime import datetime
+        assert lhb_published('20261022', now=datetime(2026, 10, 23, 10, 0)) is True
+
+    def test_aggregate_lhb_gated_before_publish(self):
+        """早跑时 _aggregate_lhb 不触库直接停显（reason 带门控说明）"""
+        from src.review.aggregator import ReviewAggregator
+        from datetime import datetime as _dt
+
+        class _BoomDB:
+            def _query(self, sql, params=None):
+                raise AssertionError('门控生效时不得触库')
+
+        out = ReviewAggregator(_BoomDB(), {'review': {}})._aggregate_lhb(
+            _dt.now().strftime('%Y%m%d'))
+        assert out.available is False
+        assert '17:30' in out.reason and 'P4-6' in out.reason
+
+    def test_lhb_codes_empty_when_gated(self):
+        from src.review.aggregator import ReviewAggregator
+
+        class _BoomDB:
+            def _query(self, sql, params=None):
+                raise AssertionError('门控生效时不得触库')
+
+        agg = ReviewAggregator(_BoomDB(), {'review': {}})
+        from datetime import datetime as _dt
+        assert agg._lhb_codes_of_day(_dt.now().strftime('%Y%m%d')) == set()
