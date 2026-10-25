@@ -16,6 +16,8 @@ import logging
 from datetime import datetime, time as dtime, timedelta
 from typing import Any, Dict, Optional
 
+import pandas as pd
+
 from .candidate_rules import veto_reasons
 
 logger = logging.getLogger(__name__)
@@ -108,3 +110,39 @@ def load_candidate_veto_map(db, as_of: str, rules: Dict[str, Any],
         if reasons:
             out[ts_code] = reasons
     return out
+
+
+def recent_longyin_window(ordered: pd.DataFrame, board: str,
+                          list_date: Optional[str] = None,
+                          rules: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """链侧反抽板检测（P4-1 语义修订）：单股 df → 逐日序列 → 判据纯函数。
+
+    与报告层 panel 同口径的单股等价计算：annotate_limit_up（链
+    consecutive_limit_up 同一函数）+ 逐日 streak（_add_streak 语义：连续
+    up∧known 含当日）+ volume_surge（_add_rolling_metrics 同式，groupby
+    单股退化）。序列长度不足 / 缺 volume 列 → None（不硬造）。
+    """
+    if ordered is None or ordered.empty or 'volume' not in ordered.columns:
+        return None
+    from .candidate_rules import high_board_longyin_recent
+    from .limit_up_rules import annotate_limit_up
+    from ..review.cross_section import VOLUME_SURGE_WINDOW  # 同值常量（无反向依赖）
+    o = ordered.sort_values('trade_date').reset_index(drop=True)
+    ann = annotate_limit_up(o, str(o['ts_code'].iloc[0]) if 'ts_code' in o.columns else '',
+                            board, list_date=list_date)
+    up = ann['_limit_up'].to_numpy(dtype=bool)
+    known = ann['_limit_known'].to_numpy(dtype=bool)
+    streaks, s = [], 0
+    for u, k in zip(up, known):
+        s = s + 1 if (u and k) else 0
+        streaks.append(s)
+    volume = pd.to_numeric(o['volume'], errors='coerce')
+    valid_vol = volume.where(volume.gt(0))
+    prev_mean = valid_vol.shift(1).rolling(VOLUME_SURGE_WINDOW,
+                                           min_periods=VOLUME_SURGE_WINDOW).mean()
+    vs = (volume / prev_mean).round(4)
+    cr = pd.to_numeric(o['change_rate'], errors='coerce')
+    r = dict(rules or {})
+    n = int(r.get('veto_high_board_lookback', 3)) + 1
+    return high_board_longyin_recent(streaks[-n:], cr.tolist()[-n:], vs.tolist()[-n:],
+                                     rules)

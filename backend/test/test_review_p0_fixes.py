@@ -366,33 +366,57 @@ class TestP46LhbTimeGate:
 # ------------------------------------------------------------------ P4-8
 
 class TestP48RPoolPrior:
-    """P4-8（评二-7）：R 系列候选先验随行——核验前向积累为准，无积累如实注明。"""
+    """P4-8（评二-7）：R 系列候选先验随行——离线回测优先、前向核验补充，皆无如实注明。
+
+    测试经 monkeypatch 隔离 data/priors JSON（数据文件不入库，测试不得依赖）。
+    """
 
     @staticmethod
     def _agg(pools):
         from src.review.aggregator import AggregationResult
         return {'verification': AggregationResult(data={'rolling': {'pools': pools}})}
 
-    def test_prior_with_stats(self):
+    @staticmethod
+    def _no_offline(monkeypatch):
+        from src.review.sections import tomorrow_plan
+        monkeypatch.setattr(tomorrow_plan, '_offline_prior', lambda: {})
+
+    def test_prior_with_stats(self, monkeypatch):
+        self._no_offline(monkeypatch)
         from src.review.sections import tomorrow_plan
         text = tomorrow_plan._r_pool_prior(self._agg(
             {'R1': {'days': 5, 'avg_excess': 1.2, 'win_rate': 0.6}}), 'R1')
-        assert '近 5 个核验日' in text and '+1.20pct' in text and '60%' in text
+        assert '近 5 个核验日' in text and '+1.20pct' in text
         assert '历史统计非预测' in text
 
-    def test_prior_untracked_pool(self):
+    def test_prior_offline_first(self, monkeypatch):
+        """离线回测在场时优先呈现（R3 全历史/R1 近一年），前向核验并列补充"""
+        from src.review.sections import tomorrow_plan
+        monkeypatch.setattr(tomorrow_plan, '_offline_prior', lambda: {
+            'R3': {'window': '20150105~20260930', 'days': 2700, 'signals': 12000,
+                   'avg_excess_median': 0.85, 'win_rate': 0.52}})
+        text = tomorrow_plan._r_pool_prior(self._agg(
+            {'R3': {'days': 12, 'avg_excess': 1.5}}), 'R3')
+        assert '离线同构回测 20150105~20260930' in text
+        assert '+0.85pct' in text and '52%' in text
+        assert '前向核验近 12 个核验日' in text
+
+    def test_prior_untracked_pool(self, monkeypatch):
+        self._no_offline(monkeypatch)
         from src.review.sections import tomorrow_plan
         text = tomorrow_plan._r_pool_prior(self._agg({'R2': {'days': 0}}), 'R2')
-        assert '先验：未统计' in text and '无离线同构回测' in text
+        assert '先验：未统计' in text and '前向核验' in text
 
-    def test_prior_no_verification(self):
+    def test_prior_no_verification(self, monkeypatch):
+        self._no_offline(monkeypatch)
         from src.review.sections import tomorrow_plan
         assert '未统计' in tomorrow_plan._r_pool_prior({}, 'R3')
         assert '未统计' in tomorrow_plan._r_pool_prior(
             {'verification': None}, 'R4')
 
-    def test_buy_candidates_embed_prior(self):
+    def test_buy_candidates_embed_prior(self, monkeypatch):
         """候选节每类块带先验注（有积累引用积累，无积累注明未统计）"""
+        self._no_offline(monkeypatch)
         from src.review.sections import tomorrow_plan
         agg = {'candidates': {'available': True},
                'sentiment': {'data': {'cycle': {'position': '冰点'}}},
@@ -410,7 +434,7 @@ class TestP48RPoolPrior:
                 'verification': self._agg({'R1': {'days': 3}})['verification']}
         blocks2 = tomorrow_plan._buy_candidates(agg2, {})
         text2 = ''.join(str(b.get('text', '')) for b in blocks2)
-        assert 'R1 先验（核验体系前向积累，近 3 个核验日）' in text2
+        assert 'R1 先验：前向核验近 3 个核验日' in text2
 
 
 # ------------------------------------------------------------------ P4-1
@@ -580,3 +604,61 @@ class TestP43SurvivorPool:
         reader._query = db._query
         stats = reader.survivor_pool_stats('20261023')
         assert stats == {'delisted_alive': 137, 'with_kline': 0}
+
+
+# ------------------------------------------------------------------ 反抽板 veto
+
+class TestHighBoardLongyinRecent:
+    """P4-1 语义修订：近 N 日高位板放量长阴后的涨停入池即否决（反抽板陷阱）。"""
+
+    def test_rebound_after_blowoff_vetoed(self):
+        """6 连板 → 次日放量长阴（-4%、2.5x）→ 第三日再涨停 → veto（窗口=lookback+1=4 日）"""
+        from src.analysis.candidate_rules import high_board_longyin_recent
+        streaks = [5, 6, 0, 1]        # .../高位板日/长阴日/反抽板日
+        changes = [10.0, 10.0, -4.0, 10.0]
+        surges = [2.0, 2.0, 2.5, 2.0]
+        out = high_board_longyin_recent(streaks, changes, surges)
+        assert out is not None and '反抽板风险' in out
+
+    def test_no_volume_no_veto(self):
+        """长阴日未放量（1.2x）→ 不否决（条件缺一不可）"""
+        from src.analysis.candidate_rules import high_board_longyin_recent
+        out = high_board_longyin_recent([6, 0, 1], [10.0, -4.0, 10.0],
+                                        [2.0, 1.2, 2.0])
+        assert out is None
+
+    def test_low_board_longyin_no_veto(self):
+        """长阴前一日非高位板（streak 2）→ 不否决"""
+        from src.analysis.candidate_rules import high_board_longyin_recent
+        out = high_board_longyin_recent([2, 0, 1], [10.0, -4.0, 10.0],
+                                        [2.0, 2.5, 2.0])
+        assert out is None
+
+    def test_insufficient_window_returns_none(self):
+        from src.analysis.candidate_rules import high_board_longyin_recent
+        assert high_board_longyin_recent([6], [10.0], [2.0]) is None
+        assert high_board_longyin_recent([], [], []) is None
+
+    def test_chain_r1_vetoed_by_longyin(self):
+        """链侧入口：R1 模块命中反抽板窗口 → 否"""
+        from src.analysis.module_base import ChainContext, ModuleResult, StockInfo
+        from src.analysis.modules.r1_ladder_relay import R1LadderRelay
+        # 8 日序列：0..4 五板(10%)、第6日高位板(10%, streak6)、第7日长阴(-4%)、第8日反抽板
+        rows = []
+        for i, (cr, vol) in enumerate([(10.0, 100), (10.0, 100), (10.0, 100),
+                                       (10.0, 100), (10.0, 100), (10.0, 100),
+                                       (-4.0, 400), (10.0, 200)]):
+            rows.append({'ts_code': 'sh.600000', 'trade_date': f'2026101{i + 6}'
+                         if i + 6 < 10 else f'2026102{i + 6 - 4}',
+                         'change_rate': cr, 'close': 10.0 + cr * 0.1,
+                         'high': 10.0 + cr * 0.1, 'is_st': False, 'volume': vol,
+                         'preclose': 10.0})
+        df = pd.DataFrame(rows)
+        stock = StockInfo(ts_code='sh.600000', stock_code='600000', stock_name='测试',
+                          board='主板')
+        streak_res = ModuleResult(6, {'streak': 6})
+        ctx = ChainContext(as_of=str(df['trade_date'].iloc[-1]), stock=stock,
+                           upstream={'连续涨停数': streak_res,
+                                     'cand_seal_open_map': {}})
+        out = R1LadderRelay().analyze(df, ctx)
+        assert out.value == '否'

@@ -12,6 +12,9 @@ review.tomorrow_plan 可调，待用户校准定稿（流程同情绪判据 §3�
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 #: 判据初版默认值（config review.tomorrow_plan 可覆盖；待用户校准定稿）
@@ -299,26 +302,46 @@ def _direction_watch(agg: Dict[str, Any]) -> List[str]:
 
 
 def _r_pool_prior(agg: Dict[str, Any], ctype: str) -> str:
-    """P4-8（评二-7）：R 系列候选先验随行——以核验体系前向积累为准（诚实但慢）。
+    """P4-8（评二-7）：R 系列候选先验随行——离线同构回测优先、前向核验补充。
 
-    数据源 = agg['verification'].data.rolling.pools[ctype]（verifier.rolling_stats
-    单一出处：近 30 核验日池超额/胜率滚动）；无积累时如实注明"先验未统计"，
-    禁止编造历史同构胜率（不硬造红线）。缠论池先验见 chan_candidates.HIST_NOTE；
-    离线同构回测为后续项，当前不引用不存在的历史统计。
+    数据源按可得性组合，均如实标注（不硬造红线）：
+    - 离线回测：data/priors/r_pool_offline_prior.json（r_pool_offline_backtest.py
+      产出；R3 全历史 / R1 自封板数据起点 20251009；R2/R4 受概念时点记录与
+      龙虎榜历史限制**不可行**，见 JSON meta.r2_r4_note）；文件缺失或该池无
+      记录 → 跳过；
+    - 前向核验：agg['verification'].data.rolling.pools[ctype]（verifier.
+      rolling_stats 单一出处：近 30 核验日池超额/胜率滚动）；
+    - 两者皆无 → "先验：未统计"如实注明。缠论池先验见 chan_candidates.HIST_NOTE。
     """
+    parts: List[str] = []
+    offline = _offline_prior().get(ctype)
+    if offline:
+        parts.append(f"离线同构回测 {offline['window']}（{offline['signals']} 信号/"
+                     f"{offline['days']} 日，中位超额 {offline['avg_excess_median']:+.2f}pct，"
+                     f"胜率 {offline['win_rate']:.0%}）")
     ver = agg.get('verification') or {}
     st = (((ver.get('data') or {}).get('rolling') or {}).get('pools')
           or {}).get(ctype) or {}
-    days = st.get('days')
-    if not days:
-        return (f'{ctype} 先验：未统计（核验体系前向积累中，暂无足够样本；'
-                '仅有前向核验，无离线同构回测）')
-    text = f'{ctype} 先验（核验体系前向积累，近 {days} 个核验日）'
-    if st.get('avg_excess') is not None:
-        text += f'，池均超额 {st["avg_excess"]:+.2f}pct'
-    if st.get('win_rate') is not None:
-        text += f'，池中位跑赢全市场 {st["win_rate"]:.0%} 的日子'
-    return text + '；历史统计非预测，仅作观察校准参考'
+    if st.get('days'):
+        fwd = f'前向核验近 {st["days"]} 个核验日'
+        if st.get('avg_excess') is not None:
+            fwd += f'，池均超额 {st["avg_excess"]:+.2f}pct'
+        parts.append(fwd)
+    if not parts:
+        return (f'{ctype} 先验：未统计（核验体系前向积累中；R2/R4 离线回测受'
+                '概念时点记录与龙虎榜历史限制不可行——仅有前向核验）')
+    return f'{ctype} 先验：{"；".join(parts)}；历史统计非预测，仅作观察校准参考'
+
+
+@lru_cache(maxsize=1)
+def _offline_prior() -> Dict[str, Any]:
+    """离线回测先验 JSON（进程级读盘缓存一次；文件缺失/损坏返回空 dict 不硬造）。"""
+    path = (Path(__file__).resolve().parents[4] / 'data' / 'priors'
+            / 'r_pool_offline_prior.json')
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
 
 
 def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:

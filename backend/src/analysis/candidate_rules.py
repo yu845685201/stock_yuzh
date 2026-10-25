@@ -43,6 +43,7 @@ BUY_RULES: Dict[str, Any] = {
     # VETO 阈值（P1-7 §4.6 B）
     'veto_profit_yoy': -50.0,   # 业绩暴雷：最新报告期归母净利同比下限（%）
     'veto_lhb_sell1_pct': 30.0,  # 龙虎榜卖一占比上限（%）
+    'veto_high_board_lookback': 3,  # 反抽板 veto：回看交易日数（近 N 日高位板放量长阴，初版未校准）
 }
 
 #: VETO 一票否决分（独立于加权评分；命中即出池不看其他维度）
@@ -196,11 +197,10 @@ def veto_reasons(*, is_st: bool = False, profit_yoy: Optional[float] = None,
 
     缺失入参不过对应否决（不硬造）；暴雷阈值含等号（≤阈值即暴雷）。
 
-    P4-1 接线注记：高位板长阴三项（streak≥高位阈值 / 放量≥R3 下限 /
-    change_rate≤−3%）在涨停池内结构性互斥——池内行收盘涨停 change_rate
-    ≥ +9.8%，与 ≤−3% 不可能同时成立，故该项实际不可达；谓词接线已入
-    真实字段（aggregator R1/R2 行级），语义修订（「炸板长阴」或「近 N 日
-    最高板」口径）属结论性规则变更，待用户决策后实施。
+    P4-1 语义修订（2026-10-25 已实施）：原"当日高位板放量长阴"三项在涨停池内
+    结构性互斥（收盘涨停 change_rate ≥ +9.8% 与 ≤ −3% 不可能同日成立），已由
+    可达的反抽板口径替代——见 :func:`high_board_longyin_recent`（近 N 日高位板
+    放量长阴后的涨停入池即否决）；本函数不再承担该否决项。
     """
     r = _rules(rules)
     reasons: List[str] = []
@@ -224,6 +224,43 @@ def veto_reasons(*, is_st: bool = False, profit_yoy: Optional[float] = None,
 def is_vetoed(**kwargs: Any) -> bool:
     """是否触发一票否决（``veto_reasons`` 非空）。"""
     return bool(veto_reasons(**kwargs))
+
+
+def high_board_longyin_recent(streaks, change_rates, volume_surges,
+                              rules: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """近 N 日反抽板检测（P4-1 语义修订定稿，2026-10-25）。
+
+    原"当日高位板放量长阴"三条件在涨停池内结构性互斥（veto_reasons docstring
+    注记），语义修订为：**最近 ``veto_high_board_lookback``（默认 3）个交易日
+    内存在某日 D——change_rate(D) ≤ −3% 且 volume_surge(D) ≥ ``r3_volume_min``
+    且前一日连板 streak(D−1) ≥ ``r1_high_streak``**（高位板次日放量长阴 =
+    出货结构），当日再涨停入池即为反抽板陷阱 → 返回理由串
+    「近N日高位板放量长阴（反抽板风险）」；未命中返回 None。
+
+    Args:
+        streaks/change_rates/volume_surges：oldest→newest 的 lookback+1 日
+        序列（含今日；今日为池内涨停行，change_rate ≥ +9.8% 天然不满足长阴
+        条件，无需特判）。序列与面板 ``_streak``/``change_rate``/
+        ``_volume_surge`` 同口径（annotate_panel 单一出处；链侧经
+        candidate_veto.recent_longyin_window 的单股等价计算）。
+        任一序列缺失/长度不足 → None（不硬造）。
+    """
+    r = _rules(rules)
+    lb = int(r.get('veto_high_board_lookback', 3))
+    n = lb + 1
+    if (not streaks or not change_rates or not volume_surges
+            or len(streaks) < n or len(change_rates) < n or len(volume_surges) < n):
+        return None
+    high = int(r['r1_high_streak'])
+    vol_min = float(r['r3_volume_min'])
+    for i in range(len(streaks) - lb, len(streaks)):
+        cr, vs = change_rates[i], volume_surges[i]
+        if cr is None or vs is None:
+            continue
+        if float(cr) <= -3.0 and float(vs) >= vol_min \
+                and streaks[i - 1] is not None and int(streaks[i - 1]) >= high:
+            return f'近{lb}日高位板放量长阴（反抽板风险）'
+    return None
 
 
 # ------------------------------------------------------------------ D 五维评分

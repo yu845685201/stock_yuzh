@@ -24,13 +24,13 @@ import pandas as pd
 
 from ..analysis.candidate_rules import (
     BUY_RULES,
+    high_board_longyin_recent,
     is_r1,
     is_r2,
     is_r3,
     is_r4,
     r1_tier,
     score_candidate,
-    veto_reasons,
 )
 from ..analysis.attribution_rules import FALLBACK_LABEL, pick_attribution
 from ..analysis.data_reader import DataReader
@@ -184,7 +184,8 @@ class ReviewAggregator:
     #: P3-2（C5）聚合缓存版本号：聚合层任何影响产出的代码变更时手动 +1（防陈旧缓存）
     #: v3：P4-5 判据表第 4 行（涨跌家数比）+ P4-1 VETO map 卖一占比接线（两处聚合产出变更）
     #: v4：P4-2 五维评分补全（候选行 score 计入基本面/事件两维）
-    AGG_CACHE_VERSION = 'v4-20261025'
+    #: v5：P4-1 反抽板 veto（近 N 日高位板放量长阴，R1/R2 行 veto 列可新增理由）
+    AGG_CACHE_VERSION = 'v5-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -286,7 +287,8 @@ class ReviewAggregator:
             cs_today, as_of, clusters,
             self._seal_map_of_day(as_of),
             lhb_data.get('institution') or [],
-            top3_members=sm_data.get('top3_members') or set())
+            top3_members=sm_data.get('top3_members') or set(),
+            recent_windows=self._recent_windows(panel))
         # 缠论背驰候选（2026-10-24 引入）：520d 面板独立复算，与链
         # chan_divergence_buy 模块同一实现两入口（chan.scan.scan_stock_anchor）
         out['chan'] = self._aggregate_chan(as_of)
@@ -2341,11 +2343,28 @@ class ReviewAggregator:
                 'market_weak': market_weak,
                 'as_of': str(df['trade_date'].iloc[-1])}
 
+    @staticmethod
+    def _recent_windows(panel: pd.DataFrame) -> Dict[str, tuple]:
+        """P4-1 反抽板 veto 窗口：每股最近 10 日的 streak/涨跌幅/放量序列。
+
+        取自 annotate_panel 产物列（_streak/change_rate/_volume_surge 单一出处）；
+        长度取宽（10 日），实际回看天数由 high_board_longyin_recent 按 config
+        veto_high_board_lookback 自行截取——两者解耦，config 调整无需改窗口。
+        """
+        recent = panel.sort_values(['ts_code', 'trade_date']).groupby('ts_code').tail(10)
+        out: Dict[str, tuple] = {}
+        for ts, g in recent.groupby('ts_code'):
+            out[str(ts)] = (list(g['_streak']),
+                            list(pd.to_numeric(g['change_rate'], errors='coerce')),
+                            list(g['_volume_surge']))
+        return out
+
     def _build_candidates(self, cs_today: pd.DataFrame, as_of: str,
                           clusters: List[Dict[str, Any]],
                           seal_map: Dict[str, Dict[str, Any]],
                           institution: List[Dict[str, Any]],
-                          top3_members: Optional[set] = None) -> Dict[str, Any]:
+                          top3_members: Optional[set] = None,
+                          recent_windows: Optional[Dict[str, tuple]] = None) -> Dict[str, Any]:
         """转天买入候选池（全量，谓词 candidate_rules 与链模块共用）。
 
         每类行带链同款理由串 label（如「7板/开板0次」「首板/创新药」）与
@@ -2444,6 +2463,10 @@ class ReviewAggregator:
                            concept_map.get(ts_code) or [], vs)
             tier = r1_tier(streak, rules) or ''
             fund, evt = _score_dims(ts_code)
+            # P4-1 反抽板 veto（语义修订实施）：近 N 日高位板放量长阴后的涨停 = 反抽板
+            ly = (high_board_longyin_recent(
+                *(recent_windows or {}).get(ts_code, ([], [], [])), rules=rules)
+                if recent_windows else None)
             r1_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
@@ -2452,13 +2475,8 @@ class ReviewAggregator:
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
                 'score': _cand_score(big_net, vs, _cluster_hit(ts_code), fund, evt),
-                # P4-1：行级谓词接入真实字段（高位板长阴）——涨停池内
-                # change_rate≥+9.8% 与 ≤−3% 结构性互斥、实际不可达，保留接线
-                # 待语义修订（见 veto_reasons docstring P4-1 注记）
                 'veto': (list(veto_map.get(ts_code) or [])
-                         + veto_reasons(streak=streak, volume_surge=vs,
-                                        change_rate=_f(r.get('change_rate')),
-                                        rules=rules)),
+                         + ([ly] if ly else [])),
                 'label': (f'{tier}/{streak}板/封板数据缺失' if oc is None
                           else f'{tier}/{streak}板/开板{int(oc)}次')})
         r1_rows.sort(key=lambda x: (-x['streak'], -(x['amount'] or 0)))
@@ -2487,6 +2505,9 @@ class ReviewAggregator:
             big_net = big_net_map.get(ts_code)
             ev = _evidence(ts_code, big_net, concepts, vs)
             fund, evt = _score_dims(ts_code)
+            ly = (high_board_longyin_recent(
+                *(recent_windows or {}).get(ts_code, ([], [], [])), rules=rules)
+                if recent_windows else None)
             r2_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
@@ -2496,11 +2517,8 @@ class ReviewAggregator:
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
                 'score': _cand_score(big_net, vs, cc, fund, evt),
-                # P4-1：行级谓词接入真实字段（同 R1——涨停池内结构性不可达）
                 'veto': (list(veto_map.get(ts_code) or [])
-                         + veto_reasons(streak=streak, volume_surge=vs,
-                                        change_rate=_f(r.get('change_rate')),
-                                        rules=rules)),
+                         + ([ly] if ly else [])),
                 'label': f'首板/{hit}' + (f'(聚集{cc}家)' if cc is not None else '')})
         r2_rows.sort(key=lambda x: -(x['amount'] or 0))
         used.update(r['ts_code'] for r in r2_rows)
