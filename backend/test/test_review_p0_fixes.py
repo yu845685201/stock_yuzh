@@ -666,3 +666,78 @@ class TestHighBoardLongyinRecent:
                                      'cand_seal_open_map': {}})
         out = R1LadderRelay().analyze(df, ctx)
         assert out.value == '否'
+
+
+# ------------------------------------------------------------------ X2 (V4.0-A2)
+
+class TestX2R1RawSeedDedup:
+    """X2：弱档日 raw R1 命中播种 used——R3/R4 与链去重口径一致。
+
+    _build_candidates 首批直测（hermetic）：合成截面 + 实例级 monkeypatch
+    隔离全部 IO 触点（adx 闸门/概念 map/VETO map/估值/公告；money_flow 走
+    _EmptyReader 返回 []）。R2 与 R1 恒无交集（is_r2 强制首板 streak==1），
+    真实交集在 R3/R4。
+    """
+
+    _COLS = ['ts_code', 'stock_code', 'stock_name', 'is_st', '_limit_up',
+             '_streak', '_new_high', '_volume_surge', 'change_rate', 'amount',
+             'open', 'preclose', 'close']
+
+    @staticmethod
+    def _aggregator(monkeypatch, market_weak):
+        class _EmptyReader:
+            def _query(self, sql, params=None):
+                return []
+
+        agg = ReviewAggregator(_EmptyReader(), {'review': {}})
+        monkeypatch.setattr(agg, '_index_adx_gate',
+                            lambda as_of: {'market_weak': market_weak,
+                                           'gate': 'closed' if market_weak else 'full',
+                                           'adx': 15.0, 'adx_rising': False,
+                                           'close': 3600.0, 'ma20': 3700.0,
+                                           'ma60': 3800.0, 'index': '上证指数',
+                                           'as_of': as_of})
+        monkeypatch.setattr(agg, '_concept_map', lambda as_of: {})
+        monkeypatch.setattr(agg, '_candidate_veto_map', lambda *a, **k: {})
+        monkeypatch.setattr(agg, '_valuation_map_of_day', lambda as_of: {})
+        monkeypatch.setattr(agg, '_ann_map_of_day', lambda as_of: {})
+        return agg
+
+    @staticmethod
+    def _row(ts, name, streak, new_high):
+        return {'ts_code': ts, 'stock_code': ts.split('.')[-1], 'stock_name': name,
+                'is_st': False, '_limit_up': True, '_streak': streak,
+                '_new_high': new_high, '_volume_surge': 3.0, 'change_rate': 6.0,
+                'amount': 5e8, 'open': 10.0, 'preclose': 10.0,
+                'close': 10.0 * (1 + streak * 0.1)}
+
+    def _cs(self, rows):
+        return pd.DataFrame(rows, columns=self._COLS)
+
+    def test_weak_day_r3_excludes_raw_r1_hit(self, monkeypatch):
+        """核心修复：弱档日 R1=0（闸门不变），R1 原命中不入 R3（与链口径一致）"""
+        agg = self._aggregator(monkeypatch, market_weak=True)
+        cs = self._cs([self._row('sz.301502', '华阳智能', 2, True)])
+        out = agg._build_candidates(cs, '20261023', [], {}, [])
+        assert out['R1'] == []
+        assert all(r['ts_code'] != 'sz.301502' for r in out['R3'])
+
+    def test_strong_day_regression_locked(self, monkeypatch):
+        """回归锁定：非弱档日原优先级行为不变——该股在 R1、不在 R3"""
+        agg = self._aggregator(monkeypatch, market_weak=False)
+        cs = self._cs([self._row('sz.301502', '华阳智能', 2, True)])
+        out = agg._build_candidates(cs, '20261023', [], {}, [])
+        assert [r['ts_code'] for r in out['R1']] == ['sz.301502']
+        assert all(r['ts_code'] != 'sz.301502' for r in out['R3'])
+
+    def test_weak_day_r4_excludes_raw_r1_hit(self, monkeypatch):
+        """R4 同构（链 r4 对 upstream R1 去重）：弱档日 R1 原命中不入 R4；
+        纯机构股主路径不受影响"""
+        agg = self._aggregator(monkeypatch, market_weak=True)
+        cs = self._cs([self._row('sz.301502', '华阳智能', 2, False)])
+        inst = [{'ts_code': 'sz.301502', 'name': '华阳智能', 'net': 5e8},
+                {'ts_code': 'sh.600000', 'name': '浦发银行', 'net': 3e8}]
+        out = agg._build_candidates(cs, '20261023', [], {}, inst)
+        r4_codes = [r['ts_code'] for r in out['R4']]
+        assert 'sz.301502' not in r4_codes
+        assert 'sh.600000' in r4_codes

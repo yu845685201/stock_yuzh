@@ -201,7 +201,8 @@ class ReviewAggregator:
     #: v9：out 增 next_trade_date（W7 周末缝提示）——旧缓存缺键须失效
     #: v10：_next_trade_date 修 calendar_date TEXT 比较格式（_dot 归一），None→真值
     #: v11：_aggregate_unlock 同源 _dot 修复（X1）——v10 缓存 unlock=available=False 须失效
-    AGG_CACHE_VERSION = 'v11-20261026'
+    #: v12：X2 raw-R1 命中播种 used（弱档日 R2/R3/R4 去重对齐链侧）——聚合产物变更
+    AGG_CACHE_VERSION = 'v12-20261026'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -2527,6 +2528,15 @@ class ReviewAggregator:
 
         # R1 梯队接力（全量涨停截面）
         lu = cs_today[cs_today['_limit_up']]
+        # X2：R1 原命中集（raw 谓词、不带弱档闸门）先播种 used——与链侧
+        # r2/r3/r4 模块读 upstream R1 全量命中去重同构（r1_ladder_relay.py:73
+        # 不传 market_weak）；out['R1'] 输出仍走闸门，弱档日 0 开放不变。
+        # 仅作去重输入，不进任何渲染输出。
+        def _r1_raw_hit(r) -> bool:
+            streak = int(r['_streak']) if pd.notna(r.get('_streak')) else 0
+            oc = _seal_fields(str(r['ts_code']))[0]
+            return is_r1(streak, bool(r.get('is_st')), oc, rules)
+        used |= {str(r['ts_code']) for _, r in lu.iterrows() if _r1_raw_hit(r)}
         r1_rows = []
         for _, r in lu.iterrows():
             ts_code = str(r['ts_code'])
