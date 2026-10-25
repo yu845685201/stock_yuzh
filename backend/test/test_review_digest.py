@@ -1,5 +1,6 @@
 """digest（图文并茂复盘解读 HTML）测试：SVG 工具确定性与装配完整性"""
 
+import re
 import sys
 from pathlib import Path
 
@@ -8,6 +9,8 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from src.review.digest import (
+    _fmt_premium,
+    _sentiment_pct_note,
     md_fragment_to_html,
     svg_dual_bars,
     svg_ladder,
@@ -33,6 +36,27 @@ def test_svg_helpers_deterministic_and_structure():
     assert '99.00' in spark
     bars = svg_vbars([('恒生指数', -2.6), ('道琼斯', None)])
     assert '-2.60%' in bars and '—' in bars
+
+
+def test_sentiment_pct_note_w1():
+    """W1：炸板率小数 ×100 无符号（0.2222→22.2%），None→'—'；同输入两次一致"""
+    senti = {'limit_up_count': 63, 'burst_rate': 0.2222, 'premium_mean': 3.38}
+    pcts = {'limit_up_count': {'pct': 88.0}, 'burst_rate': {'pct': 5.6},
+            'premium_mean': {'pct': 66.6}}
+    n1 = _sentiment_pct_note(senti, pcts)
+    assert n1 == _sentiment_pct_note(senti, pcts)
+    assert '炸板率 当日 22.2%（分位 5.6%）' in n1
+    assert '+0.2' not in n1 and '0.2222' not in n1
+    n2 = _sentiment_pct_note({'limit_up_count': 10, 'burst_rate': None,
+                              'premium_mean': None}, pcts)
+    assert '炸板率 当日 —（分位 5.6%）' in n2
+
+
+def test_ah_premium_cell_neutral_w8():
+    """W8：AH 溢价为价差读数——中性文本不挂红绿 class；None→'—'"""
+    assert _fmt_premium(160.123) == '+160.12'
+    assert _fmt_premium(-3.5) == '-3.50'
+    assert _fmt_premium(None) == '—'
 
 
 def test_md_fragment_subset():
@@ -78,6 +102,12 @@ def test_digest_build_byte_stable(tmp_path, monkeypatch):
     r2 = build_digest(cm, as_of='20260930', interpretation_path=str(note),
                       output_dir=str(tmp_path))
     assert h1 == Path(r2['html_path']).read_text(encoding='utf-8')
+    # W8：AH 溢价列（第 3 列价差读数）不挂红绿 class；diff 列（第 2 列）保留
+    m_ah = re.search(r'AH溢价%</th></tr></thead><tbody>(.*?)</tbody>', h1, re.S)
+    if m_ah:
+        for row in re.findall(r'<tr>.*?</tr>', m_ah.group(1), re.S):
+            cells = re.findall(r'<td>.*?</td>', row, re.S)
+            assert len(cells) == 3 and 'class=' not in cells[2]
     # 无解读文件 → 占位
     r3 = build_digest(cm, as_of='20260930', output_dir=str(tmp_path))
     h3 = Path(r3['html_path']).read_text(encoding='utf-8')

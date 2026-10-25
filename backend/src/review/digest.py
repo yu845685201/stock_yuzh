@@ -359,11 +359,32 @@ def _pct_cell(v: Any, signed: bool = True) -> str:
     return f'<span class="{cls}">{txt}</span>' if cls else txt
 
 
+def _fmt_premium(v: Any) -> str:
+    """AH 溢价读数（W8）：价差非涨跌方向，中性色不挂 up/down class。"""
+    return '—' if v is None else f'{float(v):+.2f}'
+
+
+def _sentiment_pct_note(senti: Dict[str, Any], pcts: Dict[str, Any]) -> str:
+    """§二 分位注释行（W1：炸板率小数 ×100 无符号；分位沿用聚合层小数→百分）。"""
+    def _p(key):
+        return _esc((pcts.get(key) or {}).get('pct'))
+
+    burst = senti.get('burst_rate')
+    burst_txt = '—' if burst is None else f'{float(burst) * 100:.1f}%'
+    return (f'涨停 {_esc(senti.get("limit_up_count"))} 家'
+            f'（250 日分位 {_p("limit_up_count")}%）/ '
+            f'炸板率 当日 {burst_txt}'
+            f'（分位 {_p("burst_rate")}%）/ '
+            f'溢价均值 {_fmt(senti.get("premium_mean"), 2, True)}%'
+            f'（分位 {_p("premium_mean")}%）；分位条为过去 250 交易日历史分位。')
+
+
 #: 口径字典条目（P1-2，评价-1）：术语|口径一句话定义；与报告/配置单一出处
 _GLOSSARY_ROWS = [
     ('涨停家数', '收盘价≥涨停价的非 ST 家数（精确涨停价 = round(昨收×(1+板块涨幅上限),2)）'),
     ('炸板率', '炸板家数 /（封板家数 + 炸板家数）；越高=封板资金越弱'),
-    ('溢价均值', '昨日涨停股今日平均涨幅（开盘/收盘口径见情绪章图注）——接力情绪核心指标'),
+    ('溢价均值', '昨日涨停股今日平均涨幅（收盘口径：今日涨跌幅=今收/昨收−1，前复权）'
+                 '——接力情绪核心指标'),
     ('score（周期走向）', '近 10 个交易日"涨停家数/高度/炸板率(反向)"归一均值——窗口相对读数，'
                           '样本小仅作方向参考，无绝对含义'),
     ('首封 / 开板 / 一次未炸', '封板时段五桶（9:25 集合竞价/9:30-10:00/10:00-11:00/'
@@ -662,14 +683,7 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts.append('<div class="chart">' + svg_ladder(ladder) + '</div>')
     parts.append('<div class="chart">' + svg_position_bars(pct_items) + '</div>')
     # P1-3 图注统一（评价-1）：分位类图注统一"当日值 X（250 日分位 Y%）"格式
-    def _p(key):
-        return _esc((pcts.get(key) or {}).get('pct'))
-    parts.append(f'<p class="note">涨停 {_esc(senti.get("limit_up_count"))} 家'
-                 f'（250 日分位 {_p("limit_up_count")}%）/ '
-                 f'炸板率 当日 {_fmt(senti.get("burst_rate"), 1, True)}%'
-                 f'（分位 {_p("burst_rate")}%）/ '
-                 f'溢价均值 {_fmt(senti.get("premium_mean"), 2, True)}%'
-                 f'（分位 {_p("premium_mean")}%）；分位条为过去 250 交易日历史分位。</p>')
+    parts.append(f'<p class="note">{_sentiment_pct_note(senti, pcts)}</p>')
 
     parts.append('<h2>三、板块主线（等权口径）</h2>')
     if ind_chart:
@@ -699,12 +713,13 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                           key=lambda r: -abs(r['premium']))[:5]
         prem_rows = ''.join(
             f'<tr><td>{_esc(r["h_name"])}</td><td>{_pct_cell(r.get("diff"))}</td>'
-            f'<td>{_pct_cell(r.get("premium"))}</td></tr>' for r in top_prem)
+            f'<td>{_fmt_premium(r.get("premium"))}</td></tr>' for r in top_prem)
         parts.append(f'<table><thead><tr><th>H股</th><th>AH 5日差(pct)</th>'
                      f'<th>AH溢价%</th></tr></thead><tbody>{prem_rows}</tbody></table>')
         parts.append('<p class="note">差值=A 侧−H 侧 5 日累计（正=A 强于 H）；溢价='
                      'A 收盘/(H 收盘×港元兑人民币快照)−1。两侧复权基准独立滚动、时点错位，'
-                     '只作观察不作结论；"未对齐/无A股映射"行不参与。</p>')
+                     '只作观察不作结论；"未对齐/无A股映射"行不参与。溢价为价差读数非涨跌，'
+                     '不作红绿标注。</p>')
 
     # P1-8 缠论背驰候选（digest 固定渲染位，五节之后、解读区之前）：
     # 复用 agg['chan']（与 md 报告第六章同一聚合数据，不二次计算）

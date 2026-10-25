@@ -95,6 +95,16 @@ def _values_match(mine: Any, theirs: Any) -> bool:
         return str(mine) == str(theirs)
 
 
+def _disp_rate(v: Any, nd: int = 1) -> str:
+    """小数口径比率（如炸板率 0.2222）→ 百分数字符串（W1）；None→'—'（不带 %）。"""
+    return f'{float(v):.{nd}%}' if v is not None else '—'
+
+
+def _disp_pct(v: Any, nd: int = 2) -> str:
+    """已为百分数值的指标（如溢价均值 3.38）→ 带 % 尾字符串；None→'—'。"""
+    return f'{float(v):.{nd}f}%' if v is not None else '—'
+
+
 class _ConfigShim:
     """dict 配置 → ConfigManager 形态（assemble_valuation 只需 load_config）。"""
 
@@ -1255,16 +1265,16 @@ class ReviewAggregator:
                 {'name': '高潮',
                  'expr': f"高度≥{climax.get('max_streak_gte')} 且 "
                          f"溢价≥{climax.get('premium_mean_gte')}%",
-                 'values': f"高度{max_streak} / 溢价{premium_mean}%",
+                 'values': f"高度{max_streak} / 溢价{_disp_pct(premium_mean)}",
                  'hit': False},
                 {'name': '冰点',
                  'expr': f"高度≤{ice.get('max_streak_lte')} 或 "
                          f"炸板率≥{ice.get('burst_rate_gte')}",
-                 'values': f"高度{max_streak} / 炸板率{burst_rate}",
+                 'values': f"高度{max_streak} / 炸板率{_disp_rate(burst_rate)}",
                  'hit': False},
                 {'name': '退潮',
                  'expr': f"溢价均值≤{ebb.get('premium_mean_lte')}%",
-                 'values': f"溢价均值{premium_mean}%",
+                 'values': f"溢价均值{_disp_pct(premium_mean)}",
                  'hit': False},
                 {'name': '高潮·第二证据（独立）',
                  'expr': f"涨跌家数比≥{br_gte}（市场宽度，独立于涨停 cohort；"
@@ -1277,7 +1287,7 @@ class ReviewAggregator:
             if (max_streak >= climax.get('max_streak_gte', 99)
                     and (premium_mean is not None and premium_mean >= climax.get('premium_mean_gte', 99))):
                 cycle, basis = '高潮', [f"高度{max_streak}≥{climax.get('max_streak_gte')}",
-                                        f"溢价{premium_mean}≥{climax.get('premium_mean_gte')}",
+                                        f"溢价{_disp_pct(premium_mean)}≥{climax.get('premium_mean_gte')}%",
                                         f"第二证据涨跌家数比"
                                         f"{breadth_ratio if breadth_ratio is not None else '—'}"
                                         f"{'确认' if criteria[3]['hit'] else '未确认（分歧，人工注意）'}"]
@@ -1285,10 +1295,10 @@ class ReviewAggregator:
             elif (max_streak <= ice.get('max_streak_lte', -1)
                     or (burst_rate is not None and burst_rate >= ice.get('burst_rate_gte', 99))):
                 cycle, basis = '冰点', [f"高度{max_streak}≤{ice.get('max_streak_lte')}"
-                                        f" 或 炸板率{burst_rate}≥{ice.get('burst_rate_gte')}"]
+                                        f" 或 炸板率{_disp_rate(burst_rate)}≥{ice.get('burst_rate_gte')}%"]
                 criteria[1]['hit'] = True
             elif premium_mean is not None and premium_mean <= ebb.get('premium_mean_lte', 999):
-                cycle, basis = '退潮', [f"溢价均值{premium_mean}≤{ebb.get('premium_mean_lte')}"]
+                cycle, basis = '退潮', [f"溢价均值{_disp_pct(premium_mean)}≤{ebb.get('premium_mean_lte')}%"]
                 criteria[2]['hit'] = True
             else:
                 cycle, basis = '回暖/震荡', ['未命中冰点/高潮/退潮判据']

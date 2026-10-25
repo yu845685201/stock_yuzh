@@ -77,6 +77,21 @@ class TestSentimentCriteria:
             {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5}, '20261023')
         assert out3['criteria'][3]['hit'] is False and '比—' in out3['criteria'][3]['values']
 
+    def test_criteria_values_pct_and_none_safe_w1(self):
+        """W1：values/basis 炸板率/溢价统一百分数显示；None→'—' 不印字面 None"""
+        out = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': 0.2222, 'premium_mean': 3.38}, '20261023')
+        assert '炸板率22.2%' in out['criteria'][1]['values']
+        assert '炸板率0.2' not in out['criteria'][1]['values']
+        out_ice = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 1, 'burst_rate': 0.55, 'premium_mean': 3.38}, '20261023')
+        assert out_ice['position'] == '冰点'
+        assert '炸板率55.0%≥0.5%' in ''.join(out_ice['basis'])
+        out_none = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': None, 'premium_mean': None}, '20261023')
+        vals = ' | '.join(c['values'] for c in out_none['criteria'])
+        assert '溢价—' in vals and '炸板率—' in vals and 'None' not in vals
+
     def test_trial_flag_two_states(self):
         """P1-4：trial 键随 sentiment_calibrated 开关两态（水印消费恢复）"""
         assert _agg_cfg(False)._sentiment_cycle(
