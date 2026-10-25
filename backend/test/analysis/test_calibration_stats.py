@@ -110,3 +110,86 @@ class TestIncrementalPower:
         assert inc['in_core']['ge2']['n'] == 1 and inc['in_core']['lt2']['n'] == 1
         assert inc['out_core']['ge1.5']['n'] == 1
         assert inc['out_core']['baseline']['n'] == 3
+
+
+# ---------------------------------------------------------------- A4 A50
+
+class TestAlignOverseas:
+    def test_asof_prev_day_and_forward_fill(self):
+        """≤D−1 规则：D 自身 bar 对 D 开盘不可用；ov 休市日前向填充（周一用周五 bar）"""
+        sh = _sh([('20260105', 10.0, 10.0, 10.0),
+                  ('20260106', 10.2, 10.0, 10.0),
+                  ('20260107', 9.8, 10.0, 10.0)])
+        ov = pd.DataFrame([('20260103', 100.0), ('20260105', 103.0)],
+                          columns=['trade_date', 'close'])
+        mg = cals.align_overseas(sh, ov)
+        # 0105: c=last≤0104 → 0103 bar=100（0105 bar 周六凌晨才收，不可用）；首日剔除
+        # 0106: c=0105 bar=103 → move +3%；gap=+2%
+        # 0107: c=last≤0106 → 0105 bar 前向填充=103 → move 0；gap=−2%
+        assert list(mg['trade_date']) == ['20260106', '20260107']
+        assert mg['ov_move'].iloc[0] == 3.0 and mg['open_gap'].iloc[0] == 2.0
+        assert mg['ov_move'].iloc[1] == 0.0 and mg['open_gap'].iloc[1] == -2.0
+
+    def test_first_day_and_bad_preclose_dropped(self):
+        sh = _sh([('20260105', 10.0, 10.0, 10.0),
+                  ('20260106', 10.2, 0.0, 10.0)])   # preclose=0 → gap 不可算
+        ov = pd.DataFrame([('20260103', 100.0), ('20260105', 101.0)],
+                          columns=['trade_date', 'close'])
+        mg = cals.align_overseas(sh, ov)
+        # 0105: c=last≤0104 → 0103 bar=100（首日剔除）；0106: c=0105 bar=101 → +1%
+        assert list(mg['trade_date']) == ['20260106']
+        assert mg['ov_move'].iloc[0] == 1.0 and pd.isna(mg['open_gap'].iloc[0])
+
+
+class TestConsistency:
+    def test_zero_excluded_and_rate_exact(self):
+        mg = pd.DataFrame({'ov_move': [3.0, -2.0, 1.0, -1.0, 0.0],
+                           'open_gap': [2.0, -1.0, -0.5, 0.5, 1.0]})
+        c = cals.consistency(mg)
+        # 同向：+3/+2 ✓、−2/−1 ✓、+1/−0.5 ✗、−1/+0.5 ✗；零值行剔除
+        assert c['n'] == 4 and c['agree_rate'] == 50.0 and c['zero_excluded'] == 1
+
+    def test_empty(self):
+        mg = pd.DataFrame({'ov_move': [], 'open_gap': []})
+        assert cals.consistency(mg)['agree_rate'] is None
+
+
+class TestTriggerAvailability:
+    def test_cross_freq_and_p1_p3_hits(self):
+        mondays = ['20260105', '20260112', '20260119', '20260126', '20260202']
+        mg = pd.DataFrame({'trade_date': mondays,
+                           'ov_move': [-2.0, 1.6, 0.5, -0.9, 1.8],
+                           'open_gap': [-1.0, 2.0, 0.1, 0.3, -0.2]})
+        out = cals.trigger_availability(mg, thresholds=(1.0, 1.5), weekday=0)
+        by_t = {o['threshold']: o for o in out}
+        assert by_t[1.0]['anchor_days'] == 5 and by_t[1.0]['cross_days'] == 3
+        assert by_t[1.0]['cross_pct'] == 60.0
+        assert by_t[1.0]['p1_n'] == 1 and by_t[1.0]['p1_open_down'] == 1
+        assert by_t[1.0]['p3_n'] == 2 and by_t[1.0]['p3_open_up'] == 1  # 1.8→−0.2 未兑现
+        assert by_t[1.5]['cross_days'] == 3 and by_t[1.5]['cross_pct'] == 60.0
+
+    def test_weekday_filter(self):
+        mg = pd.DataFrame({'trade_date': ['20260106', '20260105'],   # 周二/周一
+                           'ov_move': [9.0, 9.0], 'open_gap': [1.0, 1.0]})
+        out = cals.trigger_availability(mg, thresholds=(1.0,), weekday=0)
+        assert out[0]['anchor_days'] == 1
+
+
+class TestA50GateReads:
+    def test_gates_pass_and_pending(self):
+        g = cals.a50_gate_reads({'agree_rate': 62.0}, {'cross_pct': 12.0}, bars=2593)
+        assert g['sample_sufficient'] is True
+        assert g['gate1_same_direction']['pass'] and g['gate2_cross_freq']['pass']
+        assert g['gate3_forward_cases']['pass'] is None      # 前向人工登记
+
+    def test_insufficient_sample_no_pass(self):
+        """样本不足不给 pass——即使读数达标（防小样本误开门）"""
+        g = cals.a50_gate_reads({'agree_rate': 70.0}, {'cross_pct': 15.0}, bars=100)
+        assert g['sample_sufficient'] is False
+        assert g['gate1_same_direction']['pass'] is False
+        assert g['gate2_cross_freq']['pass'] is False
+
+    def test_threshold_fail(self):
+        g = cals.a50_gate_reads({'agree_rate': 55.0}, {'cross_pct': 8.0}, bars=2593)
+        assert g['gate1_same_direction']['pass'] is False
+        assert g['gate2_cross_freq']['pass'] is False
