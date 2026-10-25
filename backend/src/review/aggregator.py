@@ -1266,23 +1266,24 @@ class ReviewAggregator:
                  'expr': f"高度≥{climax.get('max_streak_gte')} 且 "
                          f"溢价≥{climax.get('premium_mean_gte')}%",
                  'values': f"高度{max_streak} / 溢价{_disp_pct(premium_mean)}",
-                 'hit': False},
+                 'hit': False, 'role': 'position'},
                 {'name': '冰点',
                  'expr': f"高度≤{ice.get('max_streak_lte')} 或 "
                          f"炸板率≥{ice.get('burst_rate_gte')}",
                  'values': f"高度{max_streak} / 炸板率{_disp_rate(burst_rate)}",
-                 'hit': False},
+                 'hit': False, 'role': 'position'},
                 {'name': '退潮',
                  'expr': f"溢价均值≤{ebb.get('premium_mean_lte')}%",
                  'values': f"溢价均值{_disp_pct(premium_mean)}",
-                 'hit': False},
+                 'hit': False, 'role': 'position'},
                 {'name': '高潮·第二证据（独立）',
                  'expr': f"涨跌家数比≥{br_gte}（市场宽度，独立于涨停 cohort；"
                          "初版参考阈值未校准，仅并列披露不参与定位，P4-5）",
                  'values': (f"涨{up_count if up_count is not None else '—'} / "
                             f"跌{down_count if down_count is not None else '—'} / "
                             f"比{breadth_ratio if breadth_ratio is not None else '—'}"),
-                 'hit': bool(breadth_ratio is not None and breadth_ratio >= br_gte)},
+                 'hit': bool(breadth_ratio is not None and breadth_ratio >= br_gte),
+                 'role': 'reference'},
             ]
             if (max_streak >= climax.get('max_streak_gte', 99)
                     and (premium_mean is not None and premium_mean >= climax.get('premium_mean_gte', 99))):

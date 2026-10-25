@@ -107,6 +107,32 @@ def svg_dual_bars(items: List[Tuple[str, Optional[float]]], width: int = 640,
     return ''.join(parts)
 
 
+def svg_count_bars(items: List[Tuple[str, Optional[int]]], width: int = 640) -> str:
+    """计数横条（单色，W4 封板五桶）：items=[(名称, 计数)]，None→'—'。"""
+    row_h, label_w, val_w = 26, 70, 64
+    vals = [float(v) for _, v in items if v is not None]
+    peak = max((max(vals), 1e-9))
+    h = row_h * max(len(items), 1) + 8
+    span = width - label_w - val_w
+    parts = [_svg_open(width, h)]
+    for i, (name, v) in enumerate(items):
+        y = i * row_h + 5
+        parts.append(f'<text x="{label_w - 8}" y="{y + 14}" text-anchor="end" '
+                     f'fill="#1f2328">{_esc(name)}</text>')
+        if v is None:
+            parts.append(f'<text x="{label_w}" y="{y + 14}" fill="#8a929c">—</text>')
+            continue
+        bw = max(float(v) / peak * span, 1.5)
+        parts.append(f'<rect x="{label_w}" y="{y}" width="{bw:.1f}" height="16" '
+                     f'rx="2" fill="#57606a" opacity="0.85"/>')
+        parts.append(f'<text x="{label_w + bw + 5:.1f}" y="{y + 13}" text-anchor="start" '
+                     f'fill="#1f2328">{v} 家</text>')
+    parts.append(f'<line x1="{label_w}" y1="2" x2="{label_w}" y2="{h - 4}" '
+                 f'stroke="{C_AXIS}" stroke-width="1"/>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
 def svg_position_bars(items: List[Tuple[str, Optional[float]]], width: int = 640,
                       unit: str = '%') -> str:
     """位置条（0~100）：items=[(名称, 百分位)]，游标 + 底槽（底部区/顶部区参考线）。"""
@@ -379,6 +405,62 @@ def _sentiment_pct_note(senti: Dict[str, Any], pcts: Dict[str, Any]) -> str:
             f'（分位 {_p("premium_mean")}%）；分位条为过去 250 交易日历史分位。')
 
 
+#: 封板五桶短名（W4，渲染层私有）：键=聚合层 bucket 标签全文（aggregator bounds），
+#: 未命中回退原标签直显
+_SEAL_BUCKET_SHORT = {
+    '09:25-09:35': '竞价',
+    '09:35-10:00': '早盘',
+    '10:00-11:30': '盘中',
+    '11:30-14:00': '午后',
+    '14:00-15:00': '尾盘',
+}
+
+
+def render_seal_quality(senti: Dict[str, Any]) -> Optional[str]:
+    """封板质量块（W4）：五桶计数横条 + 读数注；seal_dist 缺失/无桶→None。"""
+    seal = senti.get('seal_dist') or {}
+    buckets = seal.get('buckets') or []
+    if not buckets:
+        return None
+    items = [(_SEAL_BUCKET_SHORT.get(b.get('bucket'), b.get('bucket')), b.get('count'))
+             for b in buckets]
+    parts = ['<div class="chart">' + svg_count_bars(items) + '</div>']
+    reads = []
+    if seal.get('never_broken_rate') is not None:
+        reads.append(f'一次未炸 {seal["never_broken_rate"]:.0%}')
+    if seal.get('late_seal_rate') is not None:
+        reads.append(f'14:00 后首封 {seal["late_seal_rate"]:.0%}')
+    if seal.get('limit_up_count') is not None:
+        reads.append(f'涨停 {seal["limit_up_count"]} 家（覆盖 {_esc(seal.get("covered"))}）')
+    if reads:
+        parts.append(f'<p class="note">{" · ".join(reads)}</p>')
+    return ''.join(parts)
+
+
+def render_promotion(senti: Dict[str, Any]) -> Optional[str]:
+    """晋级率小表（W4）：档位|昨日家数|今日家数|晋级率，≤6 行；空→None。"""
+    promotion = senti.get('promotion') or {}
+    if not promotion:
+        return None
+    rows = []
+    for n, v in sorted(promotion.items(), reverse=True)[:6]:
+        rate = v.get('rate')
+        rate_txt = f'{rate:.0%}' if rate is not None else '—（昨日基数为 0）'
+        rows.append(f'<tr><td>{n - 1}→{n} 板</td><td>{_esc(v.get("prev"))}</td>'
+                    f'<td>{_esc(v.get("today"))}</td><td>{_esc(rate_txt)}</td></tr>')
+    return ('<table><thead><tr><th>晋级档位</th><th>昨日家数</th><th>今日家数</th>'
+            '<th>晋级率</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table>')
+
+
+def _crit_hit_cell(c: Dict[str, Any]) -> str:
+    """W5：参考判据（role=reference）命中列灰字 ✓（参考）；缺 role 视为定位判据。"""
+    if not c.get('hit'):
+        return '否'
+    if c.get('role') == 'reference':
+        return '<span class="note">✓（参考）</span>'
+    return '✓ 是'
+
+
 #: 口径字典条目（P1-2，评价-1）：术语|口径一句话定义；与报告/配置单一出处
 _GLOSSARY_ROWS = [
     ('涨停家数', '收盘价≥涨停价的非 ST 家数（精确涨停价 = round(昨收×(1+板块涨幅上限),2)）'),
@@ -387,8 +469,9 @@ _GLOSSARY_ROWS = [
                  '——接力情绪核心指标'),
     ('score（周期走向）', '近 10 个交易日"涨停家数/高度/炸板率(反向)"归一均值——窗口相对读数，'
                           '样本小仅作方向参考，无绝对含义'),
-    ('首封 / 开板 / 一次未炸', '封板时段五桶（9:25 集合竞价/9:30-10:00/10:00-11:00/'
-                               '13:00-14:00/14:00 后）；开板次数=当日开板回封次数；'
+    ('首封 / 开板 / 一次未炸', '封板时段五桶（09:25-09:35 竞价/09:35-10:00 早盘/'
+                               '10:00-11:30 盘中/11:30-14:00 午后/14:00-15:00 尾盘）；'
+                               '开板次数=当日开板回封次数；'
                                '一次未炸=全天无开板（封板质量指标，分笔口径）'),
     ('翻红 / 炸板修复（题材反馈）', '昨日炸板股今日收红占比 / 昨日炸板股今日平均涨幅'
                                     '（板块主线章题材反馈指标）'),
@@ -563,6 +646,7 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     env = agg['market_env'].get('data') if agg.get('market_env') else {}
     senti = agg['sentiment'].get('data') if agg.get('sentiment') else {}
     sector = agg['sector'].get('data') if agg.get('sector') else {}
+    money_effect = agg['money_effect'].get('data') if agg.get('money_effect') else {}
     prev_date = agg.get('prev_date')
 
     # ---- 图表数据 ----
@@ -662,10 +746,11 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     if criteria:
         crit_rows = ''.join(
             f'<tr><td>{_esc(c["name"])}</td><td>{_esc(c["expr"])}</td>'
-            f'<td>{_esc(c["values"])}</td><td>{_esc("✓ 是" if c.get("hit") else "否")}</td></tr>'
+            f'<td>{_esc(c["values"])}</td><td>{_crit_hit_cell(c)}</td></tr>'
             for c in criteria)
         parts.append(f'<table><thead><tr><th>判据</th><th>阈值</th><th>当日值</th>'
                      f'<th>命中</th></tr></thead><tbody>{crit_rows}</tbody></table>')
+        parts.append('<p class="note">标注（参考）的判据不参与定位判定。</p>')
     parts.append(f'<p class="note">分位标定四态：{_esc(cycle.get("quantile_position", "—"))}'
                  f'（{"；".join(_esc(b) for b in (cycle.get("quantile_basis") or [])) or "—"}）'
                  + (f'<br>⚠ 规则四态与分位四态分歧（{_esc(cycle.get("position"))} vs '
@@ -684,12 +769,41 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts.append('<div class="chart">' + svg_position_bars(pct_items) + '</div>')
     # P1-3 图注统一（评价-1）：分位类图注统一"当日值 X（250 日分位 Y%）"格式
     parts.append(f'<p class="note">{_sentiment_pct_note(senti, pcts)}</p>')
+    # W4 图文自足：封板质量与晋级块（零新计算，渲染已聚合数据；缺数据逐块降级不硬造）
+    parts.append('<h3>封板质量与晋级</h3>')
+    parts.append(render_seal_quality(senti)
+                 or '<p class="note">封板分笔统计无当日行（limit_seal_stats_daily），'
+                    '五桶图不渲染。</p>')
+    parts.append(render_promotion(senti)
+                 or '<p class="note">昨日无 (N-1) 板基数，晋级率表不渲染。</p>')
+    cp = (money_effect or {}).get('consec_premium')
+    if cp and cp.get('count'):
+        cp_red = f"{cp['red_rate']:.0%}" if cp.get('red_rate') is not None else '—'
+        parts.append('<p class="note">连板溢价：昨日 2 板及以上 '
+                     f'{_esc(cp.get("count"))} 只（成交 {_esc(cp.get("traded"))}）：'
+                     f'均值 {_fmt(cp.get("mean"), 2, True)}% / '
+                     f'中位 {_fmt(cp.get("median"), 2, True)}% / 翻红 {cp_red}'
+                     '。明细见六维§二（赚钱效应/反馈矩阵全量）。</p>')
 
     parts.append('<h2>三、板块主线（等权口径）</h2>')
     if ind_chart:
         parts.append('<div class="chart">' + svg_dual_bars(ind_chart, unit='%') + '</div>')
         parts.append('<p class="note">行业等权涨跌幅（今日 Top8 + Bottom4）；两套分类体系'
                      '（sw/sina）交叉结果仅供观察。</p>')
+    # W4 图文自足：聚集头名与题材反馈行注（渲染已聚合数据）
+    clusters3 = (sector.get('limit_up_clusters') or [])[:3]
+    if clusters3:
+        cl_txt = ' / '.join(f'{_esc(c.get("concept"))} {_esc(c.get("count"))} 家'
+                            for c in clusters3)
+        parts.append(f'<p class="note">涨停聚集 Top3：{cl_txt}'
+                     '（sina_gn 概念口径，全量见六维§三）。</p>')
+    br = (money_effect or {}).get('burst_recovery')
+    if br and br.get('count'):
+        br_red = f"{br['red_rate']:.0%}" if br.get('red_rate') is not None else '—'
+        parts.append('<p class="note">题材反馈：昨日炸板 '
+                     f'{_esc(br.get("count"))} 只（成交 {_esc(br.get("traded"))}）今日均值 '
+                     f'{_fmt(br.get("mean"), 2, True)}% / 翻红 {br_red}'
+                     '（炸板修复，明细见六维§二）。</p>')
 
     parts.append('<h2>四、外围指数（市场自身日历）</h2>')
     if ov:

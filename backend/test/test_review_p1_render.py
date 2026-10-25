@@ -92,6 +92,13 @@ class TestSentimentCriteria:
         vals = ' | '.join(c['values'] for c in out_none['criteria'])
         assert '溢价—' in vals and '炸板率—' in vals and 'None' not in vals
 
+    def test_criteria_role_w5(self):
+        """W5：前三行 role=position、第二证据 role=reference（digest 据此分款渲染）"""
+        out = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': 0.22, 'premium_mean': 3.38}, '20261023')
+        assert [c.get('role') for c in out['criteria']] == [
+            'position', 'position', 'position', 'reference']
+
     def test_trial_flag_two_states(self):
         """P1-4：trial 键随 sentiment_calibrated 开关两态（水印消费恢复）"""
         assert _agg_cfg(False)._sentiment_cycle(

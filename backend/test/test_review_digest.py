@@ -9,9 +9,13 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from src.review.digest import (
+    _crit_hit_cell,
     _fmt_premium,
     _sentiment_pct_note,
     md_fragment_to_html,
+    render_promotion,
+    render_seal_quality,
+    svg_count_bars,
     svg_dual_bars,
     svg_ladder,
     svg_position_bars,
@@ -57,6 +61,60 @@ def test_ah_premium_cell_neutral_w8():
     assert _fmt_premium(160.123) == '+160.12'
     assert _fmt_premium(-3.5) == '-3.50'
     assert _fmt_premium(None) == '—'
+
+
+def test_svg_count_bars_w4():
+    """W4：计数横条确定性、单色 #57606a、None→'—'、无红绿 class"""
+    items = [('竞价', 5), ('早盘', 10), ('尾盘', None)]
+    s1 = svg_count_bars(items)
+    assert s1 == svg_count_bars(items)
+    assert '57606a' in s1 and '10 家' in s1 and '—' in s1 and 'class=' not in s1
+
+
+def test_render_seal_quality_w4():
+    """W4：五桶短名映射 + 读数注；seal_dist 缺失→None；未知标签回退直显"""
+    senti = {'seal_dist': {
+        'buckets': [{'bucket': '09:25-09:35', 'count': 3},
+                    {'bucket': '09:35-10:00', 'count': 8},
+                    {'bucket': '10:00-11:30', 'count': 15},
+                    {'bucket': '11:30-14:00', 'count': 27},
+                    {'bucket': '14:00-15:00', 'count': 24}],
+        'limit_up_count': 77, 'covered': 77,
+        'never_broken_rate': 0.49, 'late_seal_rate': 0.29}}
+    html = render_seal_quality(senti)
+    assert html is not None
+    for short in ('竞价', '早盘', '盘中', '午后', '尾盘'):
+        assert short in html, short
+    assert '一次未炸 49%' in html and '14:00 后首封 29%' in html
+    assert '涨停 77 家（覆盖 77）' in html
+    assert render_seal_quality({'seal_dist': None}) is None
+    assert render_seal_quality({'seal_dist': {'buckets': []}}) is None
+    # 未知桶标签回退原标签直显（渲染层兜底，不硬造短名）
+    fallback = render_seal_quality(
+        {'seal_dist': {'buckets': [{'bucket': '未知时段', 'count': 1}]}})
+    assert '未知时段' in fallback
+
+
+def test_render_promotion_w4():
+    """W4：晋级率小表——档位降序、昨日|今日列序、None 率→基数为 0；空→None"""
+    senti = {'promotion': {2: {'today': 8, 'prev': 21, 'rate': 0.38},
+                           3: {'today': 1, 'prev': 5, 'rate': 0.2},
+                           4: {'today': 0, 'prev': 2, 'rate': None}}}
+    html = render_promotion(senti)
+    assert html is not None
+    assert '<th>晋级档位</th><th>昨日家数</th><th>今日家数</th><th>晋级率</th>' in html
+    assert '—（昨日基数为 0）' in html
+    assert (html.index('3→4 板') < html.index('2→3 板') < html.index('1→2 板'))
+    assert render_promotion({'promotion': {}}) is None
+
+
+def test_crit_hit_cell_w5():
+    """W5：reference 命中→灰字 ✓（参考）；缺 role 向后兼容按定位判据"""
+    assert _crit_hit_cell({'hit': True, 'role': 'position'}) == '✓ 是'
+    assert (_crit_hit_cell({'hit': True, 'role': 'reference'})
+            == '<span class="note">✓（参考）</span>')
+    assert _crit_hit_cell({'hit': True}) == '✓ 是'
+    assert _crit_hit_cell({'hit': False, 'role': 'reference'}) == '否'
 
 
 def test_md_fragment_subset():
@@ -108,6 +166,10 @@ def test_digest_build_byte_stable(tmp_path, monkeypatch):
         for row in re.findall(r'<tr>.*?</tr>', m_ah.group(1), re.S):
             cells = re.findall(r'<td>.*?</td>', row, re.S)
             assert len(cells) == 3 and 'class=' not in cells[2]
+    # W4/W5：§二 封板质量与晋级块恒装配；判据参考行表下注恒在（criteria 非空时）
+    assert '封板质量与晋级' in h1
+    if '当日值' in h1:
+        assert '标注（参考）的判据不参与定位判定。' in h1
     # 无解读文件 → 占位
     r3 = build_digest(cm, as_of='20260930', output_dir=str(tmp_path))
     h3 = Path(r3['html_path']).read_text(encoding='utf-8')
