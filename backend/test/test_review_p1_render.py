@@ -226,7 +226,7 @@ class TestChanDigestSection:
         assert '全链存疑股票 1194 只' in html
         assert '|Σhist₂|/|Σhist₁| &lt; 1 即背驰' in html
         assert '短笔柱面积' in html
-        assert '+6.8%' in html            # HIST_NOTE 随行
+        assert '+6.79%' in html          # HIST_NOTE 随行（2026-10-25 门控保留样本修订）
 
     def test_industry_column_from_map(self):
         html = _render_chan_digest(self._chan_agg(),
