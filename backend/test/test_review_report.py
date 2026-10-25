@@ -51,6 +51,48 @@ class TestRenderer:
         assert 'nth-child(even)' in html  # 斑马纹 CSS 内联
         assert html.startswith('<!DOCTYPE html>')
 
+    # ------------------------------------------------------------ V4.4 T1/T3
+
+    def test_html_bold_all_block_types(self):
+        """V4.4 T1：heading/para/bullets/note/表格五类文本 `**x**` → <strong>"""
+        blocks = [
+            {'type': 'heading', 'level': 2, 'text': '**加粗标题**'},
+            {'type': 'para', 'text': '前文**加粗段落**后文'},
+            {'type': 'bullets', 'items': ['**加粗项**', '普通项']},
+            {'type': 'table', 'headers': ['**加粗列**'],
+             'rows': [['**加粗格**']]},
+            {'type': 'note', 'text': '口径：**收盘确认**加粗'},
+        ]
+        html = blocks_to_html('标题', blocks)
+        assert '<h2><strong>加粗标题</strong></h2>' in html
+        assert '<p>前文<strong>加粗段落</strong>后文</p>' in html
+        assert '<li><strong>加粗项</strong></li>' in html
+        assert '<th><strong>加粗列</strong></th>' in html
+        assert '<td><strong>加粗格</strong></td>' in html
+        assert '<blockquote>口径：<strong>收盘确认</strong>加粗</blockquote>' in html
+
+    def test_html_bold_escape_coexist(self):
+        """转义共存：bold 内含 HTML 特殊字符 → 转义不丢、bold 生效"""
+        html = blocks_to_html('t', [{'type': 'note',
+                                     'text': '**a<b>&c**'}])
+        assert '<blockquote><strong>a&lt;b&gt;&amp;c</strong></blockquote>' in html
+
+    def test_html_lone_bold_untouched(self):
+        """孤立 `**`（不成对）原样保留，不误伤乘号类注释"""
+        html = blocks_to_html('t', [{'type': 'para',
+                                     'text': '2 ** 3 = 8 与 ** 前缀'}])
+        assert '<p>2 ** 3 = 8 与 ** 前缀</p>' in html
+        assert '<strong>' not in html
+
+    def test_digest_inline_uses_shared_md_bold(self):
+        """digest._inline 薄封装对拍：输出与共享实现逐字符一致（回归锚）"""
+        from src.review import digest
+        from src.review.renderer import md_bold
+        for text in ('**成交 84 家**', '无标注文本', '孤立 ** 与 **x** 混排',
+                     '**a<b>&c**'):
+            assert digest._inline(text) == md_bold(digest._esc(text))
+
+
     def test_unknown_block_raises(self):
         with pytest.raises(ValueError):
             blocks_to_markdown([{'type': 'unknown'}])

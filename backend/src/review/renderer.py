@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Any, Dict, List
 
 
@@ -68,6 +69,23 @@ code { background: #f6f8fa; padding: 1px 5px; border-radius: 4px; }
 """
 
 
+#: inline bold 单一出处（V4.4 T1）：六维 html 与 digest note 装配共用，
+#: 防"同一语义两处实现"再漂移（20261023 评价发现六维侧缺席——note 块
+#: 字面 `**` 泄漏，两句核心风险声明未加粗）。
+#: 内容首尾须非空白（CommonMark flanking 规则）——否则同一行内两个孤立
+#: `**` 会跨文本误配对（"2 ** 3 = 8 与 ** 前缀"被误转 strong）
+_MD_BOLD = re.compile(r'\*\*(\S(?:.*?\S)?)\*\*')
+
+
+def md_bold(text: str) -> str:
+    """`**x**` → `<strong>x</strong>`；不成对/空白贴边的 `**` 原样保留。
+
+    只做替换不做转义——转义语义两侧不同（六维 `_render_block` 与 digest
+    `_inline` 各自先 escape 再调本函数，顺序与 digest 既有行为一致）。
+    """
+    return _MD_BOLD.sub(r'<strong>\1</strong>', text)
+
+
 def blocks_to_html(title: str, blocks: List[Dict[str, Any]]) -> str:
     """块序列 → 独立 HTML（内联 CSS，零外部依赖）"""
     parts = [_render_block(b) for b in blocks]
@@ -82,22 +100,26 @@ def _render_block(b: Dict[str, Any]) -> str:
     t = b['type']
     if t == 'heading':
         level = min(int(b.get('level', 3)), 6)
-        return f'<h{level}>{html.escape(b["text"])}</h{level}>'
+        return f'<h{level}>{md_bold(html.escape(b["text"]))}</h{level}>'
     if t == 'para':
-        return f'<p>{html.escape(b["text"])}</p>'
+        return f'<p>{md_bold(html.escape(b["text"]))}</p>'
     if t == 'bullets':
-        lis = ''.join(f'<li>{html.escape(i)}</li>' for i in b['items'])
+        lis = ''.join(f'<li>{md_bold(html.escape(i))}</li>' for i in b['items'])
         return f'<ul>{lis}</ul>'
     if t == 'table':
-        heads = ''.join(f'<th>{html.escape(str(h))}</th>' for h in b['headers'])
+        # V4.4 T1：th/td 同套 md_bold（先转义后替换）——单元格 bold 为对称
+        # 防御路径（digest 表格单元格同此行为），当前生产单元格暂无 bold 用法
+        heads = ''.join(f'<th>{md_bold(html.escape(str(h)))}</th>'
+                        for h in b['headers'])
         body_rows = []
         for row in b['rows']:
-            tds = ''.join(f'<td>{html.escape(_cell(v))}</td>' for v in row)
+            tds = ''.join(f'<td>{md_bold(html.escape(_cell(v)))}</td>'
+                          for v in row)
             body_rows.append(f'<tr>{tds}</tr>')
         return (f'<table><thead><tr>{heads}</tr></thead>'
                 f'<tbody>{"".join(body_rows)}</tbody></table>')
     if t == 'note':
-        return f'<blockquote>{html.escape(b["text"])}</blockquote>'
+        return f'<blockquote>{md_bold(html.escape(b["text"]))}</blockquote>'
     raise ValueError(f'未知块类型: {t}')
 
 

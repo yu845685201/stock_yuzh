@@ -299,13 +299,15 @@ def svg_amount_series(name: str, series: List[Dict[str, Any]],
 
 # ------------------------------------------------------------------ 解读文本装配
 
-_MD_BOLD = re.compile(r'\*\*(.+?)\*\*')
 #: 表格分隔行（|---|---| 或 | --- : | :---: | 等变体）
 _MD_TABLE_SEP = re.compile(r'^\s*\|?[\s:|-]*-[\s:|-]*\|')
 
 
 def _inline(text: str) -> str:
-    return _MD_BOLD.sub(r'<strong>\1</strong>', _esc(text))
+    # V4.4 T1：bold 转换单一出处（renderer.md_bold）——正则/替换逐字符
+    # 与原实现相同，digest 输出逐字节不变（回归测试即证）
+    from .renderer import md_bold
+    return md_bold(_esc(text))
 
 
 def _md_table_row(line: str) -> List[str]:
@@ -739,6 +741,9 @@ def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
                         f'<td>{_esc(stop)}</td>'
                         f'<td>{_esc(dist)}</td>'
                         f'<td>{_esc("；".join(marks) or "—")}</td></tr>')
+        # V4.4 T4：口径短注前置（列头即读即懂；完整口径长注仍在表后）
+        parts.append('<p class="note">收盘距止损%=锚定日收盘口径；操作口径=次日开盘'
+                     '（生成时未知）。</p>')
         parts.append('<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>'
                      '<th>背驰强度</th><th>行业</th><th>触发低点(止损)</th>'
                      '<th>收盘距止损%</th><th>数据标记</th></tr></thead><tbody>'

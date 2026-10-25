@@ -74,6 +74,10 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
             f"{it['divergence']:.2f}" if it.get('divergence') is not None else '—',
             '；'.join(marks) if marks else '—',
         ])
+    # V4.4 T4：口径短注前置（与 digest 同构；完整口径在表后 note）
+    blocks.append({'type': 'note',
+                   'text': '收盘距止损% = 锚定日收盘口径；操作口径 = 次日开盘'
+                           '（生成时未知）'})
     blocks.append({'type': 'table',
                    'headers': ['代码', '名称', '信号', '触发低点(止损)',
                                '收盘距止损%', '参照中枢[ZD,ZG]', '背驰强度',
