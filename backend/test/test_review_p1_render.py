@@ -380,6 +380,45 @@ class TestNextTradeDate:
             '20261023') is None
 
 
+class TestUnlockWindowX1:
+    """X1：解禁窗口日历参数 _dot 归一——正是能拦住格式回归的测试形态。"""
+
+    def test_unlock_calendar_param_dotted(self):
+        from src.review.aggregator import ReviewAggregator
+
+        seen = []
+
+        class _RecReader:                       # 记录日历 SQL 参数 + 回放数据行
+            def _query(self, sql, params=None):
+                s = (sql or '').replace('\n', ' ')
+                if 'base_trade_calendar' in s:
+                    seen.append(params)
+                    return [('2026-11-06',)]
+                if 'share_unlock_calendar' in s:
+                    return [('sh.603296', '华勤技术', '20261026', 1.2e8, 5.0, 'IPO')]
+                return []
+
+        cfg = {'review': {'sentiment_calibrated': True, 'sentiment_rules': {}}}
+        res = ReviewAggregator(_RecReader(), cfg)._aggregate_unlock('20261023')
+        assert res.available is True and res.data['window_end'] == '20261106'
+        assert res.data['items'][0]['name'] == '华勤技术'
+        assert seen and seen[0][0] == '2026-10-23'    # dotted——回归到裸传即失败
+
+    def test_unlock_empty_window_degrades(self):
+        from src.review.aggregator import ReviewAggregator
+
+        class _EmptyCalReader:
+            def _query(self, sql, params=None):
+                s = (sql or '').replace('\n', ' ')
+                if 'base_trade_calendar' in s:
+                    return []                       # 日历缺行 → 窗口塌缩 as_of
+                return []
+
+        cfg = {'review': {'sentiment_calibrated': True, 'sentiment_rules': {}}}
+        res = ReviewAggregator(_EmptyCalReader(), cfg)._aggregate_unlock('20261023')
+        assert res.available is False and '无已披露记录' in res.reason
+
+
 class TestDigestAnchorConfNote:
     """C-3（2026-10-25 补全）：digest 资金锚置信度行——只渲染聚合层推导结果。"""
 

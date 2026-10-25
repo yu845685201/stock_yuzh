@@ -200,7 +200,8 @@ class ReviewAggregator:
     #: v8：A50 日频 as_of 截断（防前视——v7 历史缓存含未来值须失效）
     #: v9：out 增 next_trade_date（W7 周末缝提示）——旧缓存缺键须失效
     #: v10：_next_trade_date 修 calendar_date TEXT 比较格式（_dot 归一），None→真值
-    AGG_CACHE_VERSION = 'v10-20261025'
+    #: v11：_aggregate_unlock 同源 _dot 修复（X1）——v10 缓存 unlock=available=False 须失效
+    AGG_CACHE_VERSION = 'v11-20261026'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -1885,9 +1886,12 @@ class ReviewAggregator:
 
         口径：公告制，仅含已披露的近端解禁（一般提前 3-5 个交易日），非完整前瞻；
         占比为推导值（unlock_shares ÷ 最新可得总股本，L 项回填）。
+        窗口日历查询须 _dot 归一（X1）：裸 YYYYMMDD 与 TEXT 日期比较恒小于，静默返回空。
         """
         try:
-            upcoming = self._next_n_dates(as_of, 10)
+            # calendar_date 为 TEXT(YYYY-MM-DD)，比较前须 _dot 归一（X1；同
+            # _next_trade_date/_disclosure 先例——裸 YYYYMMDD 恒小于带连字符日期）
+            upcoming = self._next_n_dates(_dot(as_of), 10)
         except Exception as e:
             logger.warning(f'解禁窗口日历读取失败: {e}')
             upcoming = []
