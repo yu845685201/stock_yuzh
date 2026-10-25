@@ -31,6 +31,7 @@ class R3TrendNewHigh(AnalysisModule):
         " 且 当日涨幅 ≥ r3_change_min(3.0)% 且 非 ST；反高开低走（开盘涨幅 > "
         "r3_max_open_gain(5)% 且 收盘<开盘 → 剔除，P1-7）；R1/R2 命中股不重复入选。"
         "判定谓词与报告层第六章预案共用（candidate_rules）。"
+        "P4-1 起带链侧 VETO：env cand_veto_map 命中即否（与报告层出池同源）。"
         "返回理由串（如「新高/+7.2%/3.1x」）或 否 / 数据不足"
     )
     required_columns: ClassVar[List[str]] = ['change_rate', 'is_st', 'open',

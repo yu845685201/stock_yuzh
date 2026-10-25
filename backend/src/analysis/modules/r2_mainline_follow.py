@@ -40,6 +40,8 @@ class R2MainlineFollow(AnalysisModule):
         "（sina_gn 全部成分）命中涨停聚集前列概念（概念内当日涨停家数降序前 3，"
         "黑名单剔除，与报告层概念涨停聚集同口径）；R1 梯队接力命中股不重复入选。"
         "判定谓词与报告层第六章预案共用（candidate_rules）。"
+        "P4-1 起带链侧 VETO：env cand_veto_map 命中即否（与报告层出池同源），"
+        "另有反抽板 veto（近 3 日内高位板放量长阴后的涨停即否）。"
         "返回理由串（如「首板/创新药」）或 否 / 数据不足"
     )
     required_columns: ClassVar[List[str]] = ['is_st']

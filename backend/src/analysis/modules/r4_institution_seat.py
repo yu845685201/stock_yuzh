@@ -30,6 +30,7 @@ class R4InstitutionSeat(AnalysisModule):
         "「机构专用」归并，净买降序前 5，与报告层机构榜同口径）且 非 ST"
         "（名称近似 + is_st 列双保险）；R1/R2/R3 命中股不重复入选。"
         "判定谓词与报告层第六章预案共用（candidate_rules）。"
+        "P4-1 起带链侧 VETO：env cand_veto_map 命中即否（与报告层出池同源）。"
         "返回理由串（如「机构净买+2.20亿」）或 否 / 数据不足"
     )
     required_columns: ClassVar[List[str]] = ['is_st']

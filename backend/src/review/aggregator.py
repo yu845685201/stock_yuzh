@@ -1648,9 +1648,10 @@ class ReviewAggregator:
                 label += '(公告覆盖不全)'
             r['attribution'] = label
 
-    def _lhb_codes_of_day(self, as_of: str) -> set:
-        """当日龙虎榜上榜代码集（D2 交叉标记；表空返回空集）"""
-        if not lhb_published(as_of):
+    def _lhb_codes_of_day(self, as_of: str,
+                          now: Optional[datetime] = None) -> set:
+        """当日龙虎榜上榜代码集（D2 交叉标记；表空返回空集；now 可注入测试）"""
+        if not lhb_published(as_of, now=now):
             return set()   # P4-6：早跑时当日榜未发布，不产生交叉标记
         try:
             rows = self.db._query(
@@ -1733,13 +1734,14 @@ class ReviewAggregator:
             'partial_dates': partial_dates,
         })
 
-    def _aggregate_lhb(self, as_of: str) -> AggregationResult:
+    def _aggregate_lhb(self, as_of: str,
+                       now: Optional[datetime] = None) -> AggregationResult:
         """D2 龙虎榜 → 维度4：净额 Top10（行粒度，禁跨原因求和）+ 机构净买 Top5。
 
         金额口径：该上榜原因的前五席位合计（非全市场买卖总额）；成交额列
         沪市 secTxAmount / 深市列表成交金额。
         """
-        if not lhb_published(as_of):
+        if not lhb_published(as_of, now=now):
             return AggregationResult(
                 available=False,
                 reason='龙虎榜 17:30 后发布，当日报告早跑未到发布时点（P4-6 门控停显）')

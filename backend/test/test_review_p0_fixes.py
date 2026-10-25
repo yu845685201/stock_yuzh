@@ -346,8 +346,10 @@ class TestP46LhbTimeGate:
             def _query(self, sql, params=None):
                 raise AssertionError('门控生效时不得触库')
 
+        # now 注入 16:00（不依赖墙钟——17:30 后跑原写法会翻转为放行）
+        _n = _dt.now()
         out = ReviewAggregator(_BoomDB(), {'review': {}})._aggregate_lhb(
-            _dt.now().strftime('%Y%m%d'))
+            _n.strftime('%Y%m%d'), now=_dt(_n.year, _n.month, _n.day, 16, 0))
         assert out.available is False
         assert '17:30' in out.reason and 'P4-6' in out.reason
 
@@ -360,7 +362,9 @@ class TestP46LhbTimeGate:
 
         agg = ReviewAggregator(_BoomDB(), {'review': {}})
         from datetime import datetime as _dt
-        assert agg._lhb_codes_of_day(_dt.now().strftime('%Y%m%d')) == set()
+        _n = _dt.now()
+        assert agg._lhb_codes_of_day(_n.strftime('%Y%m%d'),
+                                     now=_dt(_n.year, _n.month, _n.day, 16, 0)) == set()
 
 
 # ------------------------------------------------------------------ P4-8

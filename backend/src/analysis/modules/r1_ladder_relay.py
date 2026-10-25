@@ -34,6 +34,9 @@ class R1LadderRelay(AnalysisModule):
         "高位板 ≥r1_high_streak(6) 开板上限收紧为 r1_high_max_reopen(1)，P1-7 分层）。"
         "连板数来自前置模块「连续涨停数」，开板次数来自 limit_seal_stats_daily 截面装配；"
         "判定谓词与报告层第六章预案共用（candidate_rules），同数据同结果。"
+        "P4-1 起带链侧 VETO：env cand_veto_map 命中即否（与报告层出池同源），"
+        "另有反抽板 veto（近 veto_high_board_lookback(3) 日内高位板放量长阴后的"
+        "涨停即否）。"
         "返回理由串（如「高位板/7板/开板0次」）或 否 / 数据不足"
     )
     required_columns: ClassVar[List[str]] = ['is_st']
