@@ -199,7 +199,8 @@ class ReviewAggregator:
     #: v7：A50 日频优先（overseas 行 kline 覆盖 + a50_source 键）
     #: v8：A50 日频 as_of 截断（防前视——v7 历史缓存含未来值须失效）
     #: v9：out 增 next_trade_date（W7 周末缝提示）——旧缓存缺键须失效
-    AGG_CACHE_VERSION = 'v9-20261025'
+    #: v10：_next_trade_date 修 calendar_date TEXT 比较格式（_dot 归一），None→真值
+    AGG_CACHE_VERSION = 'v10-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -2248,9 +2249,13 @@ class ReviewAggregator:
         return [str(r[0]).replace('-', '') for r in rows]
 
     def _next_trade_date(self, as_of: str) -> Optional[str]:
-        """as_of 后第一个交易日（W7 周末缝提示；空结果/查询异常→None 不拖垮聚合）。"""
+        """as_of 后第一个交易日（W7 周末缝提示；空结果/查询异常→None 不拖垮聚合）。
+
+        calendar_date 为 TEXT（YYYY-MM-DD），比较前须 _dot 归一——裸 YYYYMMDD
+        字符串比较恒小于带连字符日期，会静默返回空（_disclosure 同源先例）。
+        """
         try:
-            dates = self._next_n_dates(as_of, 1)
+            dates = self._next_n_dates(_dot(as_of), 1)
             return dates[0] if dates else None
         except Exception as e:  # noqa: BLE001 —— 日历缺行/库异常降级
             logger.warning(f'下一交易日查询失败: {e}')
