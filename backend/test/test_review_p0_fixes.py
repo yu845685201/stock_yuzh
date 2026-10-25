@@ -253,10 +253,21 @@ class TestP03ErrorVisibility:
 
 
 class TestP34R2NextDefault:
-    def test_next_has_default(self):
-        """P3-4（C9）：R2 hit_concept 取值补 default（空交集退化态不抛 StopIteration）"""
-        top_concepts, concepts = ['专精特新', '重组概念'], ['不相关概念']
-        hit = next((c for c in top_concepts if c in set(concepts)),
-                   (concepts[0] if concepts else '未知'))
-        assert hit == '不相关概念'
-        assert next((c for c in top_concepts if c in set([])), '未知') == '未知'
+    """P3-4（C9）真修复测试：直接测生产函数 hit_concept_top（2026-10-25 补全，
+    首轮为自证式测试未触生产代码，已删除）。"""
+
+    def test_hit_concept_takes_cluster_order_first(self):
+        """聚集序最前者优先（top_concepts 顺序即家数降序）"""
+        from src.analysis.modules.r2_mainline_follow import hit_concept_top
+        assert hit_concept_top(['专精特新', '重组概念'], ['重组概念', '专精特新']) == '专精特新'
+
+    def test_empty_intersection_returns_none(self):
+        """空交集 → None 不抛 StopIteration（C9 防御本体）"""
+        from src.analysis.modules.r2_mainline_follow import hit_concept_top
+        assert hit_concept_top(['专精特新'], ['不相关概念']) is None
+
+    def test_empty_inputs_return_none(self):
+        """空输入两侧均安全"""
+        from src.analysis.modules.r2_mainline_follow import hit_concept_top
+        assert hit_concept_top([], ['x']) is None
+        assert hit_concept_top(['x'], []) is None

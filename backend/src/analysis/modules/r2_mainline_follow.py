@@ -12,12 +12,22 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Dict, List
+from typing import ClassVar, Dict, List, Optional
 
 import pandas as pd
 
 from ..candidate_rules import is_hit, is_r2
 from ..module_base import AnalysisModule, ChainContext, ModuleResult
+
+
+def hit_concept_top(top_concepts: List[str], concepts: List[str]) -> Optional[str]:
+    """命中概念取聚集序最前（top_concepts 顺序 = 概念内当日涨停家数降序）。
+
+    P3-4（C9）：``is_r2`` 谓词已保证两序列交集非空，``default=None`` 仅为
+    防御——若未来重构移除该前置保护，此处退化为不命中（不硬造）而非抛
+    StopIteration。
+    """
+    return next((c for c in top_concepts if c in set(concepts)), None)
 
 
 class R2MainlineFollow(AnalysisModule):
@@ -76,9 +86,11 @@ class R2MainlineFollow(AnalysisModule):
         if not is_r2(streak, is_st, concepts, top_concepts,
                      cluster_count=cluster_count):
             return ModuleResult('否')
-        # 命中概念取聚集序最前（top_concepts 顺序即家数降序）
-        hit_concept = next(c for c in top_concepts if c in set(concepts))
-        label = f'首板/{hit_concept}'
+        # 命中概念取聚集序最前（P3-4 防御分支：is_r2 保证非空，理论不可达）
+        hit = hit_concept_top(top_concepts, concepts)
+        if hit is None:
+            return ModuleResult('否')
+        label = f'首板/{hit}'
         if cluster_count is not None:
             label += f'(聚集{cluster_count}家)'
         return ModuleResult(label, {'concepts': concepts,

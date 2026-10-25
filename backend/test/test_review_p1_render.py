@@ -11,8 +11,9 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from src.review.aggregator import ReviewAggregator
-from src.review.digest import (_GLOSSARY_ROWS, _chan_linkage_state,
-                               _render_chan_digest, _render_glossary)
+from src.review.digest import (_GLOSSARY_ROWS, _anchor_conf_note,
+                               _chan_linkage_state, _render_chan_digest,
+                               _render_glossary)
 from src.review.sections import market_env, tomorrow_plan
 
 
@@ -264,3 +265,28 @@ class TestChanDigestSection:
         blocks = tomorrow_plan.build(agg)
         text = '\n'.join(str(b) for b in blocks)
         assert 'V4 缠论池' not in text
+
+
+class TestDigestAnchorConfNote:
+    """C-3（2026-10-25 补全）：digest 资金锚置信度行——只渲染聚合层推导结果。"""
+
+    def test_renders_confidence_with_tags(self):
+        ca = {'available': True, 'data': {
+            'anchor_tags': {'south_net': '实测', 'north_total': '代理',
+                            'etf': '代理', 'macro': '实测', 'option': '实测',
+                            'north_detail': '停旧值'},
+            'confidence': '中'}}
+        note = _anchor_conf_note(ca)
+        assert note is not None
+        assert '综合 中' in note
+        assert '北向成交额=代理' in note and '南向净买入=实测' in note and 'ETF份额=代理' in note
+        assert '停旧值=快照日期早于锚定日' in note
+
+    def test_missing_confidence_returns_none(self):
+        ca = {'available': True, 'data': {'anchor_tags': {'north_total': '代理'}}}
+        assert _anchor_conf_note(ca) is None
+
+    def test_missing_tags_or_none_returns_none(self):
+        assert _anchor_conf_note({'available': True, 'data': {'confidence': '中'}}) is None
+        assert _anchor_conf_note({'available': False, 'data': {}}) is None
+        assert _anchor_conf_note(None) is None

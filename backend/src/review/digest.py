@@ -388,6 +388,25 @@ _GLOSSARY_ROWS = [
 ]
 
 
+def _anchor_conf_note(ca: Optional[Dict[str, Any]]) -> Optional[str]:
+    """资金锚置信度一行（P1-6，技术方案 §4.6 digest 落点对齐，2026-10-25 补全）。
+
+    标签与综合置信度的推导单一出处 = ``ReviewAggregator._capital_anchors``
+    （``anchor_tags``/``confidence``），本函数只渲染不推导；与六维报告 §一
+    （market_env 小节资金锚表）同一数据源。数据缺失返回 None（不硬造）。
+    """
+    data = (ca or {}).get('data') or {}
+    tags, conf = data.get('anchor_tags') or {}, data.get('confidence')
+    if not tags or not conf:
+        return None
+    items = ' · '.join(f'{lbl}={tags.get(key, "—")}'
+                       for lbl, key in (('北向成交额', 'north_total'),
+                                        ('南向净买入', 'south_net'),
+                                        ('ETF份额', 'etf')))
+    return (f'资金锚置信度：综合 {conf}（{items}；停旧值=快照日期早于锚定日'
+            '按停更对待；明细见六维报告 §一）')
+
+
 def _render_glossary() -> str:
     """折叠式口径字典（P1-2）：模板直拼 HTML（details 默认收起，不干扰阅读流）。"""
     rows = ''.join(f'<tr><td>{_esc(t)}</td><td>{_esc(d)}</td></tr>'
@@ -599,6 +618,11 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     for name, pts, dates in sparks:
         if name == '上证指数':
             parts.append('<div class="chart">' + svg_sparkline(name, pts, dates) + '</div>')
+
+    # P1-6 资金锚置信度一行（技术方案 §4.6 digest 落点对齐）：与六维报告 §一同源
+    note_anchor = _anchor_conf_note(agg.get('capital_anchors'))
+    if note_anchor:
+        parts.append(f'<p class="note">{_esc(note_anchor)}</p>')
 
     parts.append('<h2>二、市场情绪</h2>')
     cycle = (senti.get('cycle') or {})
