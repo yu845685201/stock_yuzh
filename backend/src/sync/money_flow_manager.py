@@ -454,12 +454,26 @@ class MoneyFlowManager:
     def _seal_row_for(self, stock: Dict[str, Any],
                       trades: List[Dict[str, Any]], trade_date: str) -> Optional[Dict[str, Any]]:
         """封板指标行构造（开发项 F）：side 由日K 判定——close<=low 为跌停（min），
-        其余（涨停/炸板）取 max；limit_pct 不可判定的板块跳过"""
+        其余（涨停/炸板）取 max；limit_pct 不可判定的板块跳过。
+
+        触板门槛（附录 C.6，2026-10-25）：仅**触及涨跌停价**的股票落行——全市场
+        分笔模式下此前所有股票都写行，未触板股的 limit_price 实为日内最高价
+        （收在最高时即收盘价），伪装成触板价污染表语义；判定口径与 _subset_snapshot
+        子集筛选同款（阈值法 pct−0.10 浮点余量 + high/low 触及，前复权比值）。
+        """
         code6 = stock.get('stock_code') or ts_code_to_code6(stock['ts_code'])
         is_st = bool(stock.get('is_st'))
-        if limit_pct(board_of(code6), trade_date, is_st) is None:
+        pct = limit_pct(board_of(code6), trade_date, is_st)
+        if pct is None:
             return None
         close, low = _to_float(stock.get('close')), _to_float(stock.get('low'))
+        high, preclose = _to_float(stock.get('high')), _to_float(stock.get('preclose'))
+        if preclose and preclose > 0 and high is not None and low is not None:
+            threshold = pct - 0.10
+            touched_up = (high - preclose) / preclose * 100.0 >= threshold
+            touched_dn = (low - preclose) / preclose * 100.0 <= -threshold
+            if not (touched_up or touched_dn):
+                return None   # 未触板不落行（表语义=触板股专属）
         side = 'down' if (close is not None and low is not None and close <= low) else 'up'
         stats = compute_seal_stats(trades, side=side)
         if stats is None:

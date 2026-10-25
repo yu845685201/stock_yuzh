@@ -242,3 +242,51 @@ def test_seal_row_side_detection():
     row2 = m._seal_row_for(stock_up, trades_up, '20260929')
     assert row2['limit_price'] == 5.34         # up → max
     assert row2['first_seal_time'] == '093000'
+
+
+# ---------------------------------------------------------------- 触板门槛（附录 C.6）
+
+class TestSealRowTouchGate:
+    """limit_seal_stats_daily 表语义收紧：未触板股不落行（limit_price 不再被
+    日内最高/收盘价伪装）。"""
+
+    TICKS = [{'Price': '10390', 'Time': '093000', 'Volume': '100'},
+             {'Price': '10400', 'Time': '100000', 'Volume': '100'}]  # 厘 → 10.39/10.40
+
+    @staticmethod
+    def _mgr():
+        from src.sync.money_flow_manager import MoneyFlowManager
+        return MoneyFlowManager.__new__(MoneyFlowManager)
+
+    @staticmethod
+    def _stock(**kw):
+        base = {'ts_code': 'sz.000001', 'stock_code': '000001', 'is_st': False,
+                'close': 10.4, 'low': 10.1, 'high': 10.4, 'preclose': 9.46}
+        base.update(kw)
+        return base
+
+    def test_touched_up_writes_row(self):
+        m = self._mgr()
+        row = m._seal_row_for(self._stock(), self.TICKS, '20261023')
+        assert row is not None and row['limit_price'] == 10.4
+        assert row['source'] == 'tdx_tick'
+
+    def test_nontouch_returns_none(self):
+        """普通股（high 涨幅 5% < 阈值 9.9）不落行——此前 limit_price=日内最高价污染表"""
+        m = self._mgr()
+        row = m._seal_row_for(self._stock(close=9.9, high=9.93, low=9.5),
+                              self.TICKS, '20261023')
+        assert row is None
+
+    def test_touched_down_writes_row(self):
+        """跌停触板（low ≤ −9.9%）落行，side=down 取分笔 min"""
+        m = self._mgr()
+        row = m._seal_row_for(self._stock(close=8.51, low=8.51, high=9.4),
+                              self.TICKS, '20261023')
+        assert row is not None
+
+    def test_missing_preclose_keeps_legacy_side(self):
+        """preclose 缺失（历史行兼容）不硬挡——退回旧行为（side 由 close<=low 判）"""
+        m = self._mgr()
+        row = m._seal_row_for(self._stock(preclose=None), self.TICKS, '20261023')
+        assert row is not None
