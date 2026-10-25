@@ -159,7 +159,7 @@ review:
   sentiment_rules:              # 命中顺序：高潮 → 冰点 → 退潮 → 回暖/震荡（复盘框架.MD §3）
     ice: {max_streak_lte: 2, burst_rate_gte: 0.5}      # 冰点：高度≤2 或 炸板率≥50%
     ebb: {premium_mean_lte: 0}                          # 退潮：昨日涨停溢价均值≤0
-    climax: {max_streak_gte: 5, premium_mean_gte: 4.0}  # 高潮：高度≥5 且 溢价≥4%
+    climax: {max_streak_gte: 5, premium_mean_gte: 4.0, breadth_ratio_gte: 2.0}  # 高潮：高度≥5 且 溢价≥4%；第二证据（P4-5 独立披露不参与定位）：涨跌家数比≥2（初版未校准）
   # 转天交易预案（第六章子节）判据初版：2026-10-05 新增，阈值待用户校准定稿
   # （流程同情绪判据 §3；用途=条件-动作参考框架，非次日涨跌预测）
   tomorrow_plan:

@@ -1167,6 +1167,12 @@ class ReviewAggregator:
             climax = rules.get('climax') or {}
             ice = rules.get('ice') or {}
             ebb = rules.get('ebb') or {}
+            # P4-5（B8）：高潮判据第二独立证据——涨跌家数比（全市场宽度，与涨停
+            # cohort 不同源）。初版参考阈值未校准，仅并列披露不参与定位。
+            up_count, down_count = m.get('up_count'), m.get('down_count')
+            breadth_ratio = (round(up_count / down_count, 2)
+                             if up_count and down_count else None)
+            br_gte = climax.get('breadth_ratio_gte', 2.0)
             criteria = [
                 {'name': '高潮',
                  'expr': f"高度≥{climax.get('max_streak_gte')} 且 "
@@ -1182,11 +1188,21 @@ class ReviewAggregator:
                  'expr': f"溢价均值≤{ebb.get('premium_mean_lte')}%",
                  'values': f"溢价均值{premium_mean}%",
                  'hit': False},
+                {'name': '高潮·第二证据（独立）',
+                 'expr': f"涨跌家数比≥{br_gte}（市场宽度，独立于涨停 cohort；"
+                         "初版参考阈值未校准，仅并列披露不参与定位，P4-5）",
+                 'values': (f"涨{up_count if up_count is not None else '—'} / "
+                            f"跌{down_count if down_count is not None else '—'} / "
+                            f"比{breadth_ratio if breadth_ratio is not None else '—'}"),
+                 'hit': bool(breadth_ratio is not None and breadth_ratio >= br_gte)},
             ]
             if (max_streak >= climax.get('max_streak_gte', 99)
                     and (premium_mean is not None and premium_mean >= climax.get('premium_mean_gte', 99))):
                 cycle, basis = '高潮', [f"高度{max_streak}≥{climax.get('max_streak_gte')}",
-                                        f"溢价{premium_mean}≥{climax.get('premium_mean_gte')}"]
+                                        f"溢价{premium_mean}≥{climax.get('premium_mean_gte')}",
+                                        f"第二证据涨跌家数比"
+                                        f"{breadth_ratio if breadth_ratio is not None else '—'}"
+                                        f"{'确认' if criteria[3]['hit'] else '未确认（分歧，人工注意）'}"]
                 criteria[0]['hit'] = True
             elif (max_streak <= ice.get('max_streak_lte', -1)
                     or (burst_rate is not None and burst_rate >= ice.get('burst_rate_gte', 99))):

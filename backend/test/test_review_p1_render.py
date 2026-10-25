@@ -44,7 +44,7 @@ class TestSentimentCriteria:
         out = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.22, 'premium_mean': 3.38}, '20261023')
         names = [c['name'] for c in out['criteria']]
-        assert names == ['高潮', '冰点', '退潮']
+        assert names == ['高潮', '冰点', '退潮', '高潮·第二证据（独立）']
         climax = out['criteria'][0]
         assert '高度≥5' in climax['expr'] and '溢价≥4.0%' in climax['expr']
         assert '高度6' in climax['values'] and '溢价3.38%' in climax['values']
@@ -57,6 +57,25 @@ class TestSentimentCriteria:
         assert out['position'] == '高潮'
         assert out['criteria'][0]['hit'] is True
         assert out['criteria'][1]['hit'] is False
+
+    def test_climax_second_evidence_breadth(self):
+        """P4-5（B8）：第 4 行=涨跌家数比独立证据；climax 命中时 basis 带确认/未确认"""
+        out = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5,
+             'up_count': 3000, 'down_count': 1000}, '20261023')
+        sec = out['criteria'][3]
+        assert sec['hit'] is True and '比3.0' in sec['values']
+        assert '涨跌家数比≥2.0' in sec['expr']
+        assert any('确认' in b and '未确认' not in b for b in out['basis'])
+        out2 = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5,
+             'up_count': 1200, 'down_count': 2600}, '20261023')
+        assert out2['criteria'][3]['hit'] is False
+        assert any('未确认' in b for b in out2['basis'])
+        # 无涨跌家数（缺数据）：不硬造，值显示 —，hit False
+        out3 = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5}, '20261023')
+        assert out3['criteria'][3]['hit'] is False and '比—' in out3['criteria'][3]['values']
 
     def test_trial_flag_two_states(self):
         """P1-4：trial 键随 sentiment_calibrated 开关两态（水印消费恢复）"""
