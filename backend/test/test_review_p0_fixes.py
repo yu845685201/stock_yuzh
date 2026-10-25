@@ -361,3 +361,53 @@ class TestP46LhbTimeGate:
         agg = ReviewAggregator(_BoomDB(), {'review': {}})
         from datetime import datetime as _dt
         assert agg._lhb_codes_of_day(_dt.now().strftime('%Y%m%d')) == set()
+
+
+# ------------------------------------------------------------------ P4-8
+
+class TestP48RPoolPrior:
+    """P4-8（评二-7）：R 系列候选先验随行——核验前向积累为准，无积累如实注明。"""
+
+    @staticmethod
+    def _agg(pools):
+        from src.review.aggregator import AggregationResult
+        return {'verification': AggregationResult(data={'rolling': {'pools': pools}})}
+
+    def test_prior_with_stats(self):
+        from src.review.sections import tomorrow_plan
+        text = tomorrow_plan._r_pool_prior(self._agg(
+            {'R1': {'days': 5, 'avg_excess': 1.2, 'win_rate': 0.6}}), 'R1')
+        assert '近 5 个核验日' in text and '+1.20pct' in text and '60%' in text
+        assert '历史统计非预测' in text
+
+    def test_prior_untracked_pool(self):
+        from src.review.sections import tomorrow_plan
+        text = tomorrow_plan._r_pool_prior(self._agg({'R2': {'days': 0}}), 'R2')
+        assert '先验：未统计' in text and '无离线同构回测' in text
+
+    def test_prior_no_verification(self):
+        from src.review.sections import tomorrow_plan
+        assert '未统计' in tomorrow_plan._r_pool_prior({}, 'R3')
+        assert '未统计' in tomorrow_plan._r_pool_prior(
+            {'verification': None}, 'R4')
+
+    def test_buy_candidates_embed_prior(self):
+        """候选节每类块带先验注（有积累引用积累，无积累注明未统计）"""
+        from src.review.sections import tomorrow_plan
+        agg = {'candidates': {'available': True},
+               'sentiment': {'data': {'cycle': {'position': '冰点'}}},
+               'verification': self._agg({'R1': {'days': 3}})['verification']}
+        blocks = tomorrow_plan._buy_candidates(agg, {})
+        text = ''.join(str(b.get('text', '')) for b in blocks)
+        # 冰点不出候选，但异常分支之外不触发先验渲染；换回暖/震荡+ADX closed 同理不出
+        assert 'R1 先验' not in text
+        agg2 = {'candidates': {'available': True,
+                               'adx_gate': {'gate': 'full', 'adx': 25,
+                                            'adx_rising': True, 'close': 4000,
+                                            'ma20': 3900, 'index': '上证指数'},
+                               'R1': [], 'R2': [], 'R3': [], 'R4': []},
+                'sentiment': {'data': {'cycle': {'position': '回暖/震荡'}}},
+                'verification': self._agg({'R1': {'days': 3}})['verification']}
+        blocks2 = tomorrow_plan._buy_candidates(agg2, {})
+        text2 = ''.join(str(b.get('text', '')) for b in blocks2)
+        assert 'R1 先验（核验体系前向积累，近 3 个核验日）' in text2

@@ -298,6 +298,29 @@ def _direction_watch(agg: Dict[str, Any]) -> List[str]:
     return items
 
 
+def _r_pool_prior(agg: Dict[str, Any], ctype: str) -> str:
+    """P4-8（评二-7）：R 系列候选先验随行——以核验体系前向积累为准（诚实但慢）。
+
+    数据源 = agg['verification'].data.rolling.pools[ctype]（verifier.rolling_stats
+    单一出处：近 30 核验日池超额/胜率滚动）；无积累时如实注明"先验未统计"，
+    禁止编造历史同构胜率（不硬造红线）。缠论池先验见 chan_candidates.HIST_NOTE；
+    离线同构回测为后续项，当前不引用不存在的历史统计。
+    """
+    ver = agg.get('verification') or {}
+    st = (((ver.get('data') or {}).get('rolling') or {}).get('pools')
+          or {}).get(ctype) or {}
+    days = st.get('days')
+    if not days:
+        return (f'{ctype} 先验：未统计（核验体系前向积累中，暂无足够样本；'
+                '仅有前向核验，无离线同构回测）')
+    text = f'{ctype} 先验（核验体系前向积累，近 {days} 个核验日）'
+    if st.get('avg_excess') is not None:
+        text += f'，池均超额 {st["avg_excess"]:+.2f}pct'
+    if st.get('win_rate') is not None:
+        text += f'，池中位跑赢全市场 {st["win_rate"]:.0%} 的日子'
+    return text + '；历史统计非预测，仅作观察校准参考'
+
+
 def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
     """转天买入候选（观察池）：消费 aggregator._build_candidates 全量候选池
     （谓词 candidate_rules 与 daily_review 链 R 列共用，同数据同结果），
@@ -425,6 +448,7 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
         blocks.append({'type': 'heading', 'level': 3,
                        'text': f'{label}（{len(pool)} 只，按五维评分展示前 {min(top_n, len(pool))}，'
                                f'规则：{rule_desc}）'})
+        blocks.append({'type': 'note', 'text': _r_pool_prior(agg, ctype)})  # P4-8 先验随行
         if rows:
             headers = ['代码', '名称', '当日状态', '备注', '证据（五维计数）', '五维评分']
             blocks.append({'type': 'table', 'headers': headers, 'rows': rows})
