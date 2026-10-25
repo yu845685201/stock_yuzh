@@ -558,7 +558,7 @@ def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
         return None
     data = getattr(chan, 'data', None) or {}
     items = data.get('items') or []
-    parts: List[str] = ['<h2>六、缠论背驰候选（左侧观察池）</h2>']
+    parts: List[str] = ['<h2>六、缠论背驰候选（六维§六·左侧观察池）</h2>']
     if not items:
         parts.append('<p class="note">今日无一买/二买信号确认（正常态：全市场年均约'
                      ' 480+250 个，单日 0~16 个常见；冰点/退潮期密度上升）。</p>')
@@ -679,6 +679,11 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts.append(f'<p class="note">数据口径与 <code>daily_review_{_esc(as_of)}.md</code> '
                  f'六维报告同源（ReviewAggregator 同一次聚合）；外围为市场自身交易日历'
                  f'（qfq/指数原值），A 股锚定日 {as_of}、前一交易日 {prev_date or "—"}。</p>')
+    # W2 引用体系统一：两份文档章节编号不同名异指，页首固定对照行
+    parts.append('<p class="note">章节对照：图文§一~§三 对应六维§一~§三；'
+                 '图文§四（外围）/§五（A-H）属六维§一；图文§六（缠论候选）属六维§六；'
+                 '六维§四（个股异动）/§五（基本面）本页不设章，数据由解读区引用。'
+                 '解读区「六维§X/图文§X」括注即按此对照。</p>')
     # P1-2 口径字典（评价-1：三源术语不自解释）：折叠式固定渲染，术语与报告口径单一出处
     parts.append(_render_glossary())
 
@@ -805,7 +810,7 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                      f'{_fmt(br.get("mean"), 2, True)}% / 翻红 {br_red}'
                      '（炸板修复，明细见六维§二）。</p>')
 
-    parts.append('<h2>四、外围指数（市场自身日历）</h2>')
+    parts.append('<h2>四、外围指数（六维§一·市场自身日历）</h2>')
     if ov:
         parts.append('<div class="chart">'
                      + svg_position_bars([(n, p) for n, _, _, p in ov]) + '</div>')
@@ -819,7 +824,7 @@ def build_digest(config_manager, as_of: Optional[str] = None,
         if name == '恒生指数':
             parts.append('<div class="chart">' + svg_sparkline(name, pts, dates) + '</div>')
 
-    parts.append('<h2>五、A-H 映射（参考口径）</h2>')
+    parts.append('<h2>五、A-H 映射（六维§一·参考口径）</h2>')
     if ah_chart:
         parts.append('<div class="chart">' + svg_dual_bars(ah_chart, unit='pct') + '</div>')
     if ah_rows:

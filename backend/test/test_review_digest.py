@@ -170,6 +170,12 @@ def test_digest_build_byte_stable(tmp_path, monkeypatch):
     assert '封板质量与晋级' in h1
     if '当日值' in h1:
         assert '标注（参考）的判据不参与定位判定。' in h1
+    # W2：章节对照行 + 非一一对应章标题的六维映射后缀
+    assert '章节对照：图文§一~§三 对应六维§一~§三' in h1
+    assert '四、外围指数（六维§一·市场自身日历）' in h1
+    assert '五、A-H 映射（六维§一·参考口径）' in h1
+    if '缠论背驰候选' in h1:
+        assert '六、缠论背驰候选（六维§六·左侧观察池）' in h1
     # 无解读文件 → 占位
     r3 = build_digest(cm, as_of='20260930', output_dir=str(tmp_path))
     h3 = Path(r3['html_path']).read_text(encoding='utf-8')

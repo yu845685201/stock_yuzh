@@ -93,6 +93,13 @@ class TestCheckNote:
         warns = cdn.check_note(note, cdn._csv_whitelist(csv_file))
         assert warns == []
 
+    def test_new_citation_format_exempt_w2(self, csv_file, note_file):
+        """W2：（六维§X）/（图文§X）新括注即接地；（报告§X）旧格式继续接受（历史兼容）"""
+        note = note_file("溢价 3.38%（六维§二）；高度 6 板（图文§二）；"
+                         "涨停 63 家（报告§四）。")
+        warns = cdn.check_note(note, cdn._csv_whitelist(csv_file))
+        assert warns == []
+
     def test_structural_exempt(self, csv_file, note_file):
         note = note_file("详见 ev-20260930-3 与 §4.1；第 2 节。")
         warns = cdn.check_note(note, cdn._csv_whitelist(csv_file))
