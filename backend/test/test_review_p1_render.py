@@ -122,6 +122,9 @@ class TestGlossary:
         assert '+6.79%' in chan_rows and '次日开盘' in chan_rows
         # A50 快照口径披露（P1-5 采集侧评估收口，附录 C.5）
         assert any('A50' in t for t in terms)
+        # W7：A50 观察锚口径两词条补句（不入触发）
+        assert any('盘前预案含 A50 观察锚' in d for _, d in _GLOSSARY_ROWS)
+        assert any('不入 P1/P3 触发' in d for t, d in _GLOSSARY_ROWS if 'A50' in t)
 
 
 # ---------------------------------------------------------------- P1-5
@@ -308,6 +311,73 @@ class TestChanDigestSection:
         blocks = tomorrow_plan.build(agg)
         text = '\n'.join(str(b) for b in blocks)
         assert 'V4 缠论池' not in text
+
+
+# ---------------------------------------------------------------- W7 A50 观察锚
+
+def _tp_agg(overseas=None, a50_source=None, next_td=None):
+    """tomorrow_plan.build 最小合成 agg：两锚 overseas_indices + A50 行可插拔。"""
+    env = {'overseas': overseas or [], 'a50_source': a50_source,
+           'overseas_indices': [
+               {'name': '恒生指数', 'date': '20261023', 'close': 23093.0,
+                'chg_5d': -1.2, 'position_pct': 40.0},
+               {'name': '纳斯达克', 'date': '20261023', 'close': 25955.0,
+                'chg_5d': 0.8, 'position_pct': 60.0}]}
+    return {'sentiment': {'available': True,
+                          'data': {'cycle': {'position': '回暖/震荡'}}},
+            'market_env': {'available': True, 'data': env},
+            'sector': {'available': True, 'data': {}},
+            'as_of': '20261023', 'next_trade_date': next_td}
+
+
+class TestTomorrowPlanA50W7:
+    def _texts(self, agg):
+        return [b.get('text', '') for b in tomorrow_plan.build(agg, {})]
+
+    def test_a50_note_and_weekend_gap(self):
+        """W7：kline 源出 A50 观察锚 note；周五锚定（+4 天）出周末缝提示"""
+        a50 = {'name': '富时A50期货', 'close': 13039.0, 'date': '20261024'}
+        texts = self._texts(_tp_agg(overseas=[a50], a50_source='kline',
+                                    next_td='20261027'))
+        assert any('A50 期货观察锚（不入触发）' in t and '13,039' in t
+                   for t in texts)
+        assert any('距下一交易日 4 天' in t for t in texts)
+
+    def test_a50_note_absent_snapshot_gap1_no_note(self):
+        """W7：snapshot 源不出 A50 note；日历差 1 天不出周末缝提示"""
+        a50 = {'name': '富时A50期货', 'close': 13039.0, 'date': '20261024'}
+        texts = self._texts(_tp_agg(overseas=[a50], a50_source='snapshot',
+                                    next_td='20261024'))
+        assert not any('A50 期货观察锚' in t for t in texts)
+        assert not any('距下一交易日' in t for t in texts)
+
+    def test_bad_next_td_degrades(self):
+        """W7：next_trade_date 形状异常不抛错（ValueError→gap=1 不渲染）"""
+        a50 = {'name': '富时A50期货', 'close': 13039.0, 'date': '20261024'}
+        texts = self._texts(_tp_agg(overseas=[a50], a50_source='kline',
+                                    next_td='bad-date'))
+        assert not any('距下一交易日' in t for t in texts)
+
+
+class TestNextTradeDate:
+    def test_next_trade_date_w7(self):
+        """W7：复用 _next_n_dates 取首元素；空结果/查询异常→None 不拖垮聚合"""
+        class _OneRowReader:
+            def _query(self, sql, params=None):
+                return [('2026-10-27',)]
+
+        class _BoomReader:
+            def _query(self, sql, params=None):
+                raise RuntimeError('db down')
+
+        cfg = {'review': {'sentiment_calibrated': True,
+                          'sentiment_rules': {'climax': {}, 'ice': {}, 'ebb': {}}}}
+        assert ReviewAggregator(_OneRowReader(), cfg)._next_trade_date(
+            '20261023') == '20261027'
+        assert ReviewAggregator(_EmptyReader(), cfg)._next_trade_date(
+            '20261023') is None
+        assert ReviewAggregator(_BoomReader(), cfg)._next_trade_date(
+            '20261023') is None
 
 
 class TestDigestAnchorConfNote:

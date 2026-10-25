@@ -13,6 +13,7 @@ review.tomorrow_plan 可调，待用户校准定稿（流程同情绪判据 §3�
 from __future__ import annotations
 
 import json
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -148,6 +149,31 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
                        'text': '对照口径：转天盘前以隔夜（假期场景为累计）收盘较上表基准的分档'
                                f'变动触发情景；基准为报告锚定日口径（同锚定日可复现），'
                                '假期最新外围状态以链 CSV 与 digest 解读为准'})
+        # W7 Phase 1：A50 观察锚（不入触发）+ 周末触发缝提示（零红线冲突：
+        # 基准为锚定日口径的 A50 行，实时读数观察归解读/盘前操作层）
+        env = (agg.get('market_env') or {}).get('data') or {}
+        a50_row = next((o for o in (env.get('overseas') or [])
+                        if o.get('name') == '富时A50期货'), None)
+        if (a50_row and env.get('a50_source') == 'kline'
+                and a50_row.get('close') is not None):
+            blocks.append({'type': 'note',
+                           'text': f'A50 期货观察锚（不入触发）：{a50_row["close"]:,.0f}'
+                                   f'（{a50_row.get("date", "—")}，锚定日口径隔夜环比见§一）'
+                                   '——近连续交易、周末亦报价；盘前可对照实时 A50 读数'
+                                   '观察周末/隔夜缺口，P1/P3 触发仍以恒指/纳指为准'
+                                   '（Phase 1 观察，积累 2 周后评估是否入触发器）'})
+        as_of, next_td = agg.get('as_of'), agg.get('next_trade_date')
+        if as_of and next_td:
+            try:
+                gap = (date.fromisoformat(f'{next_td[:4]}-{next_td[4:6]}-{next_td[6:8]}')
+                       - date.fromisoformat(f'{as_of[:4]}-{as_of[4:6]}-{as_of[6:8]}')).days
+            except ValueError:
+                gap = 1
+            if gap > 1:
+                blocks.append({'type': 'note',
+                               'text': f'距下一交易日 {gap} 天：恒指/纳指期间无新收盘，'
+                                       '盘前 P1/P3 重判以两锚现值为准无增量——'
+                                       '周末缺口以 A50 观察锚实时读数观察（不入触发）'})
 
     # --- 盘中验证（V 系列验点：V1 量能 / V1.5 量价联动 / V2 梯队 / V3 溢价 / V4 缠论）---
     blocks.append({'type': 'heading', 'level': 3,

@@ -198,7 +198,8 @@ class ReviewAggregator:
     #: v6：指标面板窗口 133→522 与链对齐（指标状态/分布/对拍输出变更）
     #: v7：A50 日频优先（overseas 行 kline 覆盖 + a50_source 键）
     #: v8：A50 日频 as_of 截断（防前视——v7 历史缓存含未来值须失效）
-    AGG_CACHE_VERSION = 'v8-20261025'
+    #: v9：out 增 next_trade_date（W7 周末缝提示）——旧缓存缺键须失效
+    AGG_CACHE_VERSION = 'v9-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -260,6 +261,7 @@ class ReviewAggregator:
         out: Dict[str, Any] = {
             'as_of': as_of,
             'prev_date': prev_date,
+            'next_trade_date': self._next_trade_date(as_of),
             'window_start': start,
             'panel_rows': int(len(df)),
             'stock_count': int(cs_today['ts_code'].nunique()) if not cs_today.empty else 0,
@@ -2244,6 +2246,15 @@ class ReviewAggregator:
             "WHERE is_trading_day = 1 AND calendar_date > %s "
             "ORDER BY calendar_date ASC LIMIT %s", (as_of, n))
         return [str(r[0]).replace('-', '') for r in rows]
+
+    def _next_trade_date(self, as_of: str) -> Optional[str]:
+        """as_of 后第一个交易日（W7 周末缝提示；空结果/查询异常→None 不拖垮聚合）。"""
+        try:
+            dates = self._next_n_dates(as_of, 1)
+            return dates[0] if dates else None
+        except Exception as e:  # noqa: BLE001 —— 日历缺行/库异常降级
+            logger.warning(f'下一交易日查询失败: {e}')
+            return None
 
     # ------------------------------------------------------------------ 开发项 E：题材自算归因
 
