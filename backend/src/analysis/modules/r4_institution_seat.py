@@ -59,4 +59,7 @@ class R4InstitutionSeat(AnalysisModule):
 
         if not is_r4(net, name_has_st):
             return ModuleResult('否')
+        # P4-1（B3）：链侧 VETO 入口——与报告层两入口同源（env 装配 cand_veto_map）
+        if (ctx.upstream.get('cand_veto_map') or {}).get(ctx.stock.ts_code):
+            return ModuleResult('否')
         return ModuleResult(f'机构净买{net / 1e8:+.2f}亿', {'net': net})

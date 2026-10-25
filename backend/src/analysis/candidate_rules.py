@@ -195,6 +195,12 @@ def veto_reasons(*, is_st: bool = False, profit_yoy: Optional[float] = None,
     - 资金面：龙虎榜卖一占比超限（``lhb_sell1_pct`` > 阈值）。
 
     缺失入参不过对应否决（不硬造）；暴雷阈值含等号（≤阈值即暴雷）。
+
+    P4-1 接线注记：高位板长阴三项（streak≥高位阈值 / 放量≥R3 下限 /
+    change_rate≤−3%）在涨停池内结构性互斥——池内行收盘涨停 change_rate
+    ≥ +9.8%，与 ≤−3% 不可能同时成立，故该项实际不可达；谓词接线已入
+    真实字段（aggregator R1/R2 行级），语义修订（「炸板长阴」或「近 N 日
+    最高板」口径）属结论性规则变更，待用户决策后实施。
     """
     r = _rules(rules)
     reasons: List[str] = []

@@ -38,6 +38,8 @@ from ..review.valuation_calc import (
     OK, pe_deducted_annualized, pe_digestion_years, peg, profit_cagr_hist,
 )
 from ..utils.financial_ttm import single_quarter, ttm_series
+from .candidate_rules import BUY_RULES
+from .candidate_veto import load_candidate_veto_map
 from .limit_up_rules import board_of, dynamic_thresholds, limit_pct_series
 
 logger = logging.getLogger(__name__)
@@ -266,6 +268,13 @@ def _assemble_candidates(reader, as_of: str, config_manager) -> Dict[str, Any]:
     ann_window = int(((review_cfg.get('attribution') or {})
                       .get('ann_window_days')) or 3)
 
+    # P4-1（B3）：VETO map 链侧入口——与报告层 _candidate_veto_map 同一装载器
+    # （candidate_veto 单一出处），rules 与报告层同构（BUY_RULES + config 合并）
+    cand_rules = dict(BUY_RULES)
+    cand_rules.update(((review_cfg.get('tomorrow_plan') or {})
+                       .get('buy_rules')) or {})
+    veto_map = load_candidate_veto_map(reader, as_of, cand_rules)
+
     limit_up_codes = _limit_up_codes(reader, as_of)
     theme_map = _theme_map(reader, as_of)
     top_concepts = _top_concepts(theme_map, limit_up_codes, blacklist)
@@ -277,10 +286,10 @@ def _assemble_candidates(reader, as_of: str, config_manager) -> Dict[str, Any]:
 
     logger.info('候选环境装配：涨停 %d 只 / 概念映射 %d 股 / 聚集前列 %s / '
                 '封板数据 %d 股 / 机构净买前 5 %d 只 / 资金历史 %d 股 / '
-                '公告窗口 %d 日 %d 股',
+                '公告窗口 %d 日 %d 股 / VETO 预查 %d 股',
                 len(limit_up_codes), len(theme_map), top_concepts,
                 len(seal_map), len(inst_map), len(mf_history_map),
-                ann_window, len(announcement_map))
+                ann_window, len(announcement_map), len(veto_map))
     return {
         'cand_seal_open_map': seal_map,
         'cand_theme_map': theme_map,
@@ -289,6 +298,7 @@ def _assemble_candidates(reader, as_of: str, config_manager) -> Dict[str, Any]:
         'cand_institution_net_map': inst_map,
         'mf_history_map': mf_history_map,
         'cand_announcement_map': announcement_map,
+        'cand_veto_map': veto_map,
     }
 
 

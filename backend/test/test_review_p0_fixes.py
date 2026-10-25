@@ -411,3 +411,91 @@ class TestP48RPoolPrior:
         blocks2 = tomorrow_plan._buy_candidates(agg2, {})
         text2 = ''.join(str(b.get('text', '')) for b in blocks2)
         assert 'R1 先验（核验体系前向积累，近 3 个核验日）' in text2
+
+
+# ------------------------------------------------------------------ P4-1
+
+class TestP41CandidateVetoShared:
+    """P4-1（B3）：VETO 单一出处 + 卖一占比接线 + 链侧入口。
+
+    load_candidate_veto_map 为报告层与链侧 env 装配共用（两入口否决清单
+    一致）；卖一占比 = SUM(卖1)/SUM(卖席)，受 lhb_published（P4-6）门控。
+    """
+
+    class _VetoDB3:
+        """按表名分发预置行的 stub（捕获查询供断言）。"""
+
+        def __init__(self, sell1_rows=None, now=None):
+            self.sell1_rows = sell1_rows or []
+            self.now = now
+            self.queries = []
+
+        def _query(self, sql, params=None):
+            s = str(sql)
+            self.queries.append(s)
+            if 'base_financial_report' in s:
+                return []                      # 无暴雷
+            if 'announcement_daily' in s:
+                return []                      # 无减持
+            if 'lhb_detail' in s:
+                return self.sell1_rows
+            return []
+
+    def test_sell1_veto_wired(self):
+        from src.analysis.candidate_veto import load_candidate_veto_map
+        db = self._VetoDB3(sell1_rows=[('sh.600519', 45.0), ('sz.000001', 12.0)])
+        out = load_candidate_veto_map(db, '20261023', {})
+        assert 'sh.600519' in out
+        assert any('卖一占比45%超限' in r for r in out['sh.600519'])
+        assert 'sz.000001' not in out          # 未超阈不出池
+
+    def test_sell1_reason_combines_with_profit(self):
+        """卖一占比与业绩暴雷并存时理由合并（veto_reasons 单一谓词源）"""
+        from src.analysis.candidate_veto import load_candidate_veto_map
+
+        class _DB(self._VetoDB3):
+            def _query(self, sql, params=None):
+                s = str(sql)
+                if 'base_financial_report' in s:
+                    return [('sh.600519', -80.0)]
+                return super()._query(sql, params)
+
+        out = load_candidate_veto_map(_DB(sell1_rows=[('sh.600519', 45.0)]),
+                                      '20261023', {'veto_profit_yoy': -50.0})
+        joined = '；'.join(out['sh.600519'])
+        assert '业绩暴雷' in joined and '卖一占比45%超限' in joined
+
+    def test_sell1_skipped_before_publish_time(self):
+        """P4-6 门控联动：当日未到 17:30 时不发 lhb_detail 查询、不产生卖一否决"""
+        from src.analysis.candidate_veto import load_candidate_veto_map
+        from datetime import datetime
+        db = self._VetoDB3(sell1_rows=[('sh.600519', 45.0)],
+                           now=datetime(2026, 10, 23, 16, 0))
+        out = load_candidate_veto_map(db, '20261023', {}, now=db.now)
+        assert out == {}
+        assert not any('lhb_detail' in q for q in db.queries)
+
+    def test_report_layer_delegates(self):
+        """报告层 _candidate_veto_map 委托同一装载器（SQL 形状保持 C3 约束）"""
+        agg = ReviewAggregator(self._VetoDB3(), {'review': {}})
+        out = agg._candidate_veto_map('20261023', {})
+        assert out == {}
+        assert any('disclosure_date' in q for q in agg.db.queries)
+        assert any('COALESCE' in q for q in agg.db.queries)
+
+    def test_chain_r4_veto_gate(self):
+        """链侧入口：R4 模块命中 veto_map → 否（与报告层出池一致）"""
+        from src.analysis.module_base import ChainContext, ModuleResult, StockInfo
+        from src.analysis.modules.r4_institution_seat import R4InstitutionSeat
+        base_up = {'R1梯队接力': ModuleResult('否'),
+                   'R2主线跟随': ModuleResult('否'),
+                   'R3趋势新高': ModuleResult('否'),
+                   'cand_institution_net_map': {'sh.600000': 2.0e8}}
+        stock = StockInfo(ts_code='sh.600000', stock_code='600000',
+                          stock_name='浦发银行')
+        vetoed = dict(base_up, cand_veto_map={'sh.600000': ['大股东减持']})
+        assert R4InstitutionSeat().analyze(None, ChainContext(
+            as_of='20261023', stock=stock, upstream=vetoed)).value == '否'
+        clean = R4InstitutionSeat().analyze(None, ChainContext(
+            as_of='20261023', stock=stock, upstream=base_up))
+        assert '机构净买' in str(clean.value)

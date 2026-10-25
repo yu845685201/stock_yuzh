@@ -92,6 +92,9 @@ class R3TrendNewHigh(AnalysisModule):
                      float(change_rate), self.params,
                      open_gain=open_gain, close_lt_open=close_lt_open):
             return ModuleResult('否')
+        # P4-1（B3）：链侧 VETO 入口——与报告层两入口同源（env 装配 cand_veto_map）
+        if (ctx.upstream.get('cand_veto_map') or {}).get(ctx.stock.ts_code):
+            return ModuleResult('否')
         label = f'新高/{float(change_rate):+.1f}%/{volume_surge:.1f}x'
         return ModuleResult(label, {'change_rate': float(change_rate),
                                     'volume_surge': volume_surge,

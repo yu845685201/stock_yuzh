@@ -86,6 +86,9 @@ class R2MainlineFollow(AnalysisModule):
         if not is_r2(streak, is_st, concepts, top_concepts,
                      cluster_count=cluster_count):
             return ModuleResult('否')
+        # P4-1（B3）：链侧 VETO 入口——与报告层两入口同源（env 装配 cand_veto_map）
+        if (ctx.upstream.get('cand_veto_map') or {}).get(ctx.stock.ts_code):
+            return ModuleResult('否')
         # 命中概念取聚集序最前（P3-4 防御分支：is_r2 保证非空，理论不可达）
         hit = hit_concept_top(top_concepts, concepts)
         if hit is None:

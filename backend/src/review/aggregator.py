@@ -79,18 +79,11 @@ class AggregationResult:
         return hasattr(self, key)
 
 
-#: P4-6（B10）：龙虎榜发布时点——交易所 17:30 后发布，当日盘后早跑不得把当日榜
-#: 当已发布呈现（防部分交易所先发布的部分数据被当全量 Top10 引用）
-LHB_PUBLISH_TIME = dtime(17, 30)
-
-
-def lhb_published(as_of: str, now: Optional[datetime] = None) -> bool:
-    """龙虎榜是否已到可引用时点（P4-6 门控；as_of=当天且未到 17:30 → False）。
-
-    历史 as_of（早于当天）恒为已发布；now 可注入便于测试。
-    """
-    now = now or datetime.now()
-    return str(as_of) != now.strftime('%Y%m%d') or now.time() >= LHB_PUBLISH_TIME
+# P4-6/P4-1：lhb 发布时点门控移至 analysis.candidate_veto 单一出处（报告层与
+# 链侧 env 装配共用）；此处 re-export 保持 P4-6 既有导入路径兼容
+from ..analysis.candidate_veto import (LHB_PUBLISH_TIME,  # noqa: E402,F401
+                                       lhb_published,
+                                       load_candidate_veto_map)
 
 
 def _values_match(mine: Any, theirs: Any) -> bool:
@@ -152,7 +145,8 @@ class ReviewAggregator:
     # ------------------------------------------------------------------ 入口
 
     #: P3-2（C5）聚合缓存版本号：聚合层任何影响产出的代码变更时手动 +1（防陈旧缓存）
-    AGG_CACHE_VERSION = 'v2-20261025'
+    #: v3：P4-5 判据表第 4 行（涨跌家数比）+ P4-1 VETO map 卖一占比接线（两处聚合产出变更）
+    AGG_CACHE_VERSION = 'v3-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -2204,60 +2198,14 @@ class ReviewAggregator:
 
     def _candidate_veto_map(self, as_of: str,
                             rules: Dict[str, Any]) -> Dict[str, List[str]]:
-        """候选 VETO 预查（P1-7 §4.6 B 事件/基本面两项；技术/资金项在行内算）。
+        """候选 VETO 预查（P4-1 起委托 analysis.candidate_veto 单一出处）。
 
-        两路查询：① base_financial_report 最新报告期 net_profit_yoy（暴雷
-        阈值）；② announcement_daily 前 3 个自然日 ann_type='增减持'（大股东
-        减持）。查询失败 → 对应项不过滤（不硬造否决）。
-
-        ① 加披露日约束（C3 前视偏差）：只取 disclosure_date <= as_of 的行，
-        防止用 as_of 之后才公告的财报否决历史候选（历史 as-of 重跑不可复现）。
-        disclosure_date 缺失时回退保守估计"报告期 + 304 天"（≈10 个月，覆盖
-        年报最晚披露期限），即无法证明 as_of 前已披露的一律不采纳。
+        两入口同源：报告层与链侧 env 装配共用 ``load_candidate_veto_map``
+        （业绩暴雷含披露约束 C3 / 大股东减持 / 龙虎榜卖一占比 + P4-6 发布
+        时点门控），保证否决清单一致。高位板长阴为行级谓词，在 R1/R2 行
+        构建处接入 ``veto_reasons``（结构可达性注记见 veto_reasons docstring）。
         """
-        profit_map: Dict[str, float] = {}
-        try:
-            rows = self.db._query(
-                """
-                SELECT DISTINCT ON (ts_code) ts_code, net_profit_yoy
-                FROM base_financial_report
-                WHERE net_profit_yoy IS NOT NULL
-                  AND COALESCE(disclosure_date,
-                               to_char(to_date(stat_date, 'YYYYMMDD') + 304,
-                                       'YYYYMMDD')) <= %s
-                ORDER BY ts_code,
-                         COALESCE(disclosure_date,
-                                  to_char(to_date(stat_date, 'YYYYMMDD') + 304,
-                                          'YYYYMMDD')) DESC,
-                         stat_date DESC
-                """, (str(as_of),))
-            profit_map = {str(t): float(v) for t, v in rows if v is not None}
-        except Exception as e:
-            logger.warning(f'VETO 业绩同比读取失败: {e}')
-
-        reduction_codes: set = set()
-        try:
-            from datetime import datetime, timedelta
-            end = datetime.strptime(str(as_of), '%Y%m%d')
-            start = (end - timedelta(days=2)).strftime('%Y%m%d')
-            rows = self.db._query(
-                "SELECT DISTINCT ts_code FROM announcement_daily "
-                "WHERE ann_type = '增减持' AND ann_date BETWEEN %s AND %s",
-                (start, str(as_of)))
-            reduction_codes = {str(r[0]) for r in rows}
-        except Exception as e:
-            logger.warning(f'VETO 减持公告读取失败: {e}')
-
-        out: Dict[str, List[str]] = {}
-        for ts_code, yoy in profit_map.items():
-            reasons = veto_reasons(profit_yoy=yoy, rules=rules)
-            if ts_code in reduction_codes:
-                reasons.append('大股东减持')
-            if reasons:
-                out[ts_code] = reasons
-        for ts_code in reduction_codes - set(profit_map):
-            out[ts_code] = ['大股东减持']
-        return out
+        return load_candidate_veto_map(self.db, as_of, rules)
 
     def _index_adx_gate(self, as_of: str) -> Dict[str, Any]:
         """指数 ADX 闸门（P1-7 §4.6 E）：档位控制候选开放度。
@@ -2424,7 +2372,13 @@ class ReviewAggregator:
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
                 'score': _cand_score(big_net, vs, _cluster_hit(ts_code)),
-                'veto': veto_map.get(ts_code) or [],
+                # P4-1：行级谓词接入真实字段（高位板长阴）——涨停池内
+                # change_rate≥+9.8% 与 ≤−3% 结构性互斥、实际不可达，保留接线
+                # 待语义修订（见 veto_reasons docstring P4-1 注记）
+                'veto': (list(veto_map.get(ts_code) or [])
+                         + veto_reasons(streak=streak, volume_surge=vs,
+                                        change_rate=_f(r.get('change_rate')),
+                                        rules=rules)),
                 'label': (f'{tier}/{streak}板/封板数据缺失' if oc is None
                           else f'{tier}/{streak}板/开板{int(oc)}次')})
         r1_rows.sort(key=lambda x: (-x['streak'], -(x['amount'] or 0)))
@@ -2461,7 +2415,11 @@ class ReviewAggregator:
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
                 'score': _cand_score(big_net, vs, cc),
-                'veto': veto_map.get(ts_code) or [],
+                # P4-1：行级谓词接入真实字段（同 R1——涨停池内结构性不可达）
+                'veto': (list(veto_map.get(ts_code) or [])
+                         + veto_reasons(streak=streak, volume_surge=vs,
+                                        change_rate=_f(r.get('change_rate')),
+                                        rules=rules)),
                 'label': f'首板/{hit}' + (f'(聚集{cc}家)' if cc is not None else '')})
         r2_rows.sort(key=lambda x: -(x['amount'] or 0))
         used.update(r['ts_code'] for r in r2_rows)

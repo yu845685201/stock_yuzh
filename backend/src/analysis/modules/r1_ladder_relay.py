@@ -69,6 +69,9 @@ class R1LadderRelay(AnalysisModule):
 
         if not is_r1(streak, is_st, open_count, self.params):
             return ModuleResult('否')
+        # P4-1（B3）：链侧 VETO 入口——与报告层两入口同源（env 装配 cand_veto_map）
+        if (ctx.upstream.get('cand_veto_map') or {}).get(ctx.stock.ts_code):
+            return ModuleResult('否')
         tier = r1_tier(streak, self.params) or ''
         if open_count is None:
             label = f'{tier}/{streak}板/封板数据缺失'
