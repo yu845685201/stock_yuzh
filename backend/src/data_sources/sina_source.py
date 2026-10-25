@@ -46,6 +46,46 @@ class SinaSource(HttpCollectorBase):
             referer=SINA_REFERER,
         )
 
+    def fetch_global_futures_daily(self, symbol: str,
+                                   start: Optional[str] = None,
+                                   end: Optional[str] = None) -> List[Dict[str, Any]]:
+        """全球期货日K（如 CHA50CFD 富时A50）——A50 日频源（附录 C.5 接入）。
+
+        返回 [{trade_date: YYYYMMDD, open, high, low, close, volume}]（date 升序，
+        start/end 为 YYYYMMDD 闭区间过滤）。接口一次返回全量历史（2016-10 起），
+        无分页。 Raises: IfzqSourceError 同族的采集基类异常（风控退避复用）。
+        """
+        text = self.get_text(GLOBAL_FUTURES_KLINE_URL, params={'symbol': symbol})
+        return self.parse_global_futures_daily(text, start, end)
+
+    @staticmethod
+    def parse_global_futures_daily(text: str,
+                                   start: Optional[str] = None,
+                                   end: Optional[str] = None) -> List[Dict[str, Any]]:
+        """jsonp ``var t=([{...}])`` → 行清单（静态可测；坏响应抛 ValueError）。"""
+        import json as _json
+        i, j = text.find('['), text.rfind(']')
+        if i < 0 or j <= i:
+            raise ValueError(f'全球期货日K响应无可解析数组: {text[:80]!r}')
+        items = _json.loads(text[i:j + 1])
+        rows: List[Dict[str, Any]] = []
+        for it in items:
+            d = str(it.get('date') or '').replace('-', '')
+            close = _to_float(it.get('close'))
+            if len(d) != 8 or close is None:
+                continue
+            if start and d < start:
+                continue
+            if end and d > end:
+                continue
+            rows.append({'trade_date': d,
+                         'open': _to_float(it.get('open')),
+                         'high': _to_float(it.get('high')),
+                         'low': _to_float(it.get('low')),
+                         'close': close,
+                         'volume': _to_float(it.get('volume'))})
+        return rows
+
     def fetch_markets(self, markets: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """批量抓取市场报价。
 
@@ -159,6 +199,12 @@ class SinaSource(HttpCollectorBase):
                     'name': fields[0] if fields else None,
                 }
         return result
+
+
+#: 全球期货日K（A50 接入，P1-5 采集侧收口/附录 C.5：jsonp 全量历史，date 升序）
+GLOBAL_FUTURES_KLINE_URL = (
+    'https://stock.finance.sina.com.cn/futures/api/jsonp.php/var%20t=/'
+    'GlobalFuturesService.getGlobalFuturesDailyKLine')
 
 
 def _to_float(value: Optional[str]) -> Optional[float]:

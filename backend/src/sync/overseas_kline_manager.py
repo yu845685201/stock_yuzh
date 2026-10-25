@@ -80,13 +80,17 @@ class OverseasKlineManager:
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_review_tables()
         self.source = IfzqSource(self.config)
+        self.sina = SinaSource(self.config)
         review = self.config.get('review_sync', {}) or {}
         self.indices: List[Dict[str, str]] = list(review.get('overseas_kline_indices', []) or [])
         self.stocks: List[Dict[str, str]] = list(review.get('overseas_kline_stocks', []) or [])
+        # A50 日频源（P1-5 采集侧收口，附录 C.5）：独立键不并入 indices——
+        # 外围指数链（overseas_index_scan）维持 6 指数口径不受扰动
+        self.futures: List[Dict[str, str]] = list(review.get('overseas_kline_futures', []) or [])
         self.init_years = int(review.get('overseas_kline_init_years', 10))
         # 代码注册表：code -> {name, a_code, is_stock, adj_type}（重复代码后到者忽略）
         self.registry: Dict[str, Dict[str, Any]] = {}
-        for item in self.indices + self.stocks:
+        for item in self.indices + self.stocks + self.futures:
             code = (item.get('code') or '').strip()
             if not code or code in self.registry:
                 continue
@@ -96,6 +100,7 @@ class OverseasKlineManager:
                 'a_code': (item.get('a_code') or '').strip() or None,
                 'is_stock': is_stock,
                 'adj_type': 'qfq' if is_stock else 'raw',
+                'source': (item.get('source') or 'ifzq').strip(),
             }
 
     # ---------- 入口 ----------
@@ -177,6 +182,8 @@ class OverseasKlineManager:
         增量模式先做 qfq 重述检测：尾部与库内重叠日期 close 变化 → 全历史重拉
         （公司行动后 qfq 基准滚动，避免表内新旧基准拼接出人为跳变）。
         """
+        if info.get('source') == 'sina_futures':
+            return self._collect_sina_futures(code, windows)
         if windows is None:
             latest = self.db.fetch_overseas_kline_latest_date(code)
             count = _INCREMENTAL_COUNT if latest else _SEED_COUNT
@@ -195,6 +202,36 @@ class OverseasKlineManager:
             rows = self._fetch_windows(code, windows, stats)
         for r in rows:
             r['adj_type'] = info['adj_type']  # 指数 raw / 个股 qfq（滚动口径）
+        last = {'trade_date': rows[-1]['trade_date'], 'close': rows[-1]['close']} \
+            if rows else None
+        return last, rows
+
+    def _collect_sina_futures(self, code: str,
+                              windows: Optional[List[Tuple[str, str]]]
+                              ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """新浪全球期货日K源（A50，附录 C.5）：一次全量 → 客户端过滤。
+
+        增量 = 库内最新日之后；无库行 = 全量（接口本就一次给齐，无分页）。
+        raw 口径无 qfq 重述问题；风控退避复用采集基类。
+        """
+        rows_all = self.sina.fetch_global_futures_daily(code)
+        if windows:
+            keep = []
+            for w_start, w_end in windows:
+                keep.extend(r for r in rows_all
+                            if w_start.replace('-', '') <= r['trade_date'] <= w_end.replace('-', ''))
+            rows = keep
+        else:
+            latest = self.db.fetch_overseas_kline_latest_date(code)
+            if latest:
+                latest_key = str(latest).replace('-', '')
+                rows = [r for r in rows_all if r['trade_date'] > latest_key]
+            else:
+                rows = rows_all
+        for r in rows:
+            r['adj_type'] = 'raw'
+            r['market_code'] = code
+            r['source'] = 'sina_futures'
         last = {'trade_date': rows[-1]['trade_date'], 'close': rows[-1]['close']} \
             if rows else None
         return last, rows

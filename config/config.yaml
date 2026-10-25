@@ -339,6 +339,10 @@ review_sync:
     - {code: usDJI, name: 道琼斯}
     - {code: usIXIC, name: 纳斯达克}
     - {code: usINX, name: 标普500}
+  # A50 日频源（P1-5 采集侧收口，附录 C.5，2026-10-25 接入）：新浪全球期货日K，
+  # 独立键不并入 indices——外围指数链维持 6 指数口径；市场自身交易日历（新交所）
+  overseas_kline_futures:
+    - {code: CHA50CFD, name: 富时A50期货, source: sina_futures}
   overseas_kline_stocks:
     # —— A-H 两地上市（15 只，H 股采集 + a_code 映射；A 股侧不入外围表） ——
     - {code: hk01211, name: 比亚迪股份, a_code: sz.002594}

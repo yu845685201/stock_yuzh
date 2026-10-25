@@ -268,14 +268,28 @@ def build(env: Dict[str, Any], sentiment: Dict[str, Any],
     if overseas:
         stale_days = _snapshot_stale_days(overseas[0].get('date'),
                                           data.get('as_of'))
+        a50_kline = data.get('a50_source') == 'kline'
+        a50_row = next((o for o in overseas if o['name'] == '富时A50期货'), None) \
+            if a50_kline else None
         if stale_days is not None and stale_days > 10:
+            snap_rows = [[o['name'], o['close']] for o in overseas
+                         if not (a50_row and o is a50_row)]
             blocks.append({'type': 'heading', 'level': 3,
                            'text': f"汇率与其他（{overseas[0].get('date', '最新可得')}，"
                                    f"快照过期 {stale_days} 天）"})
             blocks.append({'type': 'table', 'headers': ['市场', '收盘'],
-                           'rows': [[o['name'], o['close']] for o in overseas]})
+                           'rows': snap_rows})
+            a50_note = ''
+            if a50_row:
+                blocks.append({'type': 'table',
+                               'headers': ['市场（日K口径）', '收盘', '涨跌幅%'],
+                               'rows': [[a50_row['name'], a50_row['close'],
+                                         a50_row.get('change_pct')]]})
+                a50_note = (f"A50 为日K口径（{a50_row.get('date')}，新浪全球期货日K，"
+                            '隔夜涨跌幅=最新两根收盘环比），不受快照停更显；')
             blocks.append({'type': 'note',
-                           'text': f'快照过期 {stale_days} 天（overseas_market_daily '
+                           'text': a50_note
+                                   + f'快照过期 {stale_days} 天（overseas_market_daily '
                                    '最新可得为上述日期），涨跌幅为跨期累计值无隔夜含义，'
                                    '整列停显；汇率为采集时点最新值'})
         else:
@@ -293,16 +307,18 @@ def build(env: Dict[str, Any], sentiment: Dict[str, Any],
             ov_rows = []
             for o in overseas:
                 chg = o.get('change_pct')
-                if o['name'] == '富时A50期货' and chg is not None:
+                if (o['name'] == '富时A50期货' and chg is not None
+                        and o is not a50_row):
                     chg = f"{chg}{stale_mark}"
                 ov_rows.append([o['name'], o['close'], chg])
             blocks.append({'type': 'table', 'headers': ['市场', '收盘', '涨跌幅%'],
                            'rows': ov_rows})
+            a50_note = ('A50 为日K口径（新浪全球期货日K，隔夜涨跌幅=最新两根收盘环比）；'
+                        if a50_row else
+                        'A50 期货涨跌幅为本地昨收自算（快照无昨结字段）；')
             blocks.append({'type': 'note',
                            'text': '口径：overseas_market_daily 快照最新可得；'
-                                   + note_extra
-                                   + 'A50 期货涨跌幅为本地昨收自算（快照无昨结字段）；'
-                                     '汇率为采集时点最新值'})
+                                   + note_extra + a50_note + '汇率为采集时点最新值'})
 
     # ③ 假期外围观察（B4/B5 未触发时为 None）
     hol = data.get('holiday_overseas')

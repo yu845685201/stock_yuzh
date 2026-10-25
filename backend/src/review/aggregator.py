@@ -185,7 +185,9 @@ class ReviewAggregator:
     #: v3：P4-5 判据表第 4 行（涨跌家数比）+ P4-1 VETO map 卖一占比接线（两处聚合产出变更）
     #: v4：P4-2 五维评分补全（候选行 score 计入基本面/事件两维）
     #: v5：P4-1 反抽板 veto（近 N 日高位板放量长阴，R1/R2 行 veto 列可新增理由）
-    AGG_CACHE_VERSION = 'v5-20261025'
+    #: v6：指标面板窗口 133→522 与链对齐（指标状态/分布/对拍输出变更）
+    #: v7：A50 日频优先（overseas 行 kline 覆盖 + a50_source 键）
+    AGG_CACHE_VERSION = 'v7-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -303,8 +305,17 @@ class ReviewAggregator:
         adv_dec = self._advance_decline(cs_today)
         overseas_all = self._overseas_all()
         overseas = [r for r in overseas_all if r['name'] in _OVERSEAS_SNAPSHOT_WHITELIST]
+        # A50 日频优先（P1-5 采集侧收口，附录 C.5）：overseas_kline_day 有行时
+        # 以日K两根收盘自算隔夜涨跌幅覆盖快照行；缺行/读失败回退快照（P1-5 降级）
+        a50 = self._a50_from_kline()
+        if a50:
+            overseas = [a50 if o['name'] == '富时A50期货' else o
+                        for o in overseas] or [a50]
+            if not any(o['name'] == '富时A50期货' for o in overseas):
+                overseas.insert(0, a50)
         data = {'indices': indices, 'turnover': turnover,
                 'advance_decline': adv_dec, 'overseas': overseas,
+                'a50_source': 'kline' if a50 else 'snapshot',
                 'overseas_all': overseas_all,
                 'style_spread': self._style_spread(indices),
                 # 阶段 2（V2.0 §3.5）：外围日K指数 / 假期外围观察 / A-H 映射（全部只读）
@@ -826,6 +837,31 @@ class ReviewAggregator:
         change = pd.to_numeric(traded['change_rate'], errors='coerce').dropna()
         return {'up': int((change > 0).sum()), 'down': int((change < 0).sum()),
                 'flat': int((change == 0).sum()), 'total': int(len(change))}
+
+    def _a50_from_kline(self) -> Optional[Dict[str, Any]]:
+        """A50 日频行（overseas_kline_day CHA50CFD 最新两根收盘；附录 C.5）。
+
+        涨跌幅 = 最新两根收盘环比（新交所自身交易日历，隔夜口径优于快照
+        本地昨收自算）。无行/仅一根/读失败 → None（回退快照，不硬造）。
+        """
+        try:
+            rows = self.db._query(
+                'SELECT trade_date, close FROM overseas_kline_day '
+                "WHERE market_code = 'CHA50CFD' ORDER BY trade_date DESC LIMIT 2")
+        except Exception as e:
+            logger.warning(f'A50 日K读取失败（回退快照）: {e}')
+            return None
+        if len(rows) < 2:
+            return None
+        (d1, c1), (d0, c0) = rows[0], rows[1]
+        try:
+            c1, c0 = float(c1), float(c0)
+        except (TypeError, ValueError):
+            return None
+        if c0 <= 0:
+            return None
+        return {'date': str(d1), 'name': '富时A50期货', 'close': _f(c1),
+                'change_pct': _f(round((c1 - c0) / c0 * 100, 2))}
 
     def _overseas_all(self) -> List[Dict[str, Any]]:
         """外围快照全行（最新可得日期）——日K缺失时的降级回退与快照过滤的输入"""
@@ -1879,10 +1915,12 @@ class ReviewAggregator:
                                        'total': len(rows)})
 
     def _aggregate_indicators(self, as_of: str) -> AggregationResult:
-        """技术指标状态（P0-1 §3.1.7）：133d 面板复算七模块 + 交叉榜。
+        """技术指标状态（P0-1 §3.1.7）：522d 面板复算七模块 + 交叉榜。
 
         与链同一实现两入口（indicator_panel.compute_indicator_states 调同一批
-        modules），对拍见 test_review_indicator_parity.py（链 CSV vs 本面板）。
+        modules），窗口与链 daily_review 逐字节对齐（520+2，2026-10-25 修复
+        133d 错位——此前对拍 731 处失配的根因，附录 C.6）；常量闸见
+        test_review_indicator_parity.py。
         失败/空面板 → available=False（报告渲染「⏳ 待补」，不阻塞其他维度）。
         """
         from .indicator_panel import (
