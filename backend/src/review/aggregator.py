@@ -29,6 +29,7 @@ from ..analysis.candidate_rules import (
     is_r2,
     is_r3,
     is_r4,
+    r1_reject_reason,
     r1_tier,
     score_candidate,
 )
@@ -202,7 +203,11 @@ class ReviewAggregator:
     #: v10：_next_trade_date 修 calendar_date TEXT 比较格式（_dot 归一），None→真值
     #: v11：_aggregate_unlock 同源 _dot 修复（X1）——v10 缓存 unlock=available=False 须失效
     #: v12：X2 raw-R1 命中播种 used（弱档日 R2/R3/R4 去重对齐链侧）——聚合产物变更
-    AGG_CACHE_VERSION = 'v12-20261026'
+    #: v13：V4.2 批三——turnover.series 新增（T3）+ 判据 expr 去 P4-5（T4）+
+    #:      news reason 三态分支（T6a），聚合产物变更一次升版
+    #: v14：V4.3——candidates 增 R1_filtered（A2）、cycle 增 nearest_miss（B2）、
+    #:      chan items 增 close（C1）、consec_premium 增 best（B3），聚合产物变更升版
+    AGG_CACHE_VERSION = 'v14-20261026'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -824,7 +829,11 @@ class ReviewAggregator:
     @staticmethod
     def _turnover_delta(panel: pd.DataFrame, as_of: str,
                         prev_date: Optional[str]) -> Dict[str, Any]:
-        """两市成交额今昨对比（沪深+北交所分组）"""
+        """两市成交额今昨对比（沪深+北交所分组）+ 60 日逐日序列（T3）。
+
+        series 与 today_total 同源同列（panel.amount 按日求和）——digest §一
+        成交额图末值与 V1 验点基准天然对拍一致。
+        """
         df = panel[panel['trade_date'].isin([d for d in (as_of, prev_date) if d])]
         if df.empty:
             return {}
@@ -842,6 +851,9 @@ class ReviewAggregator:
         if result['prev_total'] > 0:
             result['delta'] = result['today_total'] - result['prev_total']
             result['delta_pct'] = round(result['delta'] / result['prev_total'] * 100, 2)
+        daily = panel.groupby('trade_date')['amount'].sum().sort_index()
+        result['series'] = [{'date': str(d), 'total_yi': round(float(v) / 1e8, 2)}
+                            for d, v in daily.items()]
         return result
 
     @staticmethod
@@ -1283,7 +1295,7 @@ class ReviewAggregator:
                  'hit': False, 'role': 'position'},
                 {'name': '高潮·第二证据（独立）',
                  'expr': f"涨跌家数比≥{br_gte}（市场宽度，独立于涨停 cohort；"
-                         "初版参考阈值未校准，仅并列披露不参与定位，P4-5）",
+                         "初版参考阈值未校准，仅并列披露不参与定位）",
                  'values': (f"涨{up_count if up_count is not None else '—'} / "
                             f"跌{down_count if down_count is not None else '—'} / "
                             f"比{breadth_ratio if breadth_ratio is not None else '—'}"),
@@ -1322,13 +1334,33 @@ class ReviewAggregator:
         divergence = (q_cycle in ('高潮', '冰点', '退潮')
                       and cycle in ('高潮', '冰点', '退潮')
                       and q_cycle != cycle)
+        # V4.3 B2：距最近定位判据（仅回暖/震荡——即高潮/冰点/退潮均未命中；
+        # 同量纲比较只取溢价均值 pct 差，跨量纲高度/炸板率不比）。给"中性偏多"
+        # 倾向一个可检验的钩子（次日 V3 直接验证）；数值缺失为 None 不硬造。
+        nearest_miss = None
+        if cycle == '回暖/震荡' and premium_mean is not None:
+            c_gte = climax.get('premium_mean_gte')
+            c_lte = ebb.get('premium_mean_lte')
+            misses = []
+            if c_gte is not None and premium_mean < float(c_gte):
+                misses.append({'name': '高潮', 'metric': '溢价均值',
+                               'value': round(float(premium_mean), 2),
+                               'threshold': float(c_gte),
+                               'gap': round(float(c_gte) - float(premium_mean), 2)})
+            if c_lte is not None and premium_mean > float(c_lte):
+                misses.append({'name': '退潮', 'metric': '溢价均值',
+                               'value': round(float(premium_mean), 2),
+                               'threshold': float(c_lte),
+                               'gap': round(float(premium_mean) - float(c_lte), 2)})
+            nearest_miss = min(misses, key=lambda x: x['gap']) if misses else None
         # P1-4（C1）：原第二个不可达 return（trial 水印永不显示）删除，
         # trial 并入本 return——sentiment.py/conclusion.py 的水印消费恢复生效
         return {'position': cycle, 'basis': basis, 'criteria': criteria,
                 'trial': not self.sentiment_calibrated,
                 'quantile_position': q_cycle, 'quantile_basis': q_basis,
                 'quantile_calibration': q_calib,
-                'quantile_divergence': divergence}
+                'quantile_divergence': divergence,
+                'nearest_miss': nearest_miss}
 
     def _sentiment_cycle_trend(self, as_of: Optional[str],
                                metrics: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2025,12 +2057,17 @@ class ReviewAggregator:
                 label = hit_label(hit)
                 if flag:                      # 缺日标记并入理由串（与链侧同规则，保对拍）
                     label = f'{label}/{flag}'
+                _close_last = pd.to_numeric(g['close'], errors='coerce').iloc[-1] \
+                    if 'close' in g else None
                 items.append({
                     'ts_code': code,
                     'code': str(g['stock_code'].iloc[-1]),
                     'name': str(g['stock_name'].iloc[-1]) if 'stock_name' in g else '',
                     'label': label,
                     'kind': hit.kind,
+                    'close': (round(float(_close_last), 2)
+                              if _close_last is not None and pd.notna(_close_last)
+                              else None),
                     'stop': round(hit.stop_price, 2),
                     'trigger_low': round(hit.trigger_low, 2),
                     'zg': round(hit.zg, 2),
@@ -2238,8 +2275,22 @@ class ReviewAggregator:
             logger.warning(f'市场要闻读取失败: {e}')
             return AggregationResult(available=False, reason='news_telegraph 无数据（未采集）')
         if not rows:
-            return AggregationResult(available=False,
-                                     reason='news_telegraph 当日无行（未采集或当日无快讯）')
+            # T6（V4.2）reason 三态：库内最新 < 锚定日 = 采集断档（不可回补）；
+            # 覆盖锚定日窗口而无当日行 = 当日确无快讯。_dot 归一防 TEXT 日期格式漂移。
+            latest = None
+            try:
+                latest = self.db._query(
+                    'SELECT MAX(trade_date) FROM news_telegraph')[0][0]
+            except Exception as e:  # noqa: BLE001 —— 查询失败保留当日无行口径
+                logger.warning(f'news_telegraph 最新日期查询失败: {e}')
+            latest_s = str(latest).replace('.', '').replace('-', '') \
+                if latest is not None else None
+            if latest_s is not None and latest_s < as_of:
+                reason = (f'采集断档（库内最新 {latest_s} 早于锚定日 {as_of}；'
+                          '增量游标口径，历史缺口不可回补）')
+            else:
+                reason = '当日无快讯（已采集，当日无行）'
+            return AggregationResult(available=False, reason=reason)
         items = [{'time': str(r[0] or ''), 'title': str(r[1] or ''),
                   'content': str(r[2] or ''), 'subject': r[3],
                   'importance': int(r[4] or 0)} for r in rows]
@@ -2458,7 +2509,8 @@ class ReviewAggregator:
         rules.update(((self.config.get('review') or {}).get('tomorrow_plan')
                       or {}).get('buy_rules') or {})
         out: Dict[str, Any] = {'available': not cs_today.empty, 'rules': rules,
-                               'R1': [], 'R2': [], 'R3': [], 'R4': []}
+                               'R1': [], 'R2': [], 'R3': [], 'R4': [],
+                               'R1_filtered': []}
         if cs_today.empty:
             return out
 
@@ -2538,12 +2590,24 @@ class ReviewAggregator:
             return is_r1(streak, bool(r.get('is_st')), oc, rules)
         used |= {str(r['ts_code']) for _, r in lu.iterrows() if _r1_raw_hit(r)}
         r1_rows = []
+        # V4.3 A2：R1 拒绝明细（仅连板达标且非 ST 行，连板高度不足者不入避免
+        # 噪声）——弱档否决/开板超限的逐股落点，报告层三态归因与链对账解释底表
+        r1_filtered: List[Dict[str, Any]] = []
         for _, r in lu.iterrows():
             ts_code = str(r['ts_code'])
             oc, seal_time = _seal_fields(ts_code)
             streak = int(r['_streak']) if pd.notna(r.get('_streak')) else 0
             if not is_r1(streak, bool(r.get('is_st')), oc, rules,
                          market_weak=market_weak):
+                if (streak >= int(rules['r1_min_streak'])
+                        and not bool(r.get('is_st'))):
+                    r1_filtered.append({
+                        'ts_code': ts_code, 'code': str(r['stock_code']),
+                        'name': str(r['stock_name']), 'streak': int(streak),
+                        'open_count': oc,
+                        'reason': r1_reject_reason(streak, bool(r.get('is_st')),
+                                                   oc, rules,
+                                                   market_weak=market_weak)})
                 continue
             vs = (_f(r.get('_volume_surge'))
                   if pd.notna(r.get('_volume_surge')) else None)
@@ -2572,6 +2636,7 @@ class ReviewAggregator:
         for row in r1_rows:
             used.add(row['ts_code'])
         out['R1'] = r1_rows
+        out['R1_filtered'] = r1_filtered
 
         # R2 主线跟随（首板 × 概念全量成分命中聚集前列）
         r2_rows = []

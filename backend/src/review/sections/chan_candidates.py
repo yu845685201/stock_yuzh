@@ -60,17 +60,24 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
             marks.append(str(it['data_flag']))
         if it.get('suspect_reason'):
             marks.append('链存疑')
+        # V4.3 C1：收盘距止损%（锚定日收盘口径，正值=收盘在止损上方；
+        # 操作口径=次日开盘，生成时未知）
+        cl = it.get('close')
+        dist = (f"{(cl - it['stop']) / cl * 100:+.1f}"
+                if cl is not None and it.get('stop') is not None and cl else '—')
         rows.append([
             it.get('code', '—'), it.get('name') or '—', it.get('kind', '—'),
             f"{it.get('trigger_low', '—')}（止损参考 {it.get('stop', '—')}）"
             if it.get('stop') is not None else str(it.get('trigger_low', '—')),
+            dist,
             f"[{it.get('zd', '—')},{it.get('zg', '—')}]",
             f"{it['divergence']:.2f}" if it.get('divergence') is not None else '—',
             '；'.join(marks) if marks else '—',
         ])
     blocks.append({'type': 'table',
                    'headers': ['代码', '名称', '信号', '触发低点(止损)',
-                               '参照中枢[ZD,ZG]', '背驰强度', '数据标记'],
+                               '收盘距止损%', '参照中枢[ZD,ZG]', '背驰强度',
+                               '数据标记'],
                    'rows': rows})
     more = len(items) - len(rows)
     tail = f'；全量 {len(items)} 个见 daily_review CSV「缠论背驰买点」列' if more > 0 else ''
@@ -79,7 +86,9 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
         tail += f'；{refire_n} 个为同中枢重发（此前已有信号，事件语义正常）'
     blocks.append({'type': 'note',
                    'text': '信号为锚定日**收盘确认**，操作口径 = 次日开盘（与验证回测撮合一致）；'
-                           '背驰强度 = |Σhist₂|/|Σhist₁|，越小背驰越强' + tail})
+                           '背驰强度 = |Σhist₂|/|Σhist₁|，越小背驰越强；'
+                           '收盘距止损% = 锚定日收盘相对触发低点（正值=收盘在止损上方，'
+                           '收盘口径——操作口径为次日开盘，生成时未知）' + tail})
     blocks.append({'type': 'note', 'text': HIST_NOTE})
     blocks.append({'type': 'note', 'text': _data_quality_note(items, data)})
     parity = data.get('parity')

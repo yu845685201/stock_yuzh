@@ -41,7 +41,9 @@ def test_section_with_hits():
     table = next(b for b in blocks if b['type'] == 'table')
     assert len(table['rows']) == 3
     assert table['rows'][0][2] == '一买'      # 一买在前
-    assert table['rows'][0][5] == '0.08'      # 背驰强度升序
+    # V4.3 C1：插入「收盘距止损%」列（索引 4）——背驰强度后移至索引 6
+    assert table['headers'][4] == '收盘距止损%'
+    assert table['rows'][0][6] == '0.08'      # 背驰强度升序
     assert '历史统计非预测' in ''.join(b.get('text', '') for b in blocks)
 
 

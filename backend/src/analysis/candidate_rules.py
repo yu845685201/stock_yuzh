@@ -90,6 +90,35 @@ def r1_tier(streak: Optional[int], rules: Optional[Dict[str, Any]] = None) -> Op
     return '低位板'
 
 
+def r1_reject_reason(streak: Optional[int], is_st: bool,
+                     open_count: Optional[int],
+                     rules: Optional[Dict[str, Any]] = None,
+                     market_weak: bool = False) -> Optional[str]:
+    """R1 拒绝原因（V4.3 A2）：与 is_r1 判定同一顺序的单一出处，防判定/归因漂移。
+
+    返回 None=通过；否则 'weak_veto'（弱档否决整类拒绝）/'streak_low'/
+    'st'/'reopen_over'（常规档开板超限）/'high_reopen_over'（高位板更严档）。
+    'seal_missing' 不由本谓词产生——open_count 缺失视为通过（label 层另标注）。
+    market_weak 优先：弱档日整类拒绝，不再细分其余原因。
+    """
+    r = _rules(rules)
+    if market_weak:
+        return 'weak_veto'
+    if streak is None or int(streak) < int(r['r1_min_streak']):
+        return 'streak_low'
+    if is_st:
+        return 'st'
+    if open_count is not None:
+        cap = (int(r['r1_high_max_reopen'])
+               if int(streak) >= int(r['r1_high_streak'])
+               else int(r['r1_max_reopen']))
+        if int(open_count) > cap:
+            return ('high_reopen_over'
+                    if int(streak) >= int(r['r1_high_streak'])
+                    else 'reopen_over')
+    return None
+
+
 def is_r1(streak: Optional[int], is_st: bool, open_count: Optional[int],
           rules: Optional[Dict[str, Any]] = None,
           market_weak: bool = False) -> bool:
@@ -100,21 +129,10 @@ def is_r1(streak: Optional[int], is_st: bool, open_count: Optional[int],
     ``market_weak=True`` 时 R1 直接否决（P1-10 §4.4 弱档否决：弱势市场不打
     板——判定由报告层用指数 ADX 闸门 closed 档或简化 MA60 规则传入，谓词不
     自算市场状态）。
+    V4.3 A2：判定委托 ``r1_reject_reason``（拒绝原因与判定单一出处）。
     """
-    r = _rules(rules)
-    if market_weak:
-        return False
-    if streak is None or int(streak) < int(r['r1_min_streak']):
-        return False
-    if is_st:
-        return False
-    if open_count is not None:
-        cap = (int(r['r1_high_max_reopen'])
-               if int(streak) >= int(r['r1_high_streak'])
-               else int(r['r1_max_reopen']))
-        if int(open_count) > cap:
-            return False
-    return True
+    return r1_reject_reason(streak, is_st, open_count, rules,
+                            market_weak=market_weak) is None
 
 
 def is_r2(streak: Optional[int], is_st: bool, concepts: Optional[Sequence[str]],

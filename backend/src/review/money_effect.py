@@ -54,9 +54,13 @@ def money_effect(cs_today: pd.DataFrame, cs_prev: pd.DataFrame) -> Dict[str, Any
     if not cs_today.empty:
         lu = cs_today['_limit_up'].fillna(False).astype(bool)
         ld = cs_today['_limit_down'].fillna(False).astype(bool)
-        for ts_code, chg, up, dn in zip(cs_today['ts_code'], change, lu, ld):
+        names = cs_today.get('stock_name')  # 列缺失（旧合成截面）→ best.name 置空
+        for i, (ts_code, chg, up, dn) in enumerate(
+                zip(cs_today['ts_code'], change, lu, ld)):
+            _nm = names.iloc[i] if names is not None and i < len(names) else None
             today_map[str(ts_code)] = {'chg': None if pd.isna(chg) else float(chg),
-                                       'up': bool(up), 'down': bool(dn)}
+                                       'up': bool(up), 'down': bool(dn),
+                                       'name': str(_nm) if pd.notna(_nm) else ''}
 
     prev_map: Dict[str, int] = {}
     prev_burst_codes: List[str] = []
@@ -190,11 +194,21 @@ def _consec_premium(prev_map: Dict[str, int],
             red += 1
     if not chgs:
         return {'count': len(codes), 'traded': 0, 'mean': None, 'median': None,
-                'red_rate': None}
+                'red_rate': None, 'best': None}
+    # V4.3 B3：cohort 内最高个股（均值/中位裂口 ≥3pct 时 digest 点名成因——
+    # 少数大涨拉高均值）；name 缺失置空（不硬造）
+    best = None
+    for code in codes:
+        t = today_map.get(code)
+        if t is None or t['chg'] is None:
+            continue
+        if best is None or t['chg'] > best['chg']:
+            best = {'code': code, 'name': t.get('name') or '', 'chg': t['chg']}
     return {'count': len(codes), 'traded': len(chgs),
             'mean': round(sum(chgs) / len(chgs), 2),
             'median': round(float(pd.Series(chgs).median()), 2),
-            'red_rate': round(red / len(chgs), 4)}
+            'red_rate': round(red / len(chgs), 4),
+            'best': best}
 
 
 # ------------------------------------------------------------------ 大面与分档

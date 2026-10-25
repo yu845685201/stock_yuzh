@@ -53,6 +53,9 @@ blockquote { border-left: 4px solid #d0d7de; margin: 8px 0; padding: 4px 14px; c
               border-radius: 6px; color: #57606a; font-size: 0.88em; }
 .interp h2 { border: none; }
 .chart { margin: 10px 0 4px; }
+.tldr { background: #f6f8fa; border-left: 4px solid #d0d7de; padding: 10px 14px;
+        margin: 12px 0; border-radius: 6px; }
+.tldr p { margin: 4px 0; }
 """
 
 
@@ -248,6 +251,48 @@ def svg_vbars(items: List[Tuple[str, Optional[float]]], width: int = 640,
                          f'fill="{color}">{_fmt(v, 2, signed=True)}%</text>')
         parts.append(f'<text x="{cx:.1f}" y="{height - 8:.1f}" text-anchor="middle" '
                      f'fill="#1f2328">{_esc(name)}</text>')
+    parts.append('</svg>')
+    return ''.join(parts)
+
+
+def svg_amount_series(name: str, series: List[Dict[str, Any]],
+                      width: int = 640, height: int = 110) -> str:
+    """两市成交额 60 日竖柱（T3）：中性色柱（金额非涨跌语义），末柱深色高亮并
+    标注今日值与较昨%；序列 <2 点返回 ''（调用侧不渲染 + note 一行原因）。"""
+    if len(series) < 2:
+        return ''
+    vals = [float(s['total_yi']) for s in series]
+    peak = max(max(vals), 1e-9)
+    pad = 8
+    n = len(vals)
+    slot = (width - 2 * pad) / n
+    bar_w = max(min(slot * 0.7, 18.0), 2.0)
+    base_y, chart_h = height - 26, height - 52
+    parts = [_svg_open(width, height)]
+    parts.append(f'<text x="{pad}" y="14" fill="#1f2328">{_esc(name)}'
+                 f'（近 {n} 个交易日）</text>')
+    parts.append(f'<line x1="{pad}" y1="{base_y:.1f}" x2="{width - pad}" '
+                 f'y2="{base_y:.1f}" stroke="{C_AXIS}" stroke-width="1"/>')
+    for i, (s, v) in enumerate(zip(series, vals)):
+        x = pad + slot * i + (slot - bar_w) / 2
+        bh = max(v / peak * chart_h, 1.0)
+        last = i == n - 1
+        color = C_AXIS if last else '#8a929c'
+        opacity = '1' if last else '0.55'
+        parts.append(f'<rect x="{x:.1f}" y="{base_y - bh:.1f}" width="{bar_w:.1f}" '
+                     f'height="{bh:.1f}" rx="1.5" fill="{color}" opacity="{opacity}"/>')
+    parts.append(f'<text x="{pad}" y="{height - 4}" fill="{C_AXIS}">'
+                 f'{_esc(str(series[0].get("date", "")))}</text>')
+    parts.append(f'<text x="{width - pad}" y="{height - 4}" text-anchor="end" '
+                 f'fill="{C_AXIS}">{_esc(str(series[-1].get("date", "")))}</text>')
+    chg_txt = ''
+    if vals[-2]:
+        chg = (vals[-1] / vals[-2] - 1) * 100
+        chg_txt = f'（较昨 {chg:+.1f}%）'
+    lx = pad + slot * (n - 1) + slot / 2
+    parts.append(f'<text x="{lx:.1f}" y="{base_y - vals[-1] / peak * chart_h - 6:.1f}" '
+                 f'text-anchor="end" fill="#1f2328">'
+                 f'今日 {vals[-1]:,.0f} 亿{chg_txt}</text>')
     parts.append('</svg>')
     return ''.join(parts)
 
@@ -475,14 +520,17 @@ _GLOSSARY_ROWS = [
                                '一次未炸=全天无开板（封板质量指标，分笔口径）'),
     ('翻红 / 炸板修复（题材反馈）', '昨日炸板股今日收红占比 / 昨日炸板股今日平均涨幅'
                                     '（板块主线章题材反馈指标）'),
-    ('R1-R4', '转天候选四类：R1 梯队接力（连板≥2）/ R2 主线跟随 / R3 趋势新高 /'
-              ' R4 机构席位；报告层带弱档否决与情绪开放度闸门，链 CSV 列为全量'
-              '（链命中≠报告入池）'),
+    ('R1-R4', '转天候选四类：R1 梯队接力（连板≥2 且 开板≤2 次，高位板≤1 次）'
+              '/ R2 主线跟随 / R3 趋势新高 / R4 机构席位；报告层带弱档否决与'
+              '情绪开放度闸门，链 CSV 列为全量（链命中≠报告入池）'),
     ('P1-P3', '盘前外围情景三档：P1 外围续弱 / P2 外围平稳 / P3 外围反弹'
               '（恒指/纳指较锚定日收盘 ±1.5% 触发）；盘前预案含 A50 观察锚（不入触发）'),
-    ('弱档否决', '情绪弱档（冰点/退潮/ADX closed）时 R 系列候选按规则整类不开放'
-                 '或压档——报告层 R1=0 而链命中 N 只即此设计行为；被否决的 R1 原命中'
-                 '不再以 R2/R3 画像入报告池（与链去重口径一致，X2 2026-10-26）'),
+    ('弱档否决', '情绪弱档（定位冰点/退潮）或指数弱势（ADX 闸门 closed，或简化'
+                 '规则：收盘<MA60 且 MA60 下行，两口径取或）时 R 系列候选按规则'
+                 '整类不开放或压档；弱档判定生效日报告层 R1=0 而链命中 N 只即此'
+                 '设计行为，被否决的 R1 原命中不再以 R2/R3 画像入报告池（与链去重'
+                 '口径一致）；弱档未生效日链/报告差异=报告层附加封板规则'
+                 '（开板上限/高位板更严/VETO）'),
     ('一买（缠论）', '下跌两中枢依次下移 + MACD 背驰后的左侧买点；锚定日收盘确认，'
                      '操作口径=次日开盘；历史 60 日费后均值 +6.79%/胜率 53.8%'
                      '（2015-2026 全A验证，门控保留样本口径 2026-10-25 修订，'
@@ -493,8 +541,8 @@ _GLOSSARY_ROWS = [
     ('中枢 [ZD,ZG]', '缠论中枢区间（重叠价位区），ZD=中枢下沿 / ZG=中枢上沿'),
     ('富时A50期货', '日K口径优先（overseas_kline_day CHA50CFD，新浪全球期货日K，'
                     '隔夜涨跌幅=最新两根收盘环比，2026-10-25 接入）；日K缺失回退'
-                    '新浪快照（本地昨收自算，快照距锚定日 >3 天降级标注、>10 天停显，'
-                    'P1-5）；亦作盘前周末缺口观察锚（不入 P1/P3 触发）'),
+                    '新浪快照（本地昨收自算，快照距锚定日 >3 天降级标注、'
+                    '>10 天停显）；亦作盘前周末缺口观察锚（不入 P1/P3 触发）'),
 ]
 
 
@@ -525,6 +573,108 @@ def _render_glossary() -> str:
             f'首次出现不随文重复）</summary>'
             f'<table><thead><tr><th>术语</th><th>口径</th></tr></thead>'
             f'<tbody>{rows}</tbody></table></details>')
+
+
+def _read_note_text(out_dir: Path, as_of: str,
+                    interpretation_path: Optional[str]) -> Optional[str]:
+    """读解读 note 原文（T1：速览提取与装配共用一次读盘；缺文件返回 None）。"""
+    p = Path(interpretation_path) if interpretation_path else \
+        out_dir / f'daily_review_{as_of}_digest_note.md'
+    return p.read_text(encoding='utf-8') if p.exists() else None
+
+
+_RE_TRUNK = re.compile(r'\*\*主干：(.+?)\*\*\s*$')
+_RE_BIAS = re.compile(r'\*\*基准倾向\*\*：\s*(.+)$')
+
+
+def _extract_tldr_fields(note_text: Optional[str]) -> Dict[str, Optional[str]]:
+    """速览三要素之 note 侧两要素：主干句与基准倾向行（提取契约见 SKILL.md
+    综合研判①与预案节）。提取失败返回 None 是预期降级（无 note 日速览退化为
+    仅关键数行）；契约缺失由 check 结构规则 ⑥⑦ 在发布侧响亮阻断。"""
+    trunk = bias = None
+    for line in (note_text or '').splitlines():
+        s = line.strip().lstrip('- ')
+        if trunk is None:
+            m = _RE_TRUNK.match(s)
+            if m:
+                trunk = m.group(1).strip()
+        if bias is None:
+            m = _RE_BIAS.match(s)
+            if m:
+                bias = m.group(1).strip()
+    return {'trunk': trunk, 'bias': bias}
+
+
+def _render_nearest_miss(nm: Optional[Dict[str, Any]]) -> Optional[str]:
+    """距最近定位判据钩子行（V4.3 B2）：nm 由 aggregator _sentiment_cycle
+    单一出处计算（仅回暖/震荡、溢价同量纲 pct 差），本函数只渲染。
+    高潮阈值方向 ≥、退潮 ≤；nm 缺失/gap 缺失返回 None 不渲染。"""
+    if not nm or nm.get('gap') is None:
+        return None
+    op = '≥' if nm.get('name') == '高潮' else '≤'
+    return (f'<p class="note">距最近定位判据：{_esc(nm.get("name") or "—")} '
+            f'{_esc(nm.get("metric") or "溢价均值")} '
+            f'{_fmt(nm["value"], 2, True)}% vs 阈值 '
+            f'{_fmt(nm["threshold"], 1, True)}%'
+            f'（差 {_fmt(nm["gap"], 2)}pct）——次日溢价 {op}'
+            f'{_fmt(nm["threshold"], 1)}% 即触发，验点 V3 直接验证。</p>')
+
+
+def _window_pct_text(window_pct: Any) -> str:
+    """score 窗口分位括注（V4.3 C2）：0/100 为 10 日窗自比极值（本窗最高/最低
+    即当前日），无信息量——省略降噪；非极值日保留；缺失/不可转返回 ''。"""
+    if window_pct is None:
+        return ''
+    try:
+        if float(window_pct) in (0.0, 100.0):
+            return ''          # 10 日窗自比极值，无信息量
+        return f'（窗口分位 {_esc(window_pct)}%）'
+    except (TypeError, ValueError):
+        return ''              # 不可转数值视同缺失，不渲染脏读数
+
+
+def _render_tldr(fields: Dict[str, Optional[str]], cycle: Dict[str, Any],
+                 senti: Dict[str, Any], env: Dict[str, Any]) -> Optional[str]:
+    """页首三行速览框（T1）：主干句（note 提取）+ 关键数（agg 零新计算）+
+    转天倾向（note 提取，缺省回退 _match_positioning 规则表）。
+
+    缺项逐项降级（照 render_seal_quality 模式），三行全缺→None 不渲染空框；
+    P 档刻意不入速览（verification.scenario.triggered 是次日核验语义非当日状态）。
+    """
+    rows: List[str] = []
+    trunk = fields.get('trunk')
+    if trunk:
+        rows.append(f'<p><strong>主干</strong>：{_esc(trunk)}</p>')
+    metrics: List[str] = []
+    pos = (cycle or {}).get('position')
+    if pos:
+        metrics.append(f'情绪档 {_esc(pos)}')
+    streak = (senti or {}).get('max_streak')
+    if streak:
+        metrics.append(f'空间高度 {_esc(streak)} 板')
+    lu = (senti or {}).get('limit_up_count')
+    if lu:
+        metrics.append(f'涨停 {_esc(lu)} 家')
+    pm = (senti or {}).get('premium_mean')
+    if pm is not None:
+        metrics.append(f'溢价均值 {_fmt(pm, 2, True)}%')
+    to = (env or {}).get('turnover') or {}
+    if to.get('today_total'):
+        delta = ''
+        if to.get('delta_pct') is not None:
+            delta = f'（较昨 {_fmt(to.get("delta_pct"), 1, True)}%）'
+        metrics.append(f'两市 {to["today_total"] / 1e8:,.0f} 亿{delta}')
+    if metrics:
+        rows.append('<p><strong>关键数</strong>：' + ' · '.join(metrics) + '</p>')
+    bias = fields.get('bias')
+    if bias is None and pos:
+        from .sections.tomorrow_plan import _match_positioning
+        bias = _match_positioning(pos)
+    if bias:
+        rows.append(f'<p><strong>转天倾向</strong>：{_esc(bias)}</p>')
+    if not rows:
+        return None
+    return '<div class="tldr">' + ''.join(rows) + '</div>'
 
 
 def _chan_linkage_state(position: str, review_cfg: Dict[str, Any]) -> str:
@@ -576,16 +726,22 @@ def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
                     if it.get('stop') is not None else str(it.get('trigger_low', '—')))
             div = (f"{it['divergence']:.2f}"
                    if it.get('divergence') is not None else '—')
+            # V4.3 C1：收盘距止损%（锚定日收盘口径，正值=收盘在止损上方；左侧
+            # 仓位风险一眼可见——操作口径=次日开盘，生成时未知）
+            cl = it.get('close')
+            dist = (f"{(cl - it['stop']) / cl * 100:+.1f}"
+                    if cl is not None and it.get('stop') is not None and cl else '—')
             rows.append(f'<tr><td>{_esc(it.get("code", "—"))}</td>'
                         f'<td>{_esc(it.get("name") or "—")}</td>'
                         f'<td>{_esc(it.get("kind", "—"))}</td>'
                         f'<td>{_esc(div)}</td>'
                         f'<td>{_esc(ind)}</td>'
                         f'<td>{_esc(stop)}</td>'
+                        f'<td>{_esc(dist)}</td>'
                         f'<td>{_esc("；".join(marks) or "—")}</td></tr>')
         parts.append('<table><thead><tr><th>代码</th><th>名称</th><th>信号</th>'
                      '<th>背驰强度</th><th>行业</th><th>触发低点(止损)</th>'
-                     '<th>数据标记</th></tr></thead><tbody>'
+                     '<th>收盘距止损%</th><th>数据标记</th></tr></thead><tbody>'
                      + ''.join(rows) + '</tbody></table>')
         state = _chan_linkage_state(cycle.get('position', ''), review_cfg)
         parts.append(f'<p>当前情绪档 <strong>{_esc(cycle.get("position", "—"))}</strong>'
@@ -611,7 +767,9 @@ def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
     parts.append('<p class="note">口径：背驰入选 |Σhist₂|/|Σhist₁| &lt; 1 即背驰，'
                  '本表按强度升序取前 10；背驰段须为已完成笔（分型确认），短笔柱面积'
                  '天然偏小（回测口径一致，偏倚已定价）；信号为锚定日收盘确认，'
-                 '操作口径=次日开盘，一买止损=触发低点。</p>')
+                 '操作口径=次日开盘，一买止损=触发低点；收盘距止损%=锚定日收盘相对'
+                 '触发低点（正值=收盘在止损上方，收盘口径——操作口径为次日开盘，'
+                 '生成时未知）。</p>')
     parts.append(f'<p class="note">{_esc(HIST_NOTE)}</p>')
     return ''.join(parts)
 
@@ -649,6 +807,9 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     sector = agg['sector'].get('data') if agg.get('sector') else {}
     money_effect = agg['money_effect'].get('data') if agg.get('money_effect') else {}
     prev_date = agg.get('prev_date')
+    # T1：note 一次读盘前置（速览提取与解读装配共用），只装配不加工红线不破
+    note_text = _read_note_text(out_dir, as_of, interpretation_path)
+    tldr_fields = _extract_tldr_fields(note_text)
 
     # ---- 图表数据 ----
     a_idx = [(i['name'], i['change_rate']) for i in (env.get('indices') or [])]
@@ -677,6 +838,10 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts: List[str] = []
     title = f'每日复盘 · 图文解读（锚定日 {as_of}）'
     parts.append(f'<h1>{_esc(title)}</h1>')
+    # T1 页首三行速览框：主干句（note 提取）+ 关键数 + 转天倾向；缺项降级
+    tldr_html = _render_tldr(tldr_fields, senti.get('cycle') or {}, senti, env)
+    if tldr_html:
+        parts.append(tldr_html)
     parts.append(f'<p class="note">数据口径与 <code>daily_review_{_esc(as_of)}.md</code> '
                  f'六维报告同源（ReviewAggregator 同一次聚合）；外围为市场自身交易日历'
                  f'（qfq/指数原值），A 股锚定日 {as_of}、前一交易日 {prev_date or "—"}。</p>')
@@ -734,6 +899,15 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     for name, pts, dates in sparks:
         if name == '上证指数':
             parts.append('<div class="chart">' + svg_sparkline(name, pts, dates) + '</div>')
+    # T3（V4.2）：两市成交额 60 日竖柱——「低位放量」主干判断的量能图证；
+    # series 缺失不渲染不硬造（旧 v12 缓存日/空面板日均降级）
+    amt = svg_amount_series('两市成交额',
+                            ((env.get('turnover') or {}).get('series')) or [])
+    if amt:
+        parts.append('<div class="chart">' + amt + '</div>')
+    else:
+        parts.append('<p class="note">两市成交额 60 日序列缺失'
+                     '（turnover.series），图不渲染。</p>')
 
     # P1-6 资金锚置信度一行（技术方案 §4.6 digest 落点对齐）：与六维报告 §一同源
     note_anchor = _anchor_conf_note(agg.get('capital_anchors'))
@@ -757,6 +931,11 @@ def build_digest(config_manager, as_of: Optional[str] = None,
         parts.append(f'<table><thead><tr><th>判据</th><th>阈值</th><th>当日值</th>'
                      f'<th>命中</th></tr></thead><tbody>{crit_rows}</tbody></table>')
         parts.append('<p class="note">标注（参考）的判据不参与定位判定。</p>')
+        # V4.3 B2：距最近定位判据钩子（aggregator nearest_miss 单一出处计算，
+        # 本行只渲染）——给"中性偏多"倾向一个可检验的次日钩子（验点 V3）
+        nm_html = _render_nearest_miss(cycle.get('nearest_miss'))
+        if nm_html:
+            parts.append(nm_html)
     parts.append(f'<p class="note">分位标定四态：{_esc(cycle.get("quantile_position", "—"))}'
                  f'（{"；".join(_esc(b) for b in (cycle.get("quantile_basis") or [])) or "—"}）'
                  + (f'<br>⚠ 规则四态与分位四态分歧（{_esc(cycle.get("position"))} vs '
@@ -765,11 +944,13 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                  + '</p>')
     trend = senti.get('cycle_trend')
     if trend:
+        from .sections.sentiment import cycle_low_text
         complete = '' if trend.get('complete') else f"（窗口仅 {trend['window']} 天，读数不完整）"
+        wpct_txt = _window_pct_text(trend.get('window_pct'))
         parts.append(f'<p>周期走向：10 日窗口 score <strong>{_fmt(trend.get("score"), 2)}</strong>'
-                     f'（窗口分位 {_esc(trend.get("window_pct"))}%），'
+                     f'{wpct_txt}，'
                      f'{_esc(trend.get("direction"))}（首尾差 {_fmt(trend.get("delta"), 2, True)}），'
-                     f'距窗口最低点第 {_esc(trend.get("days_since_low"))} 天{complete}'
+                     f'{cycle_low_text(trend)}{complete}'
                      f'<span class="note">（score 为 10 日窗口相对读数，样本小仅作方向参考）</span></p>')
     parts.append('<div class="chart">' + svg_ladder(ladder) + '</div>')
     parts.append('<div class="chart">' + svg_position_bars(pct_items) + '</div>')
@@ -785,10 +966,19 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     cp = (money_effect or {}).get('consec_premium')
     if cp and cp.get('count'):
         cp_red = f"{cp['red_rate']:.0%}" if cp.get('red_rate') is not None else '—'
+        gap_txt = ''
+        # V4.3 B3：均值/中位裂口 ≥3pct 时点名 cohort 最高个股（少数大涨拉高
+        # 均值的成因，读者不用自己猜）；best 缺失不硬造
+        best = cp.get('best')
+        if (cp.get('mean') is not None and cp.get('median') is not None
+                and abs(cp['mean'] - cp['median']) >= 3 and best):
+            who = best.get('name') or best.get('code') or '—'
+            gap_txt = f'；最高 {_esc(who)} {best["chg"]:+.1f}%（拉高均值）'
         parts.append('<p class="note">连板溢价：昨日 2 板及以上 '
                      f'{_esc(cp.get("count"))} 只（成交 {_esc(cp.get("traded"))}）：'
                      f'均值 {_fmt(cp.get("mean"), 2, True)}% / '
                      f'中位 {_fmt(cp.get("median"), 2, True)}% / 翻红 {cp_red}'
+                     f'{gap_txt}'
                      '。明细见六维§二（赚钱效应/反馈矩阵全量）。</p>')
 
     parts.append('<h2>三、板块主线（等权口径）</h2>')
@@ -829,15 +1019,18 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     if ah_chart:
         parts.append('<div class="chart">' + svg_dual_bars(ah_chart, unit='pct') + '</div>')
     if ah_rows:
+        # V4.3 B1：表与图同键（5 日差绝对值降序）——此前表按溢价排序、图按 5 日差
+        # 排序，相邻两视图异序；溢价为第二列读数非排序键
         top_prem = sorted((r for r in ah_rows if r.get('premium') is not None),
-                          key=lambda r: -abs(r['premium']))[:5]
+                          key=lambda r: -abs(r.get('diff') or 0))[:5]
         prem_rows = ''.join(
             f'<tr><td>{_esc(r["h_name"])}</td><td>{_pct_cell(r.get("diff"))}</td>'
             f'<td>{_fmt_premium(r.get("premium"))}</td></tr>' for r in top_prem)
         parts.append(f'<table><thead><tr><th>H股</th><th>AH 5日差(pct)</th>'
                      f'<th>AH溢价%</th></tr></thead><tbody>{prem_rows}</tbody></table>')
         parts.append('<p class="note">差值=A 侧−H 侧 5 日累计（正=A 强于 H）；溢价='
-                     'A 收盘/(H 收盘×港元兑人民币快照)−1。两侧复权基准独立滚动、时点错位，'
+                     'A 收盘/(H 收盘×港元兑人民币快照)−1。图/表同序（按 5 日差绝对值'
+                     '降序，溢价为第二列读数非排序键）；两侧复权基准独立滚动、时点错位，'
                      '只作观察不作结论；"未对齐/无A股映射"行不参与。溢价为价差读数非涨跌，'
                      '不作红绿标注。</p>')
 
@@ -876,12 +1069,7 @@ def build_digest(config_manager, as_of: Optional[str] = None,
         parts.append(f'<p class="note">市场要闻：{_esc(news["reason"])}</p>')
 
     parts.append('<div class="interp"><h2>复盘解读</h2>')
-    interp_path = Path(interpretation_path) if interpretation_path else \
-        out_dir / f'daily_review_{as_of}_digest_note.md'
-    interp_html = ''
-    if interp_path and Path(interp_path).exists():
-        interp_html = md_fragment_to_html(
-            Path(interp_path).read_text(encoding='utf-8'))
+    interp_html = md_fragment_to_html(note_text) if note_text else ''
     if interp_html:
         parts.append(interp_html)
         has_interp = True

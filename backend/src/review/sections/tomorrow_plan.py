@@ -370,6 +370,47 @@ def _offline_prior() -> Dict[str, Any]:
         return {}
 
 
+def _fmt_open_count(oc: Any) -> str:
+    """开板次数展示：None=封板数据缺失（is_r1 视为通过），不写数字。"""
+    return '封板数据缺失' if oc is None else f'开板{int(oc)}次'
+
+
+def _r1_weak_veto_text(cand: Dict[str, Any]) -> Optional[str]:
+    """R1 弱档否决明细行（V4.3 A2）：消费 aggregator R1_filtered（仅连板达标
+    且非 ST 行）。market_weak 日 R1 被剔出 open_types，空池文案不会触发——
+    该明细是弱档否决在报告层的唯一逐股落点（20261023 链 3 只 vs 报告 0 的
+    对账差异从此看报告行，不用看代码注释）。无明细返回 None（不硬造）。"""
+    filtered = [f for f in (cand.get('R1_filtered') or [])
+                if f.get('reason') == 'weak_veto']
+    if not filtered:
+        return None
+    top = '、'.join(f"{f.get('name') or f.get('code')}（{f.get('streak')}板/"
+                    f"{_fmt_open_count(f.get('open_count'))}）"
+                    for f in filtered[:3])
+    return (f'R1 弱档否决明细：{len(filtered)} 只连板股整类不开放'
+            f'（前 {min(3, len(filtered))}：{top}）——链 CSV R1 列为全量命中'
+            '（不带弱档闸门），链/报告差异属设计行为')
+
+
+def _r1_empty_text(cand: Dict[str, Any]) -> str:
+    """R1 空池三态归因（V4.3 A2）：弱档否决/规则筛除/池缺失——替代旧文案
+    「池数据缺失或无满足规则的股票」两态混写（10-23 实况为弱档否决，被误归因）。
+    仅 R1 消费（R1_filtered 明细只在该池产生）；R2-R4 空池维持旧文案。"""
+    filtered = cand.get('R1_filtered') or []
+    if filtered and all(f.get('reason') == 'weak_veto' for f in filtered):
+        return _r1_weak_veto_text(cand) or '无入选（池数据缺失或无满足规则的股票）'
+    if filtered:
+        over = [f for f in filtered
+                if f.get('reason') in ('reopen_over', 'high_reopen_over')]
+        n_high = sum(1 for f in over if f.get('reason') == 'high_reopen_over')
+        detail = '、'.join(f"{f.get('name') or f.get('code')}"
+                           f"（{_fmt_open_count(f.get('open_count'))}）"
+                           for f in over[:3])
+        return (f'无入选——{len(filtered)} 只连板股均未过封板规则：开板超限 '
+                f'{len(over)} 只（{detail}）、其中高位板更严档 {n_high} 只')
+    return '无入选（池数据缺失：当日无连板≥2 截面）'
+
+
 def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
     """转天买入候选（观察池）：消费 aggregator._build_candidates 全量候选池
     （谓词 candidate_rules 与 daily_review 链 R 列共用，同数据同结果），
@@ -432,12 +473,28 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
     # ADX 闸门（P1-7 §4.6 E）：指数趋势强度挡位，叠加在情绪开放度之上
     adx_info = cand.get('adx_gate') or {}
     gate = str(adx_info.get('gate') or 'closed')
+    market_weak = bool(adx_info.get('market_weak'))
+    # 弱档判定随行渲染（V4.3 A1）：ma60/market_weak 在 adx_info 已算出，此前
+    # 零渲染——弱档否决对读者不可见，开放度行与 R1=0 表面矛盾（20261023 实况）。
+    # gate=full/half 且 market_weak 时触发源必为 MA60 简化规则（与 closed 取或）；
+    # 该分支下 MA60 必下行，↓ 标注准确；closed 档 MA60 方向未知不标。
+    weak_note = ''
+    if adx_info.get('ma60') is not None:
+        if market_weak:
+            src = 'ADX 闸门 closed' if gate == 'closed' else 'MA60 简化规则'
+            weak_note = (f"；MA60 {adx_info['ma60']:.0f}"
+                         f"{'↓' if gate != 'closed' else ''} vs 收盘 "
+                         f"{adx_info.get('close', 0):.0f}"
+                         f"——弱档判定生效（R1 不开放；触发源={src}）")
+        else:
+            weak_note = (f"；MA60 {adx_info['ma60']:.0f} vs 收盘 "
+                         f"{adx_info.get('close', 0):.0f}——弱档判定未生效")
     gate_note = (f"指数 ADX 闸门：{gate}"
                  + (f"（{adx_info['index']} ADX {adx_info['adx']}"
                     f"{'↑' if adx_info.get('adx_rising') else '↓'}，"
                     f"收盘 {adx_info['close']:.0f} vs MA20 {adx_info['ma20']:.0f}）"
                     if adx_info.get('adx') is not None
-                    else f"（{adx_info.get('reason', '数据不足')}）"))
+                    else f"（{adx_info.get('reason', '数据不足')}）")) + weak_note
     if gate == 'closed':
         blocks.append({'type': 'para', 'text': gate_note})
         blocks.append({'type': 'para',
@@ -452,8 +509,25 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
         openness += '；ADX 半开放（仅 R1/R2）'
     else:
         openness += '；ADX 全开放'
+    if market_weak:
+        # V4.3 A1：弱档否决随行——market_weak=True 时 is_r1 整类拒绝 R1（含
+        # half 档），不标注则本行与 R1 池空表面矛盾（到此处 gate 必非 closed，
+        # 触发源必为 MA60 简化规则，括注文字准确）；基础文案同步替换，
+        # 禁"四类候选全开"与 R1 剔除说明同行走缝
+        open_types = tuple(t for t in open_types if t != 'R1')
+        openness = openness.replace('四类候选全开',
+                                    'R2 开放（R1 因弱档否决不开放）'
+                                    if gate == 'half' else
+                                    'R2-R4 开放（R1 因弱档否决不开放）')
+        openness += '——P1-10：收盘<MA60 且 MA60 下行'
     blocks.append({'type': 'para', 'text': f'候选开放度：{openness}'})
     blocks.append({'type': 'para', 'text': gate_note})
+    # V4.3 A2：弱档否决 R1 明细随行（R1 已被剔出 open_types，空池三态文案
+    # 不会触发）——链 CSV R1 列为全量命中（不带弱档闸门），链/报告差异看报告行
+    if market_weak and 'R1' not in open_types:
+        weak_txt = _r1_weak_veto_text(cand)
+        if weak_txt:
+            blocks.append({'type': 'note', 'text': weak_txt})
 
     fmt_amt = lambda a: f'成交额 {a / 1e8:.1f} 亿' if a else '—'
     money_confirm = bool(brules.get('money_confirm'))
@@ -505,7 +579,10 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
             blocks.append({'type': 'bullets',
                            'items': [tree['confirm'], tree['veto'], tree['risk']]})
         else:
-            blocks.append({'type': 'para', 'text': '无入选（池数据缺失或无满足规则的股票）'})
+            # V4.3 A2：R1 空池三态归因（弱档否决/规则筛除/池缺失）；R2-R4 维持旧文案
+            empty = _r1_empty_text(cand) if ctype == 'R1' \
+                else '无入选（池数据缺失或无满足规则的股票）'
+            blocks.append({'type': 'para', 'text': empty})
 
     # VETO 出池点名（P1-7 §4.6 B：一票否决命中即出池，禁静默缩池）
     vetoed = cand.get('vetoed') or []
@@ -518,7 +595,7 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
         blocks.append({'type': 'note',
                        'text': 'VETO 命中项（ST/*ST、业绩暴雷、大股东减持、龙虎榜卖一占比超限、'
                                '高位板放量长阴）为规则出池非数据缺失；否决要毙掉的是尾部风险，'
-                               '若被毙的恰是高收益股，否决规则本身需回测复议（P1-6 A/B）'})
+                               '若被毙的恰是高收益股，否决规则本身需 A/B 回测复议'})
     elif cand.get('vetoed_count') == 0:
         blocks.append({'type': 'para', 'text': '一票否决出池：本报告期 0 只'})
 

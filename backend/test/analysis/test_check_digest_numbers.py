@@ -184,7 +184,8 @@ _GOOD_DIGEST = """
 </tbody></table>
 """
 
-_GOOD_NOTE = "缠论候选×存疑清单交叉：命中 0 只。\n\n精选观察池（非推荐）\n"
+_GOOD_NOTE = ("缠论候选×存疑清单交叉：命中 0 只。\n\n精选观察池（非推荐）\n\n"
+              "**主干：测试主干。**\n\n- **基准倾向**：测试倾向\n")
 
 
 class TestStructuralRules:
@@ -195,7 +196,9 @@ class TestStructuralRules:
         digest.write_text(_GOOD_DIGEST, encoding="utf-8")
         cfg = workdir / "config.yaml"
         cfg.write_text(_CFG, encoding="utf-8")
-        assert cdn.run_structural_rules(note, digest, cfg) == []
+        report = workdir / "r.md"          # V4.3：规则⑧⑨需要六维 md
+        report.write_text("指数 ADX 闸门：full——弱档判定未生效", encoding="utf-8")
+        assert cdn.run_structural_rules(note, digest, cfg, report) == []
 
     def test_missing_glossary_fails(self, workdir):
         note = workdir / "n.md"
@@ -252,13 +255,228 @@ class TestStructuralRules:
         assert rc == 0
 
     def test_main_green_full_args(self, workdir, csv_file):
-        """完整入参全绿 → 0"""
+        """完整入参全绿 → 0（V4.3 起完整入参含 --report）"""
         note = workdir / "n.md"
         note.write_text(_GOOD_NOTE, encoding="utf-8")
         digest = workdir / "d.html"
         digest.write_text(_GOOD_DIGEST, encoding="utf-8")
         cfg = workdir / "config.yaml"
         cfg.write_text(_CFG, encoding="utf-8")
+        report = workdir / "r.md"
+        report.write_text("指数 ADX 闸门：full——弱档判定未生效", encoding="utf-8")
         rc = cdn.main(['--note', str(note), '--csv', str(csv_file),
-                       '--digest', str(digest), '--config', str(cfg)])
+                       '--digest', str(digest), '--config', str(cfg),
+                       '--report', str(report)])
         assert rc == 0
+
+
+class TestTldrRules:
+    """T1 速览框提取契约（结构规则 ⑥note_trunk ⑦note_bias，硬失败）"""
+
+    def test_note_trunk_bias_rules(self, workdir):
+        digest = workdir / "d.html"
+        digest.write_text(_GOOD_DIGEST, encoding="utf-8")
+        cfg = workdir / "config.yaml"
+        cfg.write_text(_CFG, encoding="utf-8")
+        report = workdir / "r.md"          # V4.3：规则⑧⑨需要六维 md
+        report.write_text("指数 ADX 闸门：full——弱档判定未生效", encoding="utf-8")
+        # 缺契约行 → ⑥⑦ 硬失败
+        note = workdir / "n.md"
+        note.write_text("缠论候选×存疑清单交叉：命中 0 只。\n"
+                        "精选观察池（非推荐）\n", encoding="utf-8")
+        fails = cdn.run_structural_rules(note, digest, cfg, report)
+        assert any('note_trunk' in f for f in fails)
+        assert any('note_bias' in f for f in fails)
+        # 含契约行（列表前缀形态同样算数）→ 通过
+        note.write_text(_GOOD_NOTE, encoding="utf-8")
+        assert cdn.run_structural_rules(note, digest, cfg, report) == []
+
+    def test_main_exit_code_missing_trunk(self, workdir, csv_file):
+        """缺主干行 → 退出码 1（硬失败阻断发布）"""
+        digest = workdir / "d.html"
+        digest.write_text(_GOOD_DIGEST, encoding="utf-8")
+        note = workdir / "n.md"
+        note.write_text(_GOOD_NOTE.replace("**主干：测试主干。**\n\n", ""),
+                        encoding="utf-8")
+        rc = cdn.main(['--note', str(note), '--csv', str(csv_file),
+                       '--digest', str(digest)])
+        assert rc == 1
+
+
+class TestT5Warns:
+    """T5 骨架兜底四条 WARN：工单号/嵌套括注/免责/池表行序（WARN 保险丝不阻断）"""
+
+    def test_ticket_leak(self, note_file):
+        """T5.4：X/P/S/A 系列工单号命中（含表格行）；合法词不误伤"""
+        note = note_file(
+            "X2 修复后对账一致，P4-8 离线回测落地。\n"
+            "| 项 | 说明 |\n|---|---|\n| 对账 | P0-7 门控后 15 只 |\n")
+        hits = cdn.check_ticket_leak(note)
+        nums = [h['num'] for h in hits]
+        assert 'X2' in nums and 'P4-8' in nums and 'P0-7' in nums
+        legal = note_file("P1-P3 情景三档；R3 趋势新高；A50 与 CHA50CFD；"
+                          "2026-10-26 起生效；V4 验点；S3 已收口。\n")
+        assert cdn.check_ticket_leak(legal) == []
+
+    def test_nested_paren(self, note_file):
+        """T5.1：正文行全角括号嵌套命中；表格/引用行豁免；单层括注不误伤"""
+        note = note_file(
+            "情绪：回暖/震荡（高潮未命中：溢价 3.38%<4.0%（六维§二））。\n"
+            "| 项 | 说明（来源（嵌套）） |\n"
+            "> 引用行（外层（内层））豁免。\n"
+            "单层括注（六维§二）不命中。\n")
+        hits = cdn.check_nested_paren(note)
+        assert [h['line'] for h in hits] == ['1']
+
+    def test_disclaimer(self, note_file):
+        """T5.5：note 含「免责声明」（含 > 引用行）命中；无免责不命中"""
+        note = note_file("> 免责声明：以上不构成投资建议。\n正文干净。\n")
+        hits = cdn.check_disclaimer(note)
+        assert len(hits) == 1 and hits[0]['line'] == '1'
+        clean = note_file("正文无免责，页脚单一出处。\n")
+        assert cdn.check_disclaimer(clean) == []
+
+    def test_pool_order_and_csv_subset(self, workdir, csv_file, note_file):
+        """T5.2：档内评分升序命中；证据数升序命中；正序不命中；代码不在 CSV 命中"""
+        bad = note_file(
+            "| 股票 | 类别（证据/评分） |\n|---|---|\n"
+            "| 浦发银行 600000 | R2（4 证，42.9 分，六维§六） |\n"
+            "| 测试股 600001 | R2（4 证，49.1 分，六维§六） |\n")
+        hits = cdn.check_pool_order(bad, csv_file)
+        assert any(h['value'] == '池序逆行' and '49.1' in h['num'] for h in hits)
+        bad2 = note_file(
+            "| 股票 | 类别（证据/评分） |\n|---|---|\n"
+            "| 浦发银行 600000 | R2（3 证，50.0 分，六维§六） |\n"
+            "| 测试股 600001 | R2（4 证，60.0 分，六维§六） |\n")
+        assert any(h['value'] == '池序逆行'
+                   for h in cdn.check_pool_order(bad2, csv_file))
+        good = note_file(
+            "| 股票 | 类别（证据/评分） |\n|---|---|\n"
+            "| 测试股 600001 | R2（4 证，49.1 分，六维§六） |\n"
+            "| 浦发银行 600000 | R2（4 证，42.9 分，六维§六） |\n"
+            "| 浦发银行 600000 | R2（3 证，71.3 分，六维§六） |\n")
+        assert cdn.check_pool_order(good, csv_file) == []
+        outsider = note_file(
+            "| 股票 | 类别（证据/评分） |\n|---|---|\n"
+            "| 幽灵股 999999 | R2（4 证，50.0 分，六维§六） |\n")
+        assert any(h['value'] == '池内代码不在 CSV'
+                   for h in cdn.check_pool_order(outsider, csv_file))
+        # 行数 <2 或无池表 → 不校验
+        assert cdn.check_pool_order(note_file("无池表。"), csv_file) == []
+
+    def test_t5_warns_nonblocking_and_strict(self, csv_file, note_file):
+        """T5 WARN 默认退 0，--strict 退 1"""
+        note = note_file("正文提到 X2 修复。")
+        assert cdn.main(['--note', str(note), '--csv', str(csv_file)]) == 0
+        assert cdn.main(['--note', str(note), '--csv', str(csv_file),
+                         '--strict']) == 1
+
+
+# ---------------------------------------------------------------- V4.3 规则⑧⑨
+
+class TestRule8CitedGrounded:
+    """规则⑧：来源括注（六维§X）数字必须真在六维 md 命中（20261023
+    「MA60 3881 断链引用」漏网根因——挂引用即免检）。"""
+
+    def test_ghost_number_hard_fail(self):
+        """编造数字挂引用 → 硬失败（3881 不在只含 MA20 的 md 中）"""
+        note = "机制：收盘 3690 低于 MA60 3881（六维§六）。"
+        ok, why = cdn._check_cited_grounded(note, "收盘 3690 vs MA20 3848。")
+        assert not ok and '3881' in why and 'L1' in why
+
+    def test_truncation_variant_passes(self):
+        """note 写 3881、md 写 3881.43 → 截断变体命中放行"""
+        note = "收盘低于 MA60 3881（六维§六），下行。"
+        ok, _ = cdn._check_cited_grounded(note, "MA60 3881.43 且下行（V4.3 A1）。")
+        assert ok
+
+    def test_rounding_variant_passes(self):
+        """note 写 3.4、md 写 3.38 → 1 位四舍五入变体命中"""
+        note = "溢价均值 3.4%（六维§二）。"
+        ok, _ = cdn._check_cited_grounded(note, "溢价均值 3.38%。")
+        assert ok
+
+    def test_computed_annotation_exempt(self):
+        """（计算：…）诚实标注的派生值豁免（如差 0.62pct）"""
+        note = "差 0.62pct（计算：4.0−3.38，六维§二）。"
+        ok, _ = cdn._check_cited_grounded(note, "溢价 3.38% / 阈值 4.0%。")
+        assert ok
+
+    def test_small_count_exempt(self):
+        """<100 无小数整数（家数/序号）不参与换源校验（误报源收窄）"""
+        note = "R1 弱档否决明细：12 只连板股（六维§六）。"
+        ok, _ = cdn._check_cited_grounded(note, "弱档判定生效。")
+        assert ok
+
+    def test_missing_report_fails(self):
+        ok, why = cdn._check_cited_grounded("任意", None)
+        assert not ok and '--report' in why
+
+
+class TestRule9GateSemantics:
+    """规则⑨：note 闸门/否决归因不得与六维报告状态矛盾。"""
+
+    def test_veto_claim_with_marker_passes(self):
+        note = "R1 梯队接力今日零开放——差异根因是弱档否决闸门在报告层。"
+        md = ("候选开放度：回暖/震荡：R2-R4 开放（R1 因弱档否决不开放）；"
+              "指数 ADX 闸门：full；MA60 3881↓ vs 收盘 3690——弱档判定生效"
+              "（R1 不开放；触发源=MA60 简化规则）")
+        ok, _ = cdn._check_gate_semantics(note, md)
+        assert ok
+
+    def test_veto_claim_without_marker_fails(self):
+        """note 写「闸门关闭」而 md full 未生效 → 硬失败（20261023 假想错误）"""
+        note = "指数趋势闸门关闭：本轮不出买入候选。"
+        md = "指数 ADX 闸门：full（ADX 59.67↑）——弱档判定未生效"
+        ok, why = cdn._check_gate_semantics(note, md)
+        assert not ok and 'L1' in why
+
+    def test_open_claim_contra_fails(self):
+        """note 声称四类候选全开而 md 标注 R1 弱档否决 → 矛盾"""
+        note = "候选开放度：回暖/震荡：四类候选全开。"
+        md = "候选开放度：回暖/震荡：R2-R4 开放（R1 因弱档否决不开放）"
+        ok, why = cdn._check_gate_semantics(note, md)
+        assert not ok
+
+    def test_candidate_veto_not_gate_claim(self):
+        """「一票否决出池」（候选级 VETO）不触发闸门语义比对"""
+        note = "利亚德、歌尔股份（业绩暴雷一票否决出池，当日 VETO 共 31 只）。"
+        md = "指数 ADX 闸门：full——弱档判定未生效"
+        ok, _ = cdn._check_gate_semantics(note, md)
+        assert ok
+
+    def test_open_claim_without_contra_passes(self):
+        note = "候选开放度：回暖/震荡：四类候选全开；ADX 全开放。"
+        md = "候选开放度：回暖/震荡：四类候选全开；ADX 全开放"
+        ok, _ = cdn._check_gate_semantics(note, md)
+        assert ok
+
+
+class TestReportWiring:
+    """--report 接线：缺失判失败防绕过；兄弟文件自动推导。"""
+
+    def test_digest_without_report_fails_89(self, workdir, csv_file, note_file):
+        """--digest 提供而 report 推导不出 → 规则⑧⑨报参缺失（防绕过）"""
+        digest = workdir / 'd.html'
+        digest.write_text('<details>口径字典</details>', encoding='utf-8')
+        note = note_file("**主干：测试。**\n**基准倾向**：跟随。\n")
+        fails = cdn.run_structural_rules(note, digest, None, None)
+        assert any('cited_grounded' in f and '--report' in f for f in fails)
+        assert any('gate_semantics' in f for f in fails)
+
+    def test_sibling_report_autoderive(self, workdir, note_file):
+        """note 同目录存在 daily_review_<X>.md → _derive_report_path 命中"""
+        note = note_file("正文。")
+        note.rename(workdir / 'daily_review_20261023_digest_note.md')
+        note = workdir / 'daily_review_20261023_digest_note.md'
+        (workdir / 'daily_review_20261023.md').write_text('MA60 3881.43',
+                                                          encoding='utf-8')
+        assert cdn._derive_report_path(note) ==             workdir / 'daily_review_20261023.md'
+
+    def test_sibling_missing_returns_none(self, workdir, note_file):
+        """命名合约定但兄弟文件缺失 → None（交规则⑧⑨报缺失）"""
+        note = note_file("正文。")
+        note.rename(workdir / 'daily_review_20261024_digest_note.md')
+        assert cdn._derive_report_path(
+            workdir / 'daily_review_20261024_digest_note.md') is None
+        assert cdn._derive_report_path(note_file("任意名。")) is None
