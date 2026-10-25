@@ -5,11 +5,15 @@
 new_high_low 两个交叉榜用模块），与链逐股调用同一代码路径；对拍见
 `test/analysis/test_review_indicator_parity.py`（链 CSV vs 本面板，逐值一致）。
 
-窗口：与链扩展后窗口一致——`INDICATOR_WINDOW_DAYS=133`（max(链 60d, warmup 130)
-+ WINDOW_BUFFER）。窗口不一致则 MACD/RSI/OBV 最新值与链不可比（ewm 播种差异）。
+窗口：与链扩展后窗口一致——`INDICATOR_WINDOW_DAYS=522`（链 max 模块回看
+= 缠论 520 + 引擎 buffer 2）。窗口不一致则 MACD/RSI/OBV 最新值与链不可比
+（ewm 播种差异——2026-10-25 前曾停在对齐失败的 133d，对拍 731 处失配即此
+根因，见技术方案附录 C.6）；有 test_review_indicator_parity.py 常量闸
+防再次漂移。
 
-成本：逐股调用与链同量级（约 +35s，2026-10-18 实测口径），`review generate` 由
-秒级变为 ~40s——独立性红线（不依赖当日链运行）的代价，SKILL.md 已同步。
+成本：逐股调用与链同量级（520d 窗口约 +60~90s，2026-10-25 实测口径），
+`review generate` ~2 分钟——独立性红线（不依赖链运行）+ 逐值对拍可用的
+代价，agg_cache（P3-2）下同日复用。
 """
 
 from __future__ import annotations
@@ -30,8 +34,9 @@ from ..analysis.modules.obv_trend import ObvTrend
 from ..analysis.modules.rsi_state import RsiState
 from ..analysis.modules.volume_surge import VolumeSurge
 
-#: 指标面板窗口（交易日）：与链 warmup 130 + 引擎 WINDOW_BUFFER 语义一致
-INDICATOR_WINDOW_DAYS = 133
+#: 指标面板窗口（交易日）：与链 daily_review 窗口公式逐字节对齐——
+#: 链 module_days = max(effective_lookback) = 缠论 520，引擎取 nth_back(module_days + 2)
+INDICATOR_WINDOW_DAYS = 522
 
 #: 面板复算的模块（顺序即输出列序；后两个供交叉榜使用）
 _PANEL_MODULES = [

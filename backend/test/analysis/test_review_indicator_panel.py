@@ -112,8 +112,9 @@ class TestValuesMatch:
 
 class TestWindowConstant:
     def test_window_matches_chain(self):
-        """面板窗口与链扩展后窗口一致（133 = warmup 130 + WINDOW_BUFFER 语义）。"""
-        assert INDICATOR_WINDOW_DAYS == 133
+        """面板窗口与链 daily_review 窗口对齐（520 缠论 + buffer 2；2026-10-25
+        修复 133d 错位——对拍 731 处失配根因，附录 C.6）。"""
+        assert INDICATOR_WINDOW_DAYS == 522
 
 
 # --------------------------------------------------------------- 对拍（需 DB）
