@@ -52,9 +52,11 @@ tdx-api 自推导 / 一次性实施。
 - **运行时加固**（迁移中实际发生 TDX 连接断死）：`get_xdxr_strict` 区分
   业务错误与空事件（`TdxApiBusinessError`）；管理器连续 30 次业务失败熔断
   中止（断点保留，处置 `docker restart tdx-stock-web` 后续跑）。
-- 日常增量：编排器 wave1 注册 `shares_xdxr` runner（每日全刷 ~13 分钟，
-  resume=False）；独立 CLI `sync-shares-xdxr`（支持 --codes/--no-resume/
-  --dry-run/--manifest-path）；断点 `tmp/xdxr_share_manifest.json`。
+- 日常增量：编排器一键模式将 `shares_xdxr` 置于**独占前置波**（用户确认每天
+  全刷可接受，2026-10-25）——必须先于日K同步完成，除权/增发当日生效的股本
+  在日K入库读股本映射前落库，事件股当日 turnover_rate 即为精确值；独立 CLI
+  `sync-shares-xdxr`（支持 --codes/--no-resume/--dry-run/--manifest-path）；
+  断点 `tmp/xdxr_share_manifest.json`。
 
 ### 2.3 股票列表（P3）——快照维护
 

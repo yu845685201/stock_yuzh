@@ -221,13 +221,18 @@ class ReviewSyncOrchestrator:
 
     @staticmethod
     def _build_waves(include_kline: bool) -> List[List[str]]:
-        """一键模式波次重排：日K编入波1与独立源并发，日K依赖源（factor/money_flow）
-        顺延到波2（与依赖公告/披露清单的 ths_finance 同波），valuation_calc 仍在波3"""
+        """一键模式波次重排：股本刷新独占前置波（约 13 分钟，须先于日K完成——
+        除权/增发当日生效的股本要在日K入库读股本映射前落库，否则事件股当日
+        turnover_rate 用前一日股本，滞后一天）；日K编入波1与独立源并发，
+        日K依赖源（factor/money_flow）顺延到波2（与依赖公告/披露清单的
+        ths_finance 同波），valuation_calc 仍在波3"""
         if not include_kline:
             return SOURCE_WAVES
-        head = [s for s in SOURCE_WAVES[0] if s not in KLINE_DEPENDENT_SOURCES]
+        head = [s for s in SOURCE_WAVES[0]
+                if s not in KLINE_DEPENDENT_SOURCES and s != 'shares_xdxr']
         tail = [s for s in SOURCE_WAVES[0] if s in KLINE_DEPENDENT_SOURCES]
-        return [[KLINE_SOURCE] + head, tail + SOURCE_WAVES[1]] + list(SOURCE_WAVES[2:])
+        return [['shares_xdxr'], [KLINE_SOURCE] + head,
+                tail + SOURCE_WAVES[1]] + list(SOURCE_WAVES[2:])
 
     # ---------- 各源 runner ----------
 
