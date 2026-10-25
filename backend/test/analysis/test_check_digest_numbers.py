@@ -126,6 +126,35 @@ class TestCheckNote:
         assert {w["num"] for w in warns} == {"2.5x", "12.5%"}
 
 
+class TestImplLeak:
+    def test_impl_leak_w6(self, note_file):
+        """W6/P2-8：正文 config 键名与时钟时间戳 WARN；表格行/> 注记行豁免；每行一条"""
+        note = note_file("接缝由 config review.chan_pool_linkage 决定。\n"
+                         "| 项 | 说明 |\n|---|---|\n| 链重跑 | 21:35 seal 收紧 |\n"
+                         "> 注记：21:35 在引用行豁免。\n"
+                         "正文裸时钟 21:35 命中。\n")
+        leaks = cdn.check_impl_leak(note)
+        assert [lk['line'] for lk in leaks] == ['1', '6']
+        assert any('config' in lk['num'] for lk in leaks)
+        assert any(lk['num'] == '21:35' for lk in leaks)
+
+    def test_impl_leak_market_time_exempt_w6(self, note_file):
+        """W6 实施修正：行情时刻词紧邻的时钟数字是行情事实（首封 14:30），不告警"""
+        note = note_file("鸣志电器首封 14:30、开板 3 次收盘未封住。\n"
+                         "21:35 链重跑后命中收敛。\n")
+        leaks = cdn.check_impl_leak(note)
+        assert [lk['line'] for lk in leaks] == ['2']
+
+    def test_impl_leak_nonblocking_and_strict(self, csv_file, note_file):
+        """W6：语汇 WARN 默认不阻断（0），--strict 时 1；全绿路径文案含 P2-8"""
+        note = note_file("正文提到 config review.xxx 键名。")
+        assert cdn.main(['--note', str(note), '--csv', str(csv_file)]) == 0
+        assert cdn.main(['--note', str(note), '--csv', str(csv_file),
+                         '--strict']) == 1
+        clean = note_file("正文无实现细节，数字全部接地。")
+        assert cdn.main(['--note', str(clean), '--csv', str(csv_file)]) == 0
+
+
 class TestNormalize:
     def test_strip_trailing_zeros(self):
         assert cdn._normalize("147.0") == "147"

@@ -1,7 +1,7 @@
 {
   "note": "SKILL.md prompt 预算基线（P0-5，方案 §4.2；InvestSkill 25% token 纪律）。基线日 2026-10-21（B7 交付门登记后）；后续改提示词使字节数增量 >25% 时 test_skill_copies_in_sync 失败——先精简或经用户确认后更新本基线。",
   "baseline_date": "20261025",
-  "baseline_bytes": 51832,
+  "baseline_bytes": 52771,
   "max_growth_pct": 25,
   "history": [
     {
@@ -38,6 +38,11 @@
       "date": "20261025",
       "bytes": 51832,
       "note": "V3.0-S3 W2 引用括注规范（六维§X/图文§X，禁报告§X）登记后重设（用户已授权 S1~S5 全量）"
+    },
+    {
+      "date": "20261025",
+      "bytes": 52771,
+      "note": "V3.0-S4 W6 定位句两级结构+P2-8 语汇边界+P2-2 参考判据措辞登记后重设"
     }
   ]
 }
