@@ -131,21 +131,33 @@ def _seal_blocks(seal: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     return blocks
 
 
+def cycle_low_text(trend: Dict[str, Any] = None) -> str:
+    """周期走向「窗口最低点」短语单一出处（T2 去歧义，digest §二同源引用）：
+    days_since_low = 锚定日距 10 日窗口内 score 最低日的交易日数——
+    N=0 即今日为最低点；None 缺数据渲染 '—'。"""
+    dsl = (trend or {}).get('days_since_low')
+    if dsl is None:
+        return '—'
+    if dsl == 0:
+        return '今日即窗口最低点'
+    return f'距窗口 score 最低点已 {dsl} 个交易日'
+
+
 def _cycle_trend_blocks(trend: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     """情绪周期走向（cycle_trend；样本不足时如实标注）。"""
     if not trend:
         return []
     text = (f"10 日窗口 score {trend['score']:.2f}（窗口内分位 {trend['window_pct']}%），"
             f"走向{trend['direction']}（窗口首尾差 {trend['delta']:+.2f}），"
-            f"距窗口最低点第 {trend['days_since_low']} 天")
+            f"{cycle_low_text(trend)}")
     if not trend.get('complete'):
         text += f"；窗口仅 {trend['window']} 天，读数不完整"
     return [
         {'type': 'para', 'text': f'周期走向：{text}'},
         {'type': 'note',
          'text': '口径：涨停家数/最高连板 0-1 归一 + 炸板率取反后三项均值为 score——'
-                 '这是十日窗口内的相对读数，没有绝对含义；"距低点第 N 天"与'
-                 '"正在往上走"是两件事，别混为一谈'},
+                 '这是十日窗口内的相对读数，没有绝对含义；"距窗口 score 最低点已 N 日"'
+                 '与"正在往上走"是两件事，别混为一谈'},
     ]
 
 

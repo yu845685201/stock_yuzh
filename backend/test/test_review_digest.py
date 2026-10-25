@@ -10,11 +10,14 @@ if str(BACKEND) not in sys.path:
 
 from src.review.digest import (
     _crit_hit_cell,
+    _extract_tldr_fields,
     _fmt_premium,
+    _render_tldr,
     _sentiment_pct_note,
     md_fragment_to_html,
     render_promotion,
     render_seal_quality,
+    svg_amount_series,
     svg_count_bars,
     svg_dual_bars,
     svg_ladder,
@@ -22,6 +25,7 @@ from src.review.digest import (
     svg_sparkline,
     svg_vbars,
 )
+from src.review.sections.sentiment import cycle_low_text
 
 
 def test_svg_helpers_deterministic_and_structure():
@@ -117,6 +121,79 @@ def test_crit_hit_cell_w5():
     assert _crit_hit_cell({'hit': False, 'role': 'reference'}) == '否'
 
 
+def test_cycle_low_text_t2():
+    """T2 措辞去歧义单一出处：days_since_low 语义 = 距窗口 score 最低点已 N 个交易日"""
+    assert cycle_low_text({'days_since_low': 1}) == '距窗口 score 最低点已 1 个交易日'
+    assert cycle_low_text({'days_since_low': 0}) == '今日即窗口最低点'
+    assert cycle_low_text({'days_since_low': None}) == '—'
+    assert cycle_low_text(None) == '—'
+
+
+def test_extract_tldr_fields_t1():
+    """T1 提取：标准主干行 + 列表前缀基准倾向行"""
+    note = ('## 综合研判\n\n**主干：低位放量修复市——情绪修复领先于趋势修复。**\n\n'
+            '- **基准倾向**：中性偏多、跟随确认。\n')
+    f = _extract_tldr_fields(note)
+    assert f['trunk'] == '低位放量修复市——情绪修复领先于趋势修复。'
+    assert f['bias'] == '中性偏多、跟随确认。'
+
+
+def test_extract_tldr_missing_t1():
+    """T1 提取降级：无 note / 无契约行 → 两字段 None（静默降级为预期行为）"""
+    assert _extract_tldr_fields(None) == {'trunk': None, 'bias': None}
+    assert _extract_tldr_fields('无契约行的普通文本。') == {'trunk': None, 'bias': None}
+
+
+def test_extract_tldr_first_wins_t1():
+    """T1 提取确定性：多候选行取首个"""
+    note = '**主干：第一。**\n**主干：第二。**\n- **基准倾向**：A\n- **基准倾向**：B\n'
+    f = _extract_tldr_fields(note)
+    assert f['trunk'] == '第一。' and f['bias'] == 'A'
+
+
+def test_render_tldr_full_t1():
+    """T1 渲染：三行齐全、关键数分段正确、两市亿元口径（today_total/1e8）"""
+    fields = {'trunk': '低位放量修复市。', 'bias': '中性偏多、跟随确认'}
+    cycle = {'position': '回暖/震荡'}
+    senti = {'limit_up_count': 84, 'premium_mean': 3.38, 'max_streak': 6}
+    env = {'turnover': {'today_total': 1.9729e12, 'delta_pct': -5.75}}
+    html = _render_tldr(fields, cycle, senti, env)
+    assert html.startswith('<div class="tldr">') and html.endswith('</div>')
+    assert '<strong>主干</strong>：低位放量修复市。' in html
+    assert '情绪档 回暖/震荡' in html and '空间高度 6 板' in html
+    assert '涨停 84 家' in html and '溢价均值 +3.38%' in html
+    assert '两市 19,729 亿（较昨 -5.8%）' in html
+    assert '<strong>转天倾向</strong>：中性偏多、跟随确认' in html
+
+
+def test_render_tldr_degrade_t1():
+    """T1 渲染降级：缺 note 字段逐项省略；倾向回退 _match_positioning 规则表"""
+    html = _render_tldr({'trunk': None, 'bias': None}, {'position': '回暖/震荡'}, {}, {})
+    assert '主干' not in html and '两市' not in html and '涨停' not in html
+    assert '中性偏多、跟随确认' in html     # 回暖词条回退
+    html2 = _render_tldr({'trunk': '主干句', 'bias': None},
+                         {'position': '冰点'}, {}, {})
+    assert '观察等企稳' in html2            # 冰点词条回退
+
+
+def test_render_tldr_none_t1():
+    """T1 渲染：三行全缺 → None 不渲染空框"""
+    assert _render_tldr({'trunk': None, 'bias': None}, {}, {}, {}) is None
+
+
+def test_svg_amount_series_t3():
+    """T3：成交额竖柱确定性 + 末柱今日标注 + <2 点返回空"""
+    series = [{'date': f'202609{d:02d}', 'total_yi': 19000.0 + d}
+              for d in range(1, 6)]
+    s1 = svg_amount_series('两市成交额', series)
+    assert s1 == svg_amount_series('两市成交额', series)
+    assert '近 5 个交易日' in s1 and '<rect' in s1
+    assert '今日 19,005 亿（较昨' in s1 and '+0.0%' in s1
+    assert '20260901' in s1 and '20260905' in s1
+    assert svg_amount_series('两市成交额', series[:1]) == ''
+    assert svg_amount_series('两市成交额', []) == ''
+
+
 def test_md_fragment_subset():
     """解读文本装配：标题/列表/引用/表格/粗体/转义（不改写内容）"""
     md = ('## 一、结论\n\nA 强于 H，**比亚迪** -5%\n\n- 点一\n- 点二\n\n'
@@ -176,7 +253,18 @@ def test_digest_build_byte_stable(tmp_path, monkeypatch):
     assert '五、A-H 映射（六维§一·参考口径）' in h1
     if '缠论背驰候选' in h1:
         assert '六、缠论背驰候选（六维§六·左侧观察池）' in h1
+    # T1：页首速览框（真库数据日有关键数行；本 note 无契约行 → 主干行不渲染）
+    if '<div class="tldr">' in h1:
+        assert '关键数' in h1 or '转天倾向' in h1
+    assert '主干</strong>' not in h1
+    # T3：§一 成交额图（真库有 series 时出图，否则降级 note——二选一恒在）
+    assert ('两市成交额（近' in h1) != ('turnover.series' in h1)
+    # T2：周期走向措辞去歧义（旧短语全页不可再现）
+    assert '距窗口最低点第' not in h1
+    if '周期走向' in h1:
+        assert ('距窗口 score 最低点已' in h1) or ('今日即窗口最低点' in h1)
     # 无解读文件 → 占位
     r3 = build_digest(cm, as_of='20260930', output_dir=str(tmp_path))
     h3 = Path(r3['html_path']).read_text(encoding='utf-8')
     assert r3['has_interpretation'] is False and '本次未附解读文本' in h3
+    assert '距窗口最低点第' not in h3

@@ -35,7 +35,7 @@ def build(movers: Dict[str, Any], lhb: Dict[str, Any] = None,
                                    '宽基属性概念已按黑名单剔除'})
         if any(r.get('attribution') for r in data['limit_up']):
             blocks.append({'type': 'note',
-                           'text': '归因口径（P1-11）：锚定日前 3 个自然日公告窗口 × 利好关键词/类型'
+                           'text': '归因口径：锚定日前 3 个自然日公告窗口 × 利好关键词/类型'
                                    '（先关键词后类型；利空类型不得作利好归因）；「题材炒作或跟风上涨」'
                                    '= 窗口内无利好公告的显式结论（利好=0，不硬凑）。**归因是市场叙事，'
                                    '不是核验过的因果**——时间相邻不构成上涨原因的证据'})

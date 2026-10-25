@@ -132,7 +132,7 @@ def _valuation_digest_blocks(d: Dict[str, Any]) -> List[Dict[str, Any]]:
                 dist['sample'], '']
 
     blocks: List[Dict[str, Any]] = [
-        {'type': 'heading', 'level': 3, 'text': '估值消化能力（P0-4）'},
+        {'type': 'heading', 'level': 3, 'text': '估值消化能力'},
         {'type': 'table',
          'headers': ['指标', 'P25', 'P50', 'P75', '可算只数', ''],
          'rows': [

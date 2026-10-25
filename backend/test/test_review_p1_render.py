@@ -442,3 +442,67 @@ class TestDigestAnchorConfNote:
         assert _anchor_conf_note({'available': True, 'data': {'confidence': '中'}}) is None
         assert _anchor_conf_note({'available': False, 'data': {}}) is None
         assert _anchor_conf_note(None) is None
+
+
+class TestTurnoverSeriesT3:
+    """T3：turnover.series 与 today_total 同源对拍（V1 基准机器形态）"""
+
+    def test_series_last_matches_today_total(self):
+        import pandas as pd
+        panel = pd.DataFrame({
+            'ts_code': ['sh.600000', 'sz.000001', 'sh.600000', 'sz.000001'],
+            'trade_date': ['20261022', '20261022', '20261023', '20261023'],
+            'amount': [1.0e8, 2.0e8, 3.0e8, 4.0e8],
+        })
+        out = ReviewAggregator._turnover_delta(panel, '20261023', '20261022')
+        assert out['today_total'] == 7.0e8
+        assert [s['date'] for s in out['series']] == ['20261022', '20261023']
+        assert out['series'][-1]['total_yi'] == 7.0
+        assert out['series'][-1]['total_yi'] == round(out['today_total'] / 1e8, 2)
+        assert out['series'][0]['total_yi'] == 3.0
+
+    def test_empty_panel_returns_empty_dict(self):
+        import pandas as pd
+        panel = pd.DataFrame({'ts_code': pd.Series([], dtype=str),
+                              'trade_date': pd.Series([], dtype=str),
+                              'amount': pd.Series([], dtype=float)})
+        assert ReviewAggregator._turnover_delta(panel, '20261023', None) == {}
+
+
+class TestNewsReasonT6:
+    """T6a：要闻 reason 三态——断档 / 当日无快讯（_dot 归一防 TEXT 日期漂移）"""
+
+    def test_gap_reason_when_latest_before_as_of(self):
+        class _GapReader:
+            def _query(self, sql, params=None):
+                if 'MAX(trade_date)' in sql:
+                    return [('2026-10-07',)]
+                return []
+
+        agg = ReviewAggregator(_GapReader(), {'review': {}})
+        r = agg._aggregate_news('20261023')
+        assert r.available is False
+        assert '采集断档' in r.reason and '20261007' in r.reason and '不可回补' in r.reason
+
+    def test_no_news_reason_when_latest_covers_as_of(self):
+        class _CurrentReader:
+            def _query(self, sql, params=None):
+                if 'MAX(trade_date)' in sql:
+                    return [('20261023',)]
+                return []
+
+        agg = ReviewAggregator(_CurrentReader(), {'review': {}})
+        r = agg._aggregate_news('20261023')
+        assert r.available is False
+        assert '当日无快讯' in r.reason and '断档' not in r.reason
+
+    def test_max_query_failure_falls_back_to_no_news(self):
+        class _BoomReader:
+            def _query(self, sql, params=None):
+                if 'MAX(trade_date)' in sql:
+                    raise RuntimeError('db down')
+                return []
+
+        agg = ReviewAggregator(_BoomReader(), {'review': {}})
+        r = agg._aggregate_news('20261023')
+        assert r.available is False and '当日无快讯' in r.reason
