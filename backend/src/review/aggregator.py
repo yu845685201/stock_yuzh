@@ -32,6 +32,7 @@ from ..analysis.candidate_rules import (
     score_candidate,
     veto_reasons,
 )
+from ..analysis.attribution_rules import FALLBACK_LABEL, pick_attribution
 from ..analysis.data_reader import DataReader
 from .cross_section import (
     annotate_panel,
@@ -105,12 +106,15 @@ class _ConfigShim:
 
 
 def _cand_score(big_net: Optional[float], volume_surge: Optional[float],
-                cluster_count: Optional[int]) -> Optional[float]:
-    """候选五维评分的可得子集（P1-7 §4.6 D）。
+                cluster_count: Optional[int],
+                fundamental: Optional[float] = None,
+                event: Optional[float] = None) -> Optional[float]:
+    """候选五维评分的可得子集（P1-7 §4.6 D；P4-2 补全基本面/事件两维）。
 
-    报告层可得维度：资金（大单净流入）/ 技术（放量倍数）/ 板块（聚集家数）；
-    基本面/事件维本层不查库（缺维按剩余权重归一化，missing_dims 见
-    candidate_rules.score_candidate 语义）——**不硬造**。全缺 → None。
+    五维：资金（大单净流入）/ 技术（放量倍数）/ 板块（聚集家数）/
+    基本面（PEG 锚，``fundamental_dim``）/ 事件（归因极性锚，``event_dim``）；
+    缺维按剩余权重归一化（不硬造），全缺 → None。补全后资金 0.35 权重
+    恢复设计含义（原最多三维时被归一化放大至 ~0.44）。
     """
     dims: Dict[str, Optional[float]] = {
         'money': (min(100.0, max(0.0, (big_net or 0.0) / 1e8 * 50.0))
@@ -119,11 +123,44 @@ def _cand_score(big_net: Optional[float], volume_surge: Optional[float],
                  if volume_surge is not None else None),
         'sector': (min(100.0, float(cluster_count) * 20.0)
                    if cluster_count is not None else None),
+        'fundamental': fundamental,
+        'event': event,
     }
     if all(v is None for v in dims.values()):
         return None
     res = score_candidate(dims)
     return res['score']
+
+
+def fundamental_dim(digest: Any) -> Optional[float]:
+    """P4-2 基本面维（0~100，初版线性映射**未校准**）：PEG 锚。
+
+    0 < PEG ≤ 1 → 90 / ≤ 2 → 70 / ≤ 3 → 50 / > 3 → 30；
+    缺失或 ≤ 0（亏损/负增长时 PEG 无意义）→ None（不硬造）。
+    """
+    peg = getattr(digest, 'peg_value', None)
+    if peg is None or float(peg) <= 0:
+        return None
+    peg = float(peg)
+    return 90.0 if peg <= 1 else 70.0 if peg <= 2 else 50.0 if peg <= 3 else 30.0
+
+
+def event_dim(announcements: Optional[List[dict]]) -> Optional[float]:
+    """P4-2 事件维（0~100，初版线性映射**未校准**）：归因极性锚。
+
+    利好 80 / 利空 20 / 其他极性 40 / 无利好显式结论（题材炒作或跟风上涨）
+    10；窗口内无公告 → None（缺维，与"有公告但归因为无利好"区分）。
+    """
+    if not announcements:
+        return None
+    label, polarity, _ = pick_attribution(announcements)
+    if label == FALLBACK_LABEL:
+        return 10.0
+    if polarity == '利好':
+        return 80.0
+    if polarity == '利空':
+        return 20.0
+    return 40.0
 
 
 class ReviewAggregator:
@@ -146,7 +183,8 @@ class ReviewAggregator:
 
     #: P3-2（C5）聚合缓存版本号：聚合层任何影响产出的代码变更时手动 +1（防陈旧缓存）
     #: v3：P4-5 判据表第 4 行（涨跌家数比）+ P4-1 VETO map 卖一占比接线（两处聚合产出变更）
-    AGG_CACHE_VERSION = 'v3-20261025'
+    #: v4：P4-2 五维评分补全（候选行 score 计入基本面/事件两维）
+    AGG_CACHE_VERSION = 'v4-20261025'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -2031,20 +2069,52 @@ class ReviewAggregator:
                 'columns': len(cols), 'mismatches': mismatches[:20],
                 'mismatch_count': len(mismatches)}
 
+    def _valuation_map_of_day(self, as_of: str) -> Optional[Dict[str, Any]]:
+        """当日估值 digest map（P4-2）：维度5 与候选基本面维共享一次装配。
+
+        memo 按 as_of 缓存（同一次 aggregate 内维度5 先行、维度4 复用）；
+        装配异常返回 None（区别于空 map"当日无行"），不硬造。
+        """
+        cached = getattr(self, '_p42_valuation_cache', None)
+        if cached and cached[0] == str(as_of):
+            return cached[1]
+        from ..analysis.env_assembly import assemble_valuation
+        try:
+            m = assemble_valuation(self.reader, as_of, _ConfigShim(self.config))
+        except Exception as e:
+            logger.warning(f'估值摘要装配失败: {e!r}')
+            m = None
+        self._p42_valuation_cache = (str(as_of), m)
+        return m
+
+    def _ann_map_of_day(self, as_of: str) -> Dict[str, List[dict]]:
+        """当日公告窗口 map（P4-2 事件维）：与 _enrich_attribution 同源
+        env_assembly._announcement_map（原则 P6），memo 按 as_of 缓存。"""
+        cached = getattr(self, '_p42_ann_cache', None)
+        if cached and cached[0] == str(as_of):
+            return cached[1]
+        from ..analysis.env_assembly import _announcement_map
+        window = int(((self.config.get('review') or {}).get('attribution') or {})
+                     .get('ann_window_days') or 3)
+        try:
+            m = _announcement_map(self.reader, as_of, window)
+        except Exception as e:
+            logger.warning(f'候选事件维公告窗口读取失败: {e!r}')
+            m = {}
+        self._p42_ann_cache = (str(as_of), m)
+        return m
+
     def _aggregate_valuation_digest(self, as_of: str) -> AggregationResult:
         """个股估值摘要聚合（P0-4 §3.3.3）：分位/消化年数/年化 PE 分布 + 判读。
 
         与链 valuation_digest 模块**同一 assemble_valuation 入口**（原则 P6）；
         分布为全市场截面，消化年数取 P25/P50/P75 + 极值点名。
+        （P4-2 起经 _valuation_map_of_day 装配，与候选基本面维共享同一次查询。）
         """
-        from ..analysis.env_assembly import assemble_valuation
-        try:
-            valuation_map = assemble_valuation(self.reader, as_of,
-                                               _ConfigShim(self.config))
-        except Exception as e:
-            logger.warning(f'估值摘要装配失败: {e!r}')
+        valuation_map = self._valuation_map_of_day(as_of)
+        if valuation_map is None:
             return AggregationResult(available=False,
-                                     reason=f'估值摘要装配失败: {e!r}')
+                                     reason='估值摘要装配失败（见日志）')
         if not valuation_map:
             return AggregationResult(available=False,
                                      reason='stock_valuation_daily 当日无行')
@@ -2317,6 +2387,15 @@ class ReviewAggregator:
         # VETO 输入预查（P1-7 §4.6 B）：最新报告期净利同比 + 窗口内减持公告
         veto_map = self._candidate_veto_map(as_of, rules)
 
+        # P4-2（B9）：基本面/事件两维数据——估值 digest 复用维度5 同一次装配，
+        # 公告窗口与涨停归因同源（_announcement_map）
+        valuation_map = self._valuation_map_of_day(as_of) or {}
+        ann_map = self._ann_map_of_day(as_of) or {}
+
+        def _score_dims(ts_code: str) -> tuple:
+            return (fundamental_dim(valuation_map.get(ts_code)),
+                    event_dim(ann_map.get(ts_code)))
+
         def _cluster_hit(ts_code: str, concepts: Optional[List[str]] = None) -> Optional[int]:
             cs = concepts if concepts is not None else (concept_map.get(ts_code) or [])
             hits = [cluster_counts[c] for c in cs if c in cluster_counts]
@@ -2364,6 +2443,7 @@ class ReviewAggregator:
             ev = _evidence(ts_code, big_net,
                            concept_map.get(ts_code) or [], vs)
             tier = r1_tier(streak, rules) or ''
+            fund, evt = _score_dims(ts_code)
             r1_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
@@ -2371,7 +2451,7 @@ class ReviewAggregator:
                 'amount': _f(r.get('amount')),
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
-                'score': _cand_score(big_net, vs, _cluster_hit(ts_code)),
+                'score': _cand_score(big_net, vs, _cluster_hit(ts_code), fund, evt),
                 # P4-1：行级谓词接入真实字段（高位板长阴）——涨停池内
                 # change_rate≥+9.8% 与 ≤−3% 结构性互斥、实际不可达，保留接线
                 # 待语义修订（见 veto_reasons docstring P4-1 注记）
@@ -2406,6 +2486,7 @@ class ReviewAggregator:
                   if pd.notna(r.get('_volume_surge')) else None)
             big_net = big_net_map.get(ts_code)
             ev = _evidence(ts_code, big_net, concepts, vs)
+            fund, evt = _score_dims(ts_code)
             r2_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'streak': streak,
@@ -2414,7 +2495,7 @@ class ReviewAggregator:
                 'amount': _f(r.get('amount')),
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
-                'score': _cand_score(big_net, vs, cc),
+                'score': _cand_score(big_net, vs, cc, fund, evt),
                 # P4-1：行级谓词接入真实字段（同 R1——涨停池内结构性不可达）
                 'veto': (list(veto_map.get(ts_code) or [])
                          + veto_reasons(streak=streak, volume_surge=vs,
@@ -2453,6 +2534,7 @@ class ReviewAggregator:
                 continue
             ev = _evidence(ts_code, big_net,
                            concept_map.get(ts_code) or [], volume_surge)
+            fund, evt = _score_dims(ts_code)
             r3_rows.append({
                 'ts_code': ts_code, 'code': str(r['stock_code']),
                 'name': str(r['stock_name']), 'amount': _f(r.get('amount')),
@@ -2460,7 +2542,7 @@ class ReviewAggregator:
                 'big_net': big_net,
                 'evidence': ev, 'evidence_count': len(ev),
                 'score': _cand_score(big_net, volume_surge,
-                                     _cluster_hit(ts_code)),
+                                     _cluster_hit(ts_code), fund, evt),
                 'veto': veto_map.get(ts_code) or [],
                 'label': f'新高/{change_rate:+.1f}%/{volume_surge:.1f}x'})
         r3_rows.sort(key=lambda x: -(x['amount'] or 0))
@@ -2478,11 +2560,12 @@ class ReviewAggregator:
             ev = ['机构']
             if ts_code in top3_members:
                 ev.append('板块')
+            fund, evt = _score_dims(ts_code)
             r4_rows.append({
                 'ts_code': ts_code, 'code': ts_code.split('.')[-1],
                 'name': name or '—', 'net': _f(net),
                 'evidence': ev, 'evidence_count': len(ev),
-                'score': _cand_score(net, None, None),
+                'score': _cand_score(net, None, None, fund, evt),
                 'veto': veto_map.get(ts_code) or [],
                 'label': f'机构净买{net / 1e8:+.2f}亿'})
         out['R4'] = r4_rows

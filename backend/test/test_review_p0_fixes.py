@@ -499,3 +499,45 @@ class TestP41CandidateVetoShared:
         clean = R4InstitutionSeat().analyze(None, ChainContext(
             as_of='20261023', stock=stock, upstream=base_up))
         assert '机构净买' in str(clean.value)
+
+
+# ------------------------------------------------------------------ P4-2
+
+class TestP42FiveDims:
+    """P4-2（B9）：五维评分补全——基本面（PEG 锚）/事件（归因极性锚）接线。"""
+
+    def test_cand_score_all_five_dims(self):
+        """五维齐备时按设计权重加权（资金 0.35 恢复名义含义，不再被归一化放大）"""
+        from src.review.aggregator import _cand_score
+        from src.analysis.candidate_rules import score_candidate
+        dims = {'money': 50.0, 'tech': 50.0, 'sector': 50.0,
+                'fundamental': 90.0, 'event': 80.0}
+        res = score_candidate(dims)
+        assert set(res['applied_weights']) == {
+            'money', 'tech', 'sector', 'fundamental', 'event'}
+        expected = (0.35 * 50 + 0.35 * 50 + 0.10 * 60 + 0.10 * 90 + 0.10 * 80)
+        assert abs(_cand_score(1e8, 2.0, 3, 90.0, 80.0) - expected / 1.0) < 0.01
+        # 仅三维时（旧行为回归保护）：资金有效权重被放大
+        old = score_candidate({'money': 50.0, 'tech': 50.0, 'sector': 50.0})
+        assert abs(old['applied_weights']['money'] / sum(
+            old['applied_weights'].values()) - 0.4375) < 1e-6
+
+    def test_fundamental_dim_peg_anchor(self):
+        from types import SimpleNamespace
+        from src.review.aggregator import fundamental_dim
+        assert fundamental_dim(SimpleNamespace(peg_value=0.8)) == 90.0
+        assert fundamental_dim(SimpleNamespace(peg_value=1.5)) == 70.0
+        assert fundamental_dim(SimpleNamespace(peg_value=2.5)) == 50.0
+        assert fundamental_dim(SimpleNamespace(peg_value=5.0)) == 30.0
+        assert fundamental_dim(SimpleNamespace(peg_value=None)) is None
+        assert fundamental_dim(SimpleNamespace(peg_value=-1.0)) is None
+        assert fundamental_dim(None) is None
+
+    def test_event_dim_polarity_anchor(self):
+        from src.review.aggregator import event_dim
+        assert event_dim(None) is None
+        assert event_dim([]) is None
+        assert event_dim([{'ann_date': '20261023', 'ann_type': '中标',
+                           'title': '公司中标重大项目'}]) == 80.0
+        assert event_dim([{'ann_date': '20261023', 'ann_type': '日常公告',
+                           'title': '董事会会议决议'}]) == 10.0  # 无利好显式结论
