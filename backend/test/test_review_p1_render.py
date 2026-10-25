@@ -95,9 +95,11 @@ class TestGlossary:
         for need in ('涨停家数', '炸板率', '溢价均值', 'R1-R4', '弱档否决',
                      '一买（缠论）', '背驰强度', '中枢'):
             assert any(need in t for t in terms), need
-        # 缠论条目含入选口径与历史统计出处
+        # 缠论条目含入选口径与历史统计出处（2026-10-25 门控保留样本修订后数字）
         chan_rows = ' '.join(d for t, d in _GLOSSARY_ROWS if '缠论' in t or '背驰' in t)
-        assert '+6.8%' in chan_rows and '次日开盘' in chan_rows
+        assert '+6.79%' in chan_rows and '次日开盘' in chan_rows
+        # A50 快照口径披露（P1-5 采集侧评估收口，附录 C.5）
+        assert any('A50' in t for t in terms)
 
 
 # ---------------------------------------------------------------- P1-5
