@@ -541,3 +541,42 @@ class TestP42FiveDims:
                            'title': '公司中标重大项目'}]) == 80.0
         assert event_dim([{'ann_date': '20261023', 'ann_type': '日常公告',
                            'title': '董事会会议决议'}]) == 10.0  # 无利好显式结论
+
+
+# ------------------------------------------------------------------ P4-3
+
+class TestP43SurvivorPool:
+    """P4-3（B4）：股票池 as-of 感知 + 幸存者偏差量化披露。"""
+
+    class _PoolDB:
+        def __init__(self):
+            self.queries = []
+
+        def _query(self, sql, params=None):
+            s = str(sql)
+            self.queries.append((s, params))
+            if 'survivor' in s or 'list_status' in s and 'FILTER' in s:
+                return [(137, 0)]
+            return [('sh.600000', '600000', '浦发银行', '19991110')]
+
+    def test_universe_asof_aware_where(self):
+        """as_of 给定时池查询含 delist_date > as_of 的退市股分支；缺省行为不变"""
+        from src.analysis.data_reader import DataReader
+        db = self._PoolDB()
+        reader = DataReader.__new__(DataReader)
+        reader._query = db._query
+        reader.load_stock_universe(as_of='20261023')
+        sql, params = db.queries[-1]
+        assert "list_status = 'D'" in sql and 'delist_date > %s' in sql
+        assert params == ('20261023',)
+        reader.load_stock_universe()
+        sql2, params2 = db.queries[-1]
+        assert "list_status = 'L'" in sql2 and params2 is None
+
+    def test_survivor_stats_shape(self):
+        from src.analysis.data_reader import DataReader
+        db = self._PoolDB()
+        reader = DataReader.__new__(DataReader)
+        reader._query = db._query
+        stats = reader.survivor_pool_stats('20261023')
+        assert stats == {'delisted_alive': 137, 'with_kline': 0}

@@ -68,10 +68,16 @@ class ReviewReportGenerator:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         reader = DataReader(self.config_manager)
+        survivor_bias = None
         try:
             as_of = reader.resolve_as_of(as_of)
             aggregator = ReviewAggregator(reader, self.config)
             agg = aggregator.aggregate(as_of)
+            # P4-3（B4）：幸存者偏差量化（meta 披露，不进报告正文/缓存）
+            try:
+                survivor_bias = reader.survivor_pool_stats(as_of)
+            except Exception as e:  # pragma: no cover - 统计失败不影响报告
+                logger.warning(f'幸存者偏差统计失败: {e!r}')
         finally:
             reader.close()
 
@@ -103,6 +109,8 @@ class ReviewReportGenerator:
         cross = ((agg.get('movers') or {}).get('data') or {}).get('cross_check')
         if cross:
             meta['cross_check'] = cross
+        if survivor_bias is not None:
+            meta['survivor_bias'] = survivor_bias  # P4-3：as-of 应含退市股统计
         # P0-4：估值 calc 库版本（同日重算一致，原则 P7）
         from .valuation_calc import VALUATION_CALC_VERSION
         meta['valuation_calc_version'] = VALUATION_CALC_VERSION

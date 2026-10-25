@@ -163,17 +163,30 @@ class DataReader:
         return lookback.calendar_start(as_of)
 
     # ------------------------------------------------------------ 股票池
-    def load_stock_universe(self) -> List[StockInfo]:
-        """在市股票池（Q1：退市股不分析）。"""
+    def load_stock_universe(self, as_of: Optional[str] = None) -> List[StockInfo]:
+        """在市股票池（Q1：退市股不分析）。
+
+        P4-3（B4）as-of 感知：``as_of`` 给定时，锚定日尚未退市（delist_date
+        为空或 > as_of）的退市股同属该期股票池**定义**——库内暂无退市股
+        K 线（Q1 现状），EXISTS 过滤后实际截面不变（行为逐字节不变）；
+        幸存者偏差由 :meth:`survivor_pool_stats` 量化披露，未来补拉退市
+        K 线后本池自动纳入、无需改码。
+        """
+        where = "WHERE b.list_status = 'L'"
+        params = None
+        if as_of:
+            where = ("WHERE (b.list_status = 'L' "
+                     "OR (b.list_status = 'D' "
+                     "    AND (b.delist_date IS NULL OR b.delist_date > %s)))")
+            params = (str(as_of),)
         rows = self._query(
-            """
+            f"""
             SELECT b.ts_code, b.stock_code, b.stock_name, b.list_date
             FROM base_stock_info b
-            WHERE b.list_status = 'L'
+            {where}
               AND EXISTS (SELECT 1 FROM his_kline_day k WHERE k.ts_code = b.ts_code)
             ORDER BY b.stock_code
-            """
-        )
+            """, params)
         universe: List[StockInfo] = []
         for ts_code, stock_code, stock_name, list_date in rows:
             stock_code = str(stock_code)
@@ -187,6 +200,28 @@ class DataReader:
                 )
             )
         return universe
+
+    def survivor_pool_stats(self, as_of: str) -> Dict[str, int]:
+        """P4-3（B4）幸存者偏差量化（报告 meta 披露用）。
+
+        delisted_alive = 锚定日尚未退市的退市股数（list_status='D' 且
+        delist_date 为空或 > as_of）——历史 as-of 重跑时这些股票当时仍在市，
+        仅按当前状态建池会被静默剔除；with_kline = 其中库内有 K 线数
+        （当前 0：退市股 K 线未入库，补拉后即为实际纳入数）。
+        """
+        rows = self._query(
+            """
+            SELECT count(*),
+                   count(*) FILTER (WHERE EXISTS (
+                       SELECT 1 FROM his_kline_day k WHERE k.ts_code = b.ts_code))
+            FROM base_stock_info b
+            WHERE b.list_status = 'D'
+              AND (b.delist_date IS NULL OR b.delist_date > %s)
+            """, (str(as_of),))
+        if not rows:
+            return {'delisted_alive': 0, 'with_kline': 0}
+        return {'delisted_alive': int(rows[0][0] or 0),
+                'with_kline': int(rows[0][1] or 0)}
 
     # ------------------------------------------------------------ K 线
     def load_kline(

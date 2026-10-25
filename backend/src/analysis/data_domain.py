@@ -112,8 +112,9 @@ class AShareDomain(DataDomain):
     def resolve_as_of(self, reader, as_of: Optional[str]) -> str:
         return reader.resolve_as_of(as_of)
 
-    def load_universe(self, reader, config_manager) -> List[StockInfo]:
-        return reader.load_stock_universe()
+    def load_universe(self, reader, config_manager, as_of: Optional[str] = None) -> List[StockInfo]:
+        """A 股域股票池（P4-3：透传 as_of 做 as-of 感知建池，见 data_reader）。"""
+        return reader.load_stock_universe(as_of=as_of)
 
     def load(self, reader, columns, as_of, chain, opts, module_days,
              universe) -> DomainLoad:
@@ -183,7 +184,7 @@ class OverseasDomain(DataDomain):
         """[(ts_code, name, a_code)]，由子类按 config 段提供（顺序即报告行序）。"""
         raise NotImplementedError
 
-    def load_universe(self, reader, config_manager) -> List[StockInfo]:
+    def load_universe(self, reader, config_manager, as_of: Optional[str] = None) -> List[StockInfo]:
         review_cfg = (config_manager.load_config().get("review_sync") or {}) \
             if hasattr(config_manager, "load_config") else {}
         entries = self._pool_entries_from(review_cfg)
