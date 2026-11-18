@@ -6,7 +6,8 @@
 - 其余 → ``纠缠``；warmup 不足或含 NaN → ``数据不足``。
 
 口径：MA 为 rolling 简单平均（附录 B）。warmup 130（MA60 需 60 日 + EMA 系无涉，
-取 130 与同批模块一致，留足稳定区）。命中统计：状态串不计命中（§2.5 原则）。
+取 130 与同批模块一致，留足稳定区）。多空严格序按 4 位小数比较（平价股浮点防护，
+见 analyze 内注）。命中统计：状态串不计命中（§2.5 原则）。
 """
 
 from __future__ import annotations
@@ -62,6 +63,10 @@ class MaArrangement(AnalysisModule):
                                 {'close': c_now, 'ma60': round(ma60_last, 4)})
 
         m5, m10, m20, m60 = (latest[5], latest[10], latest[20], latest[60])
+        # 严格序比较按 4 位小数（与 extras 精度一致）：平价序列下 MA5 与 MA10 数学
+        # 相等（如 20261027 的 002182/002488，前 5 日和恰等于后 5 日和），rolling
+        # 浮点误差随窗口起点不同随机把相等翻成严格小于/大于（链/面板互斥翻车）。
+        m5, m10, m20, m60 = (round(v, 4) for v in (m5, m10, m20, m60))
         if m5 > m10 > m20 > m60:
             label = '多头排列(MA5>10>20>60)'
         elif m5 < m10 < m20 < m60:

@@ -28,7 +28,7 @@ class TestMergeKlineDaySources:
                _qfq('2026-09-03T15:00:00+08:00', 10200, 10100)]
         raw = [_raw('2026-09-01T15:00:00+08:00', 10000, 156000000),
                _raw('2026-09-02T15:00:00+08:00', 10100, 160000000)]
-        merged = manager._merge_kline_day_sources(qfq, raw)
+        merged, _skips = manager._merge_kline_day_sources(qfq, raw)
 
         assert len(merged) == 3
         assert merged[0]['Amount'] == 156000000
@@ -45,13 +45,13 @@ class TestMergeKlineDaySources:
         qfq = [_qfq('2026-09-01T15:00:00+08:00', 10000, 0)]
         raw = [_raw('2026-09-01T15:00:00+08:00', 10000, 100),
                _raw('1999-01-04T15:00:00+08:00', 5000, 50)]
-        merged = manager._merge_kline_day_sources(qfq, raw)
+        merged, _skips = manager._merge_kline_day_sources(qfq, raw)
         assert len(merged) == 1
         assert merged[0]['Amount'] == 100
 
     def test_empty_inputs(self, manager):
-        assert manager._merge_kline_day_sources([], []) == []
-        assert manager._merge_kline_day_sources(None, None) == []
+        assert manager._merge_kline_day_sources([], []) == ([], [])
+        assert manager._merge_kline_day_sources(None, None) == ([], [])
 
 
 class TestDetectKlineDayRefetch:
@@ -59,6 +59,10 @@ class TestDetectKlineDayRefetch:
         monkeypatch.setattr(
             manager.db_conn, 'fetch_prev_his_kline_day_close',
             lambda code, date: prev_close)
+        # F11① 降级路径会查同日 close——单测中屏蔽真实库
+        monkeypatch.setattr(
+            manager.db_conn, 'fetch_one',
+            lambda q, p: None)
         monkeypatch.setattr(
             manager.db_conn, 'execute_query',
             lambda q, p: stored_raw or [])
@@ -67,7 +71,7 @@ class TestDetectKlineDayRefetch:
         """Last 与库存 close 错位超阈值 → 命中除权重基"""
         self._prepare(manager, monkeypatch, prev_close=10.00)
         # 库存基准 10.00 元，除权后新基准 Last=9.60 元，错位 0.40 元
-        merged = manager._merge_kline_day_sources(
+        merged, _skips = manager._merge_kline_day_sources(
             [_qfq('2026-06-12T15:00:00+08:00', 9640, 9600)],
             [_raw('2026-06-12T15:00:00+08:00', 9640, 100)])
         hit, detail = manager._detect_kline_day_refetch('sz.000001', merged)
@@ -79,7 +83,7 @@ class TestDetectKlineDayRefetch:
     def test_rebase_no_hit_within_threshold(self, manager, monkeypatch):
         """正常波动（错位在阈值内）不命中"""
         self._prepare(manager, monkeypatch, prev_close=10.00)
-        merged = manager._merge_kline_day_sources(
+        merged, _skips = manager._merge_kline_day_sources(
             [_qfq('2026-09-04T15:00:00+08:00', 9990, 10000)],  # Last=9.99元
             [_raw('2026-09-04T15:00:00+08:00', 9990, 100)])
         hit, detail = manager._detect_kline_day_refetch('sz.000001', merged)
@@ -88,7 +92,7 @@ class TestDetectKlineDayRefetch:
     def test_no_stored_data_no_hit(self, manager, monkeypatch):
         """库存无前置数据（新股）不命中"""
         self._prepare(manager, monkeypatch, prev_close=None)
-        merged = manager._merge_kline_day_sources(
+        merged, _skips = manager._merge_kline_day_sources(
             [_qfq('2026-09-04T15:00:00+08:00', 9990, 0)],
             [_raw('2026-09-04T15:00:00+08:00', 9990, 100)])
         hit, _ = manager._detect_kline_day_refetch('sz.000001', merged)
@@ -98,7 +102,7 @@ class TestDetectKlineDayRefetch:
         """库存 raw_close 与新拉不一致 → 源数据修订命中"""
         self._prepare(manager, monkeypatch, prev_close=None, stored_raw=[
             {'trade_date': '20260904', 'raw_close': 10.00}])
-        merged = manager._merge_kline_day_sources(
+        merged, _skips = manager._merge_kline_day_sources(
             [_qfq('2026-09-04T15:00:00+08:00', 10500, 10000)],
             [_raw('2026-09-04T15:00:00+08:00', 10500, 100)])
         hit, detail = manager._detect_kline_day_refetch('sz.000001', merged)

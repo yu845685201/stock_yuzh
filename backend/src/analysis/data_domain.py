@@ -9,7 +9,8 @@
   A-H 两地公司附 a_code → a_close 对照列）。
 
 外围域关键语义（§3.2/§3.3）：
-- 锚定日按 ``overseas_kline_day`` 自身日历解析（默认 = 库内最新市场日）；
+- 锚定日按域内股票池的 ``overseas_kline_day`` 自身日历解析（默认 = 池内最新
+  市场日；A50 期货夜盘行 trade_date 计入下一交易日，不参与港美域锚定）；
 - 窗口忽略链 lookback 的 A 股日历换算，按 ``max(模块 effective_lookback) +
   WINDOW_BUFFER`` 取每股最近 N 行（市场自身日历）；
 - ``change_rate`` 自算（相邻市场交易日 pct_change）、``is_st`` 恒 0（列存在仅为
@@ -86,7 +87,8 @@ class DataDomain:
     #: 股票池为空时的报错文案
     universe_empty_error: str = "股票池为空"
 
-    def resolve_as_of(self, reader, as_of: Optional[str]) -> str:
+    def resolve_as_of(self, reader, as_of: Optional[str],
+                      config_manager=None) -> str:
         raise NotImplementedError
 
     def load_universe(self, reader, config_manager) -> List[StockInfo]:
@@ -109,7 +111,9 @@ class AShareDomain(DataDomain):
     base_columns = ["change_rate", "is_st", "raw_close"]
     universe_empty_error = "股票池为空（base_stock_info.list_status='L' ∩ his_kline_day）"
 
-    def resolve_as_of(self, reader, as_of: Optional[str]) -> str:
+    def resolve_as_of(self, reader, as_of: Optional[str],
+                      config_manager=None) -> str:
+        # config_manager 仅为域接口对齐（A 股锚定取 his_kline_day 最新交易日，不依赖池）
         return reader.resolve_as_of(as_of)
 
     def load_universe(self, reader, config_manager, as_of: Optional[str] = None) -> List[StockInfo]:
@@ -162,9 +166,13 @@ class OverseasDomain(DataDomain):
     attach_fx = False
 
     # ------------------------------------------------------------ 锚定日
-    def resolve_as_of(self, reader, as_of: Optional[str]) -> str:
-        """外围锚定日按 overseas_kline_day 自身日历解析（引擎默认锚定日来自
-        his_kline_day，会静默错位到 A 股最新交易日——外围域必须覆盖）。"""
+    def resolve_as_of(self, reader, as_of: Optional[str],
+                      config_manager=None) -> str:
+        """外围锚定日按域内股票池的 ``overseas_kline_day`` 自身日历解析
+        （引擎默认锚定日来自 his_kline_day，会静默错位到 A 股最新交易日——
+        外围域必须覆盖）。缺省路径按池内 market_code 取 MAX：A50 期货夜盘行
+        （sina_futures）trade_date 计入新交所下一交易日，会晚于港美现货收盘，
+        全表 MAX 会把锚定日顶到尚未收盘的日期使整链「数据不足」。"""
         if as_of:
             value = str(as_of).replace("-", "")
             if len(value) != 8 or not value.isdigit():
@@ -174,10 +182,23 @@ class OverseasDomain(DataDomain):
                     (value,)):
                 raise ValueError(f"锚定日 {value} 在 overseas_kline_day 中无任何数据")
             return value
-        rows = reader._query("SELECT MAX(trade_date) FROM overseas_kline_day")
+        codes = self._pool_codes(config_manager)
+        if codes:
+            rows = reader._query(
+                "SELECT MAX(trade_date) FROM overseas_kline_day "
+                "WHERE market_code = ANY(%s)", (codes,))
+        else:
+            rows = reader._query("SELECT MAX(trade_date) FROM overseas_kline_day")
         if not rows or not rows[0][0]:
             raise ValueError("overseas_kline_day 为空，无法确定锚定日（先执行 sync-overseas-kline）")
         return str(rows[0][0])
+
+    def _pool_codes(self, config_manager) -> List[str]:
+        """域内股票池 market_code 列表（config 不可用或池为空时返回空 → 全表回退）。"""
+        if config_manager is None or not hasattr(config_manager, "load_config"):
+            return []
+        review_cfg = (config_manager.load_config().get("review_sync") or {})
+        return [code for code, _name, _a in self._pool_entries_from(review_cfg)]
 
     # ------------------------------------------------------------ 股票池
     def _pool_entries(self, config_manager) -> List[Tuple[str, str, Optional[str]]]:

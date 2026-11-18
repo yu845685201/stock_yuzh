@@ -68,7 +68,7 @@ def _make_deps(tdx: FakeTdxSource, db: FakeDbConn) -> KlineDayDeps:
         tail_limit=5,
         total_stocks=1,
         log_progress=lambda *args, **kwargs: None,
-        merge_sources=lambda qfq_list, raw_list: [{'trade_date': '20260923', 'close': '10.0', 'open': '10.0'}],
+        merge_sources=lambda qfq_list, raw_list, trade_dates=None, ts_code=None, raw_fallback_budget=None: ([{'trade_date': '20260923', 'close': '10.0', 'open': '10.0'}], []),
         detect_refetch=lambda ts_code, merged: (True, {'reason': 'unit-test-hit'}),
         filter_raw=lambda raw, trade_dates: [],
         normalize_records=lambda merged, stock, fmap, allowed_dates=None: (

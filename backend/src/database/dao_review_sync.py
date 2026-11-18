@@ -1390,9 +1390,20 @@ class ReviewDaoMixin:
         """
         return self.execute_batch(sql, [self._strip(r) for r in rows])
 
-    def fetch_money_flow_codes(self, trade_date: str) -> set:
-        rows = self.execute_query(
-            "SELECT ts_code FROM money_flow_daily WHERE trade_date = %s", (trade_date,))
+    def fetch_money_flow_codes(self, trade_date: str, calib_note: Optional[str] = None) -> set:
+        """当日已入库资金流的股票集合。
+
+        calib_note 过滤（2026-11-01）：full_market 重跑精确跳过——只跳过口径相同的
+        既有行；历史/异动子集口径行（calib_note 不同）仍重算覆盖，保留原"旧行可能
+        缺分桶列，重算幂等覆盖"的防御语义。
+        """
+        if calib_note is None:
+            rows = self.execute_query(
+                "SELECT ts_code FROM money_flow_daily WHERE trade_date = %s", (trade_date,))
+        else:
+            rows = self.execute_query(
+                "SELECT ts_code FROM money_flow_daily WHERE trade_date = %s AND calib_note = %s",
+                (trade_date, calib_note))
         return {r['ts_code'] for r in rows}
 
     # ---------- 分笔封板指标（开发项 F） ----------

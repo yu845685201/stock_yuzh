@@ -104,8 +104,17 @@ def build_stock_row(code: str, name: str, exchange: str, list_date: Optional[str
 
 
 def kline_first_last_date(tdx: TdxApiSource, code: str) -> Optional[Dict[str, str]]:
-    """日K全历史首末日期（YYYYMMDD；'Time' RFC3339 → 取前 10 位去横线）"""
-    bars = tdx.get_kline_all(code, 'day')
+    """日K全历史首末日期（YYYYMMDD；'Time' RFC3339 → 取前 10 位去横线）
+
+    F8：strict 模式下中间件不可用抛 TdxApiUnavailableError——此处捕获后返回 None
+    并记 warning，新股 list_date 落 NULL（与现行"无日K留空"行为等价）。
+    """
+    from ..data_sources.tdx_api_source import TdxApiUnavailableError
+    try:
+        bars = tdx.get_kline_all(code, 'day')
+    except TdxApiUnavailableError as e:
+        logging.getLogger(__name__).warning(f"kline_first_last_date 中间件不可用: {code} {e}")
+        return None
     dates = sorted(str((b or {}).get('Time') or '')[:10].replace('-', '') for b in bars if (b or {}).get('Time'))
     if not dates:
         return None
@@ -167,6 +176,28 @@ class StockListManager:
     def execute(self, apply: bool = False) -> Dict[str, Any]:
         started = time.time()
         snapshot = self._fetch_snapshot()
+
+        # F6（数据采集链路风险修复方案 V1.0）：快照合理性硬校验——空/过小快照
+        # （中间件故障返回 []，P0-1 语义黑洞）中止本轮：缺席计数/退市判定/落库
+        # 均不执行，防止连续故障日把长期停牌股批量误判退市、新股漏入库。
+        snap_min = int(self.config.get('sync.stock_list_snapshot_min', 3000) or 3000)
+        if len(snapshot) < snap_min:
+            self.logger.error(
+                f"股票快照 {len(snapshot)} 只 < 阈值 {snap_min}（疑似中间件故障），本轮中止")
+            report = {
+                'snapshot': len(snapshot), 'db_stocks': None, 'apply': apply,
+                'new_stocks': [], 'renamed': [], 'delisted': [],
+                'absent_watch': [], 'kept_suspect': [], 'list_date_backfill': [],
+                'aborted': True,
+                '_snapshot_rows': [],
+            }
+            report_path = self._write_report(report)
+            return {'success': False, 'aborted': True,
+                    'errors': [f'快照 {len(snapshot)} 只 < 阈值 {snap_min}（疑似中间件故障），'
+                               f'本轮缺席计数/退市判定/落库均未执行'],
+                    'snapshot': len(snapshot), 'report_path': str(report_path),
+                    'duration': round(time.time() - started, 1)}
+
         snap_by_ts = {s['ts_code']: s for s in snapshot}
         db_stocks = self._load_db_stocks()
         self.logger.info(f"快照 {len(snapshot)} 只 vs 库内 type='1' {len(db_stocks)} 只")

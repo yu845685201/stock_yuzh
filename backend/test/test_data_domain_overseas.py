@@ -64,7 +64,11 @@ class FakeReader:
     def _query(self, sql, params=None):
         s = ' '.join(sql.split())
         if 'overseas_kline_day' in s and 'MAX(trade_date)' in s:
-            dates = [d for _, d, _ in self.ok_rows]
+            if 'ANY(%s)' in s:
+                codes = set(params[0])
+                dates = [d for m, d, _ in self.ok_rows if m in codes]
+            else:
+                dates = [d for _, d, _ in self.ok_rows]
             return [(max(dates),)] if dates else [(None,)]
         if "SELECT 1 FROM overseas_kline_day" in s:
             return [(1,)] if any(d == params[0] for _, d, _ in self.ok_rows) else []
@@ -174,6 +178,29 @@ def test_overseas_resolve_as_of():
     assert dom.resolve_as_of(reader, '20260930') == '20260930'
     with pytest.raises(ValueError, match='overseas_kline_day 中无任何数据'):
         dom.resolve_as_of(reader, '20260101')
+
+
+def test_overseas_resolve_as_of_pool_scoped():
+    """锚定按域内池解析：A50 期货夜盘行（sina_futures）trade_date 计入新交所
+    下一交易日（晚于港美现货收盘），不得顶高港美域锚定日（20261027 实跑缺陷）。"""
+    reader = FakeReader(ok_rows=[
+        ('hkHSI', '20261027', 1.0), ('hkHSI', '20261024', 1.0),
+        ('hk00700', '20261027', 1.0),
+        ('CHA50CFD', '20261028', 1.0),          # 夜盘行：晚于港美现货最新收盘
+    ])
+    dom = OverseasIndicesDomain()
+    cm = FakeConfigManager({'overseas_kline_indices': INDICES_CFG})
+    assert dom.resolve_as_of(reader, None, cm) == '20261027'   # 池内 MAX（排除夜盘行）
+    assert dom.resolve_as_of(reader, None) == '20261028'       # 无 config → 全表回退（历史行为）
+    # 显式 as-of 校验仍按全表任意行（含夜盘行）判定数据存在性
+    assert dom.resolve_as_of(reader, '20261028', cm) == '20261028'
+    stocks = OverseasStocksDomain()
+    cm2 = FakeConfigManager({'overseas_kline_stocks': STOCKS_CFG})
+    assert stocks.resolve_as_of(reader, None, cm2) == '20261027'
+    # 池配置为空 → 回退全表
+    assert dom.resolve_as_of(reader, None, FakeConfigManager({})) == '20261028'
+    assert dom.resolve_as_of(reader, None, FakeConfigManager(
+        {'overseas_kline_indices': []})) == '20261028'
 
 
 # ------------------------------------------------------------------ load

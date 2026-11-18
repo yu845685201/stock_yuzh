@@ -119,6 +119,13 @@ class OptionManager:
             logger.exception('期权采集失败: %r', e)
             result['errors'].append(str(e))
         finally:
+            # F2（方案 V1.0 §F2）：自报数据日（option_daily 当日 max；与 stats['trade_date']
+            # 请求日不同口径——SSE 统计接口只返回最新交易日，实际入库日以库内 max 为准）
+            try:
+                r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM option_daily')
+                stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
+            except Exception:
+                stats['data_date_max'] = None
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = (self._write_report(result)
                                      if write_report else None)

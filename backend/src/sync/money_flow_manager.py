@@ -273,11 +273,19 @@ class MoneyFlowManager:
 
             existing = self.db.fetch_money_flow_codes(trade_date)
             if self.full_market:
-                # P2 全市场：不跳过已有行（旧行可能缺分桶列，重算幂等覆盖）
-                pending = stocks
+                # P2 全市场（2026-11-01 精确化）：跳过口径相同（分笔分桶:全市场）的
+                # 既有行——重跑从全量重抓（~14 分钟）降到秒级；历史/异动子集口径行
+                # （calib_note 不同，20260917 扩面前）仍重算幂等覆盖
+                full_calib_existing = self.db.fetch_money_flow_codes(
+                    trade_date, calib_note='分笔分桶:全市场')
+                pending = [s for s in stocks
+                           if s['ts_code'] not in full_calib_existing or codes]
+                skipped_n = len(stocks) - len(pending)
+                logger.info(f"资金流 {trade_date}：子集 {len(stocks)} 只，待抓 {len(pending)} 只"
+                            f"（全市场口径已入库跳过 {skipped_n}）")
             else:
                 pending = [s for s in stocks if s['ts_code'] not in existing or codes]
-            logger.info(f"资金流 {trade_date}：子集 {len(stocks)} 只，待抓 {len(pending)} 只（已入库跳过）")
+                logger.info(f"资金流 {trade_date}：子集 {len(stocks)} 只，待抓 {len(pending)} 只（已入库跳过）")
 
             done_count = 0
             failed_timeouts = 0

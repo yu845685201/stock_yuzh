@@ -1,17 +1,19 @@
 """
 盘后编排器 sync-review-data（方案 2.5，每日复盘数据采集总入口）
 
-- 执行顺序固定（快源在前、依赖在后），单源 try/except 隔离，失败不阻塞后续源；
-- **源间并发**（用户决策 2026-09-27）：独立源按波次并行采集（各源内部仍串行限速，
-  不违反每源风控约束）；依赖源（ths_finance 依赖公告/披露、valuation_calc 依赖财报）
-  顺序在后。parallel_workers 控制波内并发上限（review_sync.parallel_workers，默认 4）
+- **依赖驱动调度**（2026-11-01，替代波次 barrier）：每源声明依赖（SOURCE_DEPENDENCIES），
+  依赖完成后立即提交线程池（parallel_workers 槽位）——消除"长尾源阻塞无依赖源"的
+  波级等待。典型：ths_finance 只依赖公告/披露（~4 分钟），不必等全市场日K（~15 分钟），
+  两者并行；factor/money_flow 等 kline 完成即启动，不与 THS 串行。各源内部仍按各自
+  限速执行，不违反每源风控约束（用户决策 2026-09-27 语义保留）。
+- 单源 try/except 隔离，失败不阻塞后续源；
 - 前置校验：日K依赖源（factor/money_flow/valuation_calc）要求当日 his_kline_day
   已同步（行数 vs base_stock_info 股数），未同步则中止并提示先跑 sync-kline-day
   （分笔子集、涨跌幅筛选都依赖日K；不自动触发，与现有流程正交）
 - **一键模式**（execute(include_kline=True)，供 sync-review-all 使用）：全市场日K当日
-  增量作为"波1伪源"与不依赖日K的源并发执行；日K依赖源顺延到波2/波3，在日K完成后
-  按其结果+行数阈值门控（未通过标"跳过"）；缺省源集在 weekly_refresh_weekday（0=周一）
-  当天自动并入周频源 concept/unlock
+  增量作为内置伪源参与依赖调度；kline 完成后按其结果+行数阈值门控（未通过则日K
+  依赖源标"跳过"）；缺省源集在 weekly_refresh_weekday（0=周一）当天自动并入周频源
+  concept/unlock
 - 风控急停：ReviewBlockedError → 该源冷却 sleep 后重试 1 次（可配置）→ 仍失败标"待补"
 - 幂等重跑：upsert + 游标设计，晚间子集补抓（如 --sources=lhb,announcement）安全
 - 汇总报告：源名/状态(成功|失败|待补|跳过)/行数/耗时/失败摘要 → data/reports/
@@ -19,7 +21,7 @@
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait as wait_futures
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -30,23 +32,57 @@ from .review_common import write_review_report
 logger = logging.getLogger(__name__)
 
 # 默认每日盘后全流程（方案 2.5 顺序 + 行业分类日更——全量仅 ~150 请求、2s 限速约 4 分钟，
-# 日更顺带覆盖当日新股的行业归属，避免新股最多缺席一周行业榜）
+# 日更顺带覆盖当日新股的行业归属，避免新股最多缺席一周行业榜）。列表序同时是依赖
+# 调度的提交优先序（就绪扫描按此序，先提交快源腾槽）。
 DEFAULT_SOURCES = [
     'index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
     'disclosure', 'lhb', 'margin', 'ths_finance', 'money_flow', 'valuation_calc',
-    'sentiment_metrics', 'industry', 'bj_kline', 'news',
+    'sentiment_metrics', 'industry', 'bj_kline',     'news',
     # 资金锚两源（B7）： runners/波次/labels 早已就绪，仅默认集漏配导致
     # sync-review-all 永不执行、--sources 显式指定报"未知源名"
     'hkex_connect', 'etf_scale',
+    # F15（方案 V1.0 §F15，2026-11-18 用户拍板）：macro（~20 请求/日）与 option
+    # （日频，T 日盘后）入盘后编排，消除 26 天/2 日静默停更；north_flow_detail
+    # 源侧 2024-08 停披露，不入编排（F1 巡检豁免 + CLI 标注退役）
+    'macro', 'option',
 ]
 # 周频任务（周末执行，--sources 显式指定；ths_l2=申万二级增量，N3 2026-10-04 挂载）
 WEEKLY_SOURCES = ['concept', 'unlock', 'ths_l2']
 ALL_SOURCES = DEFAULT_SOURCES + WEEKLY_SOURCES
-# 依赖当日全市场日K的源
+# 依赖当日全市场日K的源（kline gate 未通过时整类标"跳过"）
 KLINE_DEPENDENT_SOURCES = {'factor', 'money_flow', 'valuation_calc', 'sentiment_metrics'}
-# 一键模式内置的全市场日K伪源（仅 include_kline=True 时编入波次，不接受 --sources 指定）
+# F4（数据采集链路风险修复方案 V1.0）：依赖 tdx-api 中间件的源——请求集命中任一
+# 即在调度前做中间件健康预检（/api/health），失败直接返回并明示 Docker 容器
+TDX_DEPENDENT_SOURCES = {'kline', 'index', 'factor', 'money_flow', 'sentiment_metrics',
+                         'valuation_calc', 'shares_xdxr'}
+# 一键模式内置的全市场日K伪源（仅 include_kline=True 时参与调度，不接受 --sources 指定）
 KLINE_SOURCE = 'kline'
-# 波次划分：波内并行，波间顺序（后者依赖前者产出）
+
+# 源依赖声明（2026-11-01 依赖驱动调度）：
+# - ths_finance 只等 announcement/disclosure（其当日披露清单的来源），与日K并行；
+# - kline 可选等待 shares_xdxr：一键模式显式编入股本时维持"股本先于日K"约束
+#   （除权/增发当日生效的股本须在日K入库读股本映射前落库，否则事件股当日
+#   turnover_rate 用前一日股本）；股本不在请求集时不等待；
+# - 不在本次请求集内的依赖视为外部已满足（单源补跑语义，日K前置校验兜底）。
+# - 交易所系源串行化（2026-11-17）：disclosure→lhb→margin 链式依赖，同一时刻
+#   仅一个流请求交易所官网域（三源共用同一出口 IP，同波并发曾触发 403 风控
+#   急停：2026-11-17 19:02 披露日历翻页突发打热 IP，龙虎榜/两融首请求即 403）。
+#   依赖语义"完成即放行（无论成败）"（见 _run_parallel 调度说明），故披露日历
+#   失败不阻塞龙虎榜/两融，仅保证不与它们并发打同一域。
+SOURCE_DEPENDENCIES = {
+    'ths_finance': {'announcement', 'disclosure'},
+    'kline': {'shares_xdxr'},
+    'factor': {'kline'},
+    'money_flow': {'kline'},
+    'valuation_calc': {'kline', 'ths_finance'},
+    'sentiment_metrics': {'kline', 'ths_finance'},
+    'lhb': {'disclosure'},
+    'margin': {'lhb'},
+    # F13（方案 V1.0 §F13）：etf_scale 走 query.sse.com.cn+szse.cn，与交易所域三源
+    # 同域串行（排在 margin 之后，避免并发触发风控）
+    'etf_scale': {'margin'},
+}
+# 兼容保留（历史波次结构，仅作文档与旧测试参照，不再参与调度）
 SOURCE_WAVES = [
     ['index', 'factor', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
      'disclosure', 'lhb', 'margin', 'money_flow', 'industry', 'concept', 'unlock',
@@ -70,6 +106,8 @@ SOURCE_LABELS = {
     'shares_xdxr': '股本(XDXR)',
     'ths_l2': '申万二级行业',
     'bj_kline': '北交所日K',
+    'macro': '宏观指标（F15 入编排）',
+    'option': 'ETF期权（F15 入编排）',
 }
 
 
@@ -121,10 +159,30 @@ class ReviewSyncOrchestrator:
                     return result
 
         runners = self._build_runners(as_of_str)
+
+        # F4（方案 V1.0 §F4）：中间件健康预检——请求集含 tdx 依赖源时统一预检一次，
+        # 失败直接返回（11-17 教训：中间件宕机时各任务空跑全程，697 只静默漏采）。
+        # base_url 未配置时跳过（未配置环境下由各 manager 既有 connect 行为兜底）。
+        if not dry_run and bool((self.config.get('review_sync', {}) or {})
+                                .get('middleware_health_check_enabled', True)):
+            tdx_needed = include_kline or bool(set(requested) & TDX_DEPENDENT_SOURCES)
+            if tdx_needed:
+                from ..data_sources.tdx_api_source import middleware_health_check
+                base_url = ((self.config_manager.get('data_sources.tdx_api', {}) or {})
+                            .get('base_url', ''))
+                if base_url:
+                    ok, msg = middleware_health_check(base_url)
+                    if not ok:
+                        result['errors'].append(
+                            f'中间件健康预检失败: {msg}（请确认 Docker 容器 tdx-stock-web 已启动，'
+                            f'Docker Desktop 已运行）')
+                        result['report_path'] = self._write_report(result, started)
+                        return result
+                    logger.info(f'中间件健康预检通过: {base_url}')
+
         wave_requested = list(requested) + ([KLINE_SOURCE] if include_kline else [])
         summary_by_source, kline_gate_detail = self._run_waves(
             wave_requested, runners, dry_run,
-            waves=self._build_waves(include_kline),
             include_kline=include_kline, as_of_str=as_of_str)
         if include_kline:
             result['kline_check'] = kline_gate_detail
@@ -139,6 +197,26 @@ class ReviewSyncOrchestrator:
         result['success'] = any(e['status'] == '成功' for e in result['summary']) \
             and not all(e['status'] in ('失败', '跳过') for e in result['summary'])
         result['duration'] = (datetime.now() - started).total_seconds()
+
+        # F1（方案 V1.0 §F1）：数据新鲜度巡检挂载——编排末尾自动跑，红灯进
+        # result['freshness_red'] 并入汇总报告（不改变各源自身状态）
+        result['freshness_red'] = []
+        if not dry_run and bool((self.config.get('review_sync', {}) or {})
+                                .get('freshness_check_enabled', True)):
+            try:
+                from .freshness_check_manager import FreshnessCheckManager
+                fr = FreshnessCheckManager(self.config_manager).execute()
+                result['freshness_red'] = [r['table'] for r in fr.get('red', [])]
+                result['freshness_red_detail'] = fr.get('red', [])
+                result['freshness_report_path'] = fr.get('report_path')
+                if fr.get('red'):
+                    logger.warning(
+                        "新鲜度巡检红灯: "
+                        + ', '.join(f"{r['label']}({r['table']}) max={r.get('max_date')}"
+                                    for r in fr['red']))
+            except Exception as e:
+                logger.warning(f"数据新鲜度巡检异常（不影响编排结果）: {e}")
+
         result['report_path'] = self._write_report(result, started)
         return result
 
@@ -174,65 +252,91 @@ class ReviewSyncOrchestrator:
                    dry_run: bool, waves: Optional[List[List[str]]] = None,
                    include_kline: bool = False,
                    as_of_str: Optional[str] = None) -> tuple:
-        """按波次执行：波内并行（parallel_workers 上限），波间顺序。
+        """依赖驱动调度（2026-11-01，替代波次 barrier）：每源声明依赖（SOURCE_DEPENDENCIES），
+        依赖源完成后立即提交线程池（parallel_workers 槽位）——长尾源（日K/THS）不阻塞
+        无依赖的快源，也不被无关长尾阻塞。
 
-        一键模式（include_kline=True）：kline 所在波结束后评估日K门控，未通过则
-        后续波中的日K依赖源标"跳过"（dry_run 不门控，预检清单全展开）。
+        契约（与波次模型逐项对齐）：
+        - kline gate：kline 完成后立即评估（结果+行数阈值），未通过则日K依赖源标"跳过"
+          （dry_run 不门控）；
+        - 依赖源"完成即放行"（无论成败）：announcement 失败不阻塞 ths_finance——与原
+          波次行为一致（披露清单查库为空时 THS 空跑成功，公告缺口由晚间补跑覆盖）；
+        - 不在本次请求集内的依赖视为外部已满足（单源补跑语义）；
+        - 单源隔离/风控重试（_run_source）、runner 未注册补"跳过"，均不变。
+        waves 参数保留以兼容旧调用签名，调度不再使用。
         返回 (summary, kline_gate_detail)。
         """
         summary: Dict[str, Dict[str, Any]] = {}
         kline_gate_detail: Optional[str] = None
-        kline_ok: Optional[bool] = None
-        for wave in (waves or SOURCE_WAVES):
-            names = [s for s in wave if s in requested]
-            if not names:
-                continue
-            if kline_ok is False:
-                gated = [s for s in names if s in KLINE_DEPENDENT_SOURCES]
-                names = [s for s in names if s not in gated]
-                for s in gated:
-                    summary[s] = {'source': s, 'label': SOURCE_LABELS.get(s, s), 'status': '跳过',
-                                  'rows': 0, 'duration': 0.0, 'detail': kline_gate_detail}
-                if not names:
-                    continue
-            if self.parallel_enabled and len(names) > 1:
-                logger.info(f'波次并行开始: {names}（并发上限 {self.parallel_workers}）')
-                with ThreadPoolExecutor(max_workers=min(self.parallel_workers, len(names))) as executor:
-                    futures = {executor.submit(self._run_source, s, runners[s], dry_run): s
-                               for s in names if s in runners}
-                    for future in as_completed(futures):
+        scope = set(requested) | ({KLINE_SOURCE} if include_kline else set())
+
+        def effective_deps(name: str) -> set:
+            if dry_run:
+                return set()
+            return SOURCE_DEPENDENCIES.get(name, set()) & scope
+
+        pending_order = [s for s in requested if s in runners]
+        pending_set = set(pending_order)
+        handled: set = set()
+        running: Dict[Any, str] = {}
+
+        # parallel_sources=false：单 worker 跑同一依赖调度——执行序退化为拓扑序
+        # （依赖仍被尊重，factor 不会先于 kline）
+        max_workers = self.parallel_workers if self.parallel_enabled else 1
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while pending_set or running:
+                progressed = False
+                if running:
+                    done, _ = wait_futures(set(running), timeout=0.5,
+                                           return_when=FIRST_COMPLETED)
+                    for future in done:
+                        name = running.pop(future)
                         entry = future.result()
-                        summary[entry['source']] = entry
-                logger.info(f'波次并行完成: {names}')
-            else:
-                for s in names:
-                    if s in runners:
-                        entry = self._run_source(s, runners[s], dry_run)
-                        summary[entry['source']] = entry
-            if include_kline and KLINE_SOURCE in wave:
-                kline_ok, kline_gate_detail = self._evaluate_kline_gate(
-                    as_of_str, summary.get(KLINE_SOURCE), dry_run)
+                        summary[name] = entry
+                        handled.add(name)
+                        progressed = True
+                        if include_kline and name == KLINE_SOURCE:
+                            kline_ok, kline_gate_detail = self._evaluate_kline_gate(
+                                as_of_str, entry, dry_run)
+                            if kline_ok is False:
+                                gated = [s for s in pending_set
+                                         if s in KLINE_DEPENDENT_SOURCES]
+                                for s in gated:
+                                    pending_set.discard(s)
+                                    handled.add(s)
+                                    summary[s] = {
+                                        'source': s, 'label': SOURCE_LABELS.get(s, s),
+                                        'status': '跳过', 'rows': 0, 'duration': 0.0,
+                                        'detail': kline_gate_detail}
+                ready = [s for s in pending_order if s in pending_set
+                         and effective_deps(s) <= handled]
+                # 受槽位约束提交（提交数-完成数 ≤ workers）：保证提交序=执行序，
+                # 后续才就绪的高优任务（如公告完成后立即就绪的 ths_finance）不会被
+                # 早前批量提交的队列压到队尾
+                for s in ready:
+                    if len(running) >= max_workers:
+                        break
+                    pending_set.discard(s)
+                    deps_txt = '、'.join(sorted(effective_deps(s))) or '无'
+                    logger.info(f'源提交: {SOURCE_LABELS.get(s, s)}（依赖: {deps_txt}）')
+                    running[executor.submit(self._run_source, s, runners[s], dry_run)] = s
+                    progressed = True
+                if not pending_set and not running:
+                    break
+                if not progressed and not running:
+                    # 防意外死锁：存在就绪但未提交的源（理论上不可达），强制提交
+                    stuck = [s for s in pending_order if s in pending_set]
+                    logger.warning(f'依赖等待超时，强制提交剩余源: {stuck}')
+                    for s in stuck:
+                        pending_set.discard(s)
+                        running[executor.submit(self._run_source, s, runners[s], dry_run)] = s
         # runner 未注册的源补"跳过"
         for s in requested:
             if s not in summary:
                 summary[s] = {'source': s, 'label': SOURCE_LABELS.get(s, s), 'status': '跳过',
                               'rows': 0, 'duration': 0.0, 'detail': 'runner 未注册'}
         return summary, kline_gate_detail
-
-    @staticmethod
-    def _build_waves(include_kline: bool) -> List[List[str]]:
-        """一键模式波次重排：股本刷新独占前置波（约 13 分钟，须先于日K完成——
-        除权/增发当日生效的股本要在日K入库读股本映射前落库，否则事件股当日
-        turnover_rate 用前一日股本，滞后一天）；日K编入波1与独立源并发，
-        日K依赖源（factor/money_flow）顺延到波2（与依赖公告/披露清单的
-        ths_finance 同波），valuation_calc 仍在波3"""
-        if not include_kline:
-            return SOURCE_WAVES
-        head = [s for s in SOURCE_WAVES[0]
-                if s not in KLINE_DEPENDENT_SOURCES and s != 'shares_xdxr']
-        tail = [s for s in SOURCE_WAVES[0] if s in KLINE_DEPENDENT_SOURCES]
-        return [['shares_xdxr'], [KLINE_SOURCE] + head,
-                tail + SOURCE_WAVES[1]] + list(SOURCE_WAVES[2:])
 
     # ---------- 各源 runner ----------
 
@@ -243,6 +347,7 @@ class ReviewSyncOrchestrator:
         from .concept_manager import ConceptManager
         from .etf_scale_manager import EtfScaleManager
         from .hkex_connect_manager import HkexConnectManager
+        from .macro_manager import MacroManager
         from .news_telegraph_manager import NewsTelegraphManager
         from .disclosure_manager import DisclosureManager
         from .index_kline_manager import IndexKlineManager
@@ -251,6 +356,7 @@ class ReviewSyncOrchestrator:
         from .lhb_manager import LhbManager
         from .margin_manager import MarginManager
         from .money_flow_manager import MoneyFlowManager
+        from .option_manager import OptionManager
         from .overseas_kline_manager import OverseasKlineManager
         from .overseas_manager import OverseasManager
         from .sentiment_metrics_manager import SentimentMetricsManager
@@ -292,6 +398,10 @@ class ReviewSyncOrchestrator:
             # 股本刷新（baostock 下线换源 20261025：XDXR 全刷约 15 分钟，
             # resume=False 每次全量；先于 wave3 估值自算（fetch_total_shares_asof））
             'shares_xdxr': lambda dry: XdxrShareManager(cm).execute(resume=False, dry_run=dry),
+            # F15（方案 V1.0 §F15，2026-11-18 用户拍板）：macro/option 入盘后编排，
+            # 消除静默停更（macro 曾停 26 天、option 停 2 个交易日无人知）
+            'macro': lambda dry: MacroManager(cm).execute(dry_run=dry),
+            'option': lambda dry: OptionManager(cm).execute(dry_run=dry),
         }
 
     # ---------- 一键模式：内置日K ----------
@@ -355,16 +465,32 @@ class ReviewSyncOrchestrator:
         基准取 base_stock_info 全量表会误判——全量表含长期停牌股（实测 5559 基数中
         347 只无当日数据，94% 触发误报，见问题记录 P-06）。现口径：当日行数 >3000
         且 ≥ 上一交易日实际行数的 80%。
+
+        F9（数据采集链路风险修复方案 V1.0）：阈值参数化并增加绝对差约束——11-17 实测
+        4873/5571=87.5% 通过旧 80% 阈值，697 只静默漏采向下游扩散（资金流子集缩小）。
+        新口径：rows > min_rows 且 rows ≥ prev×min_ratio 且 |rows-prev| ≤ max_abs_diff。
+        大面积真实停牌日可能误拦——门控失败文案附处置提示（--sources 排除或临时调阈值）。
+        配置：review_sync.kline_gate_min_rows（默认 3000）/ kline_gate_min_ratio（默认
+        0.95）/ kline_gate_max_abs_diff（默认 300）。
         """
         try:
+            review_cfg = (self.config.get('review_sync', {}) or {})
+            min_rows = int(review_cfg.get('kline_gate_min_rows', 3000) or 3000)
+            min_ratio = float(review_cfg.get('kline_gate_min_ratio', 0.95) or 0.95)
+            max_abs_diff = int(review_cfg.get('kline_gate_max_abs_diff', 300) or 300)
             kline_rows = self.db.execute_query(
                 "SELECT COUNT(*) AS n FROM his_kline_day WHERE trade_date = %s", (as_of,))[0]['n']
             prev_rows = self.db.execute_query("""
                 SELECT COUNT(*) AS n FROM his_kline_day
                 WHERE trade_date = (SELECT MAX(trade_date) FROM his_kline_day WHERE trade_date < %s)
             """, (as_of,))[0]['n']
-            detail = f'当日K行数 {kline_rows}，上一已同步交易日 {prev_rows}'
-            ok = kline_rows > 3000 and prev_rows > 0 and kline_rows >= prev_rows * 0.8
+            detail = f'当日K行数 {kline_rows}，上一已同步交易日 {prev_rows}（阈值: >{min_rows} 且 ≥{min_ratio:.0%} 且 |差|≤{max_abs_diff}）'
+            ok = (kline_rows > min_rows and prev_rows > 0
+                  and kline_rows >= prev_rows * min_ratio
+                  and abs(kline_rows - prev_rows) <= max_abs_diff)
+            if not ok:
+                detail += ('（门控未过：若为大面积真实停牌/缩量日，可用 --sources 排除日K依赖源'
+                           '或临时调高 review_sync.kline_gate_* 阈值）')
             return ok, detail
         except Exception as e:
             return False, f'日K前置校验失败: {e}'
@@ -373,8 +499,7 @@ class ReviewSyncOrchestrator:
     def _is_blocked(src_result: Any) -> bool:
         return isinstance(src_result, dict) and bool(src_result.get('blocked'))
 
-    @staticmethod
-    def _fill_entry(entry: Dict[str, Any], src_result: Any) -> None:
+    def _fill_entry(self, entry: Dict[str, Any], src_result: Any) -> None:
         if not isinstance(src_result, dict):
             entry['status'] = '失败'
             entry['detail'] = '无效返回值'
@@ -397,6 +522,30 @@ class ReviewSyncOrchestrator:
             entry['status'] = '失败' if failed_n else '待补'
         stats = src_result.get('stats') or {}
         entry['rows'] = stats.get('rows') or stats.get('records') or 0
+
+        # F2（数据采集链路风险修复方案 V1.0 §F2）："成功 ≠ 有当日数据"——源自报
+        # stats.data_date_max（本次入库最大数据日），落后于最近已收盘交易日（基准日，
+        # P-11 口径）则由"成功"降为"待补（数据日滞后 N 天）"。
+        # 开关 review_sync.data_date_check_enabled（默认 true）。覆盖源：index_valuation/
+        # adjust_factor/etf_scale/hkex_connect/option（其余源可渐进补 stats.data_date_max）。
+        data_date_max = stats.get('data_date_max')
+        if entry['status'] == '成功' and data_date_max:
+            try:
+                if bool((self.config.get('review_sync', {}) or {})
+                        .get('data_date_check_enabled', True)):
+                    from .review_common import latest_closed_trade_date
+                    base_compact = latest_closed_trade_date(self.db).replace('-', '')
+                    if str(data_date_max) < base_compact:
+                        lag = (int(base_compact[:4]) - int(str(data_date_max)[:4])) * 371 \
+                            + (int(base_compact[4:6]) - int(str(data_date_max)[4:6])) * 31 \
+                            + (int(base_compact[6:8]) - int(str(data_date_max)[6:8]))
+                        entry['status'] = '待补'
+                        entry['detail'] = (f"数据日滞后：入库最大 {data_date_max} < "
+                                           f"基准交易日 {base_compact}（源成功但无当日数据）")
+                        entry['data_lag_days'] = lag
+            except Exception as e:
+                logger.warning(f"F2 数据日校验异常（按成功处理）: {e}")
+
         detail_errors = '; '.join((src_result.get('errors') or [])[:2])
         failed_n = len((stats.get('failed') or []))
         if failed_n and not detail_errors:
@@ -418,6 +567,11 @@ class ReviewSyncOrchestrator:
         for e in result['summary']:
             lines.append(f"| {e['label']} | {e['status']} | {e['rows']} | "
                          f"{e['duration']} | {e['detail'] or '-'} |")
+        if result.get('freshness_red'):
+            lines.append('')
+            lines.append(f"**数据新鲜度红灯（{len(result['freshness_red'])} 项）**："
+                         + ', '.join(result['freshness_red'])
+                         + f"——详见 {result.get('freshness_report_path', 'freshness_check_report')}")
         if result['errors']:
             lines.append('')
             for err in result['errors']:

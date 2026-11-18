@@ -182,6 +182,35 @@ def tmp_dir() -> Path:
     return resolve_repo_root() / 'tmp'
 
 
+def latest_closed_trade_date(db: Any) -> str:
+    """增量目标基准日：交易日历中 ≤ 今天的最近交易日；若为"今天"且未收盘（15:30 前）再退一日。
+
+    F1（数据采集链路风险修复方案 V1.0）从 SyncManager._latest_closed_trade_date 抽出为
+    公共函数，供新鲜度巡检（freshness_check_manager）与编排层 F2 数据日校验复用，
+    保证"最近已收盘的数据交易日"口径全链路一致（问题记录 P-11）。
+    db 须有 execute_query(query, params)（DatabaseConnection）。
+    """
+    from datetime import date as _date
+    today_str = _date.today().strftime('%Y-%m-%d')
+    rows = db.execute_query(
+        "SELECT calendar_date FROM base_trade_calendar "
+        "WHERE calendar_date <= %s AND is_trading_day = 1 "
+        "ORDER BY calendar_date DESC LIMIT 1", (today_str,))
+    if not rows:
+        return today_str
+    latest = rows[0]['calendar_date']
+    latest_str = latest.strftime('%Y-%m-%d') if hasattr(latest, 'strftime') else str(latest)
+    if latest_str == today_str and datetime.now().time() < datetime.strptime('15:30', '%H:%M').time():
+        prev = db.execute_query(
+            "SELECT calendar_date FROM base_trade_calendar "
+            "WHERE calendar_date < %s AND is_trading_day = 1 "
+            "ORDER BY calendar_date DESC LIMIT 1", (latest_str,))
+        if prev:
+            p = prev[0]['calendar_date']
+            return p.strftime('%Y-%m-%d') if hasattr(p, 'strftime') else str(p)
+    return latest_str
+
+
 def expand_trade_days(db: Any, start_date: str, end_date: str) -> List[str]:
     """按 base_trade_calendar 展开回填区间交易日（is_trading_day=1，yyyyMMdd 升序）。
 

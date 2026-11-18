@@ -40,7 +40,7 @@ from ..kline_1min.adapters import (
 from ..kline_1min.usecase import Kline1MinSyncUseCase
 from .kline_rise_25pre import generate_kline_rise_25pre
 from .report_writer import write_markdown_report
-from .kline_day_pipeline import KlineDaySharedState, KlineDayDeps, process_one_stock, safe_process_one_stock, merge_stock_result
+from .kline_day_pipeline import KlineDaySharedState, KlineDayDeps, RawFallbackBudget, process_one_stock, safe_process_one_stock, merge_stock_result
 
 class SyncManager:
     """数据同步管理器"""
@@ -168,6 +168,21 @@ class SyncManager:
 
             if save_to_db and calendar_data:
                 result['db_rows'] = self.db_conn.upsert_trade_calendar(calendar_data)
+
+            # F7（数据采集链路风险修复方案 V1.0 §F7）：跨年覆盖校验——end_year 为
+            # "当年+1"而库内 max(calendar_date) 未到次年 12-31 时告警（2027-01 初
+            # 日历缺失会让增量日K停在旧日期空跑；F1 巡检的日历专项规则兜底监控）
+            if save_to_db and end_year >= datetime.now().year + 1:
+                r = self.db_conn.execute_query(
+                    'SELECT MAX(calendar_date) AS mx FROM base_trade_calendar')
+                mx = str(r[0]['mx']) if r and r[0].get('mx') else ''
+                expected = f'{end_year}-12-31'
+                if not mx or mx < expected:
+                    warn = (f"次年日历未覆盖: 库内 max(calendar_date)={mx or '空'} "
+                            f"未到 {expected}（等指数K线到达后重跑 sync-trade-calendar "
+                            f"{end_year} {end_year}；中间件 workday 节假日表需含 {end_year} 年）")
+                    result['errors'].append(warn)
+                    print(f"⚠️  {warn}")
 
             result['success'] = True
         except Exception as e:
@@ -327,6 +342,16 @@ class SyncManager:
             result['source_missing'] = ctx.source_missing
             result['failed_stocks'] = 0
 
+            # raw 兜底（方案 V1.0）：台账表幂等创建 + 单次运行兜底股票数上限
+            raw_fb_budget = None
+            if bool(self.config_manager.get('sync.kline_day_raw_fallback.enabled', True)):
+                try:
+                    self.db_conn.ensure_raw_fallback_table()
+                    raw_fb_limit = self.config_manager.get('sync.kline_day_raw_fallback.max_stocks_per_run', 1500)
+                    raw_fb_budget = RawFallbackBudget(int(raw_fb_limit or 1500))
+                except Exception as e:
+                    self.logger.warning(f"raw 兜底台账表初始化失败，本次运行停用兜底: {e}")
+
             deps = KlineDayDeps(
                 tdx_api_source=self.tdx_api_source,
                 csv_writer=self.csv_writer,
@@ -345,7 +370,9 @@ class SyncManager:
                 merge_sources=self._merge_kline_day_sources,
                 detect_refetch=self._detect_kline_day_refetch,
                 filter_raw=self._filter_raw_kline_by_dates,
-                normalize_records=self._normalize_kline_day_records
+                normalize_records=self._normalize_kline_day_records,
+                raw_fallback_budget=raw_fb_budget,
+                circuit_breaker_threshold=int(self.config_manager.get('sync.kline_day_circuit_breaker', 20) or 20)
             )
 
             max_workers = self.config_manager.get('sync.kline_max_workers', 1)
@@ -358,6 +385,10 @@ class SyncManager:
             total_batches = (total_stocks + stock_batch_size - 1) // stock_batch_size
 
             for batch_no, batch_start in enumerate(range(0, total_stocks, stock_batch_size), start=1):
+                if ctx.circuit_tripped:
+                    # F5 整批熔断：上一批已触发，剩余批次不再提交
+                    self.logger.error(f"熔断生效，跳过批次 {batch_no}/{total_batches}")
+                    break
                 stock_batch = stocks[batch_start:batch_start + stock_batch_size]
                 batch_end = batch_start + len(stock_batch)
                 self.logger.info(
@@ -372,19 +403,47 @@ class SyncManager:
                             )
                             for i, s in enumerate(stock_batch)
                         ]
+                        batch_aborted = False
                         for future in as_completed(futures):
-                            merge_stock_result(future.result(), ctx)
+                            res = future.result()
+                            merge_stock_result(res, ctx)
+                            if res.get('circuit_tripped'):
+                                # F5：本批内触发熔断——取消未开始的 future 并中止后续批次
+                                batch_aborted = True
+                                for f in futures:
+                                    f.cancel()
+                                break
+                        if batch_aborted:
+                            self.logger.error("熔断触发，中止当前批次剩余股票与后续批次")
+                            break
                 else:
                     for i, stock in enumerate(stock_batch):
-                        merge_stock_result(
-                            safe_process_one_stock(stock, batch_start + i + 1, ctx=ctx, deps=deps), ctx
-                        )
+                        res = safe_process_one_stock(stock, batch_start + i + 1, ctx=ctx, deps=deps)
+                        merge_stock_result(res, ctx)
+                        if res.get('circuit_tripped'):
+                            self.logger.error("熔断触发，中止剩余股票与后续批次")
+                            break
+
+                if ctx.circuit_tripped:
+                    break
 
                 self.logger.info(
                     f"日K线批次完成: 第{batch_no}/{total_batches}批, 累计记录{result['records']}条, 累计写库{result['db_rows']}条"
                 )
 
             result['success'] = True
+            # F5：熔断 → 全场失败显式化
+            if ctx.circuit_tripped:
+                result['success'] = False
+                result['errors'].append(ctx.circuit_error)
+            # F8：全场级故障显式化——失败股超过一半即判失败（strict 模式下中间件
+            # 宕机会使绝大多数股票计 failed，不再"成功 0 记录"）
+            if total_stocks and result.get('failed_stocks', 0) > total_stocks * 0.5:
+                result['success'] = False
+                result['errors'].append(
+                    f"全场级故障: 失败 {result['failed_stocks']}/{total_stocks} 只（>50%），"
+                    f"疑中间件不可用或数据源异常")
+            result['circuit_tripped'] = ctx.circuit_tripped
             # 除权触发清单落盘（方案 4.2）：日常增量检出 qfq_rebase 的股票清单，
             # 供复权因子增量同步（adjust_factor_manager）读取；与当日已有清单合并，幂等。
             # 文件名用本次同步的目标交易日（非 wall clock，跨零点补跑防错位，见 P-10）
@@ -394,6 +453,12 @@ class SyncManager:
                                                trade_date=max(trade_dates) if trade_dates else None)
                 except Exception as e:
                     self.logger.warning(f"除权触发清单落盘失败（不影响日K同步）: {e}")
+
+            # raw 兜底恢复阶段（方案 V1.0 §3.4）：台账 open 记录重拉 qfq 覆盖销账
+            try:
+                self._recover_raw_fallback(trade_dates, result)
+            except Exception as e:
+                self.logger.warning(f"raw 兜底恢复阶段异常（不影响日K同步）: {e}")
         except Exception as e:
             result['errors'].append(str(e))
             print(f"同步日K线失败: {e}")
@@ -415,16 +480,34 @@ class SyncManager:
         }
 
         result['duration'] = timing['total_time']
+        result['fallback_written'] = ctx.fallback_written
+        result['fallback_skipped_exrights'] = ctx.fallback_skipped_exrights
+        result['fallback_recovered'] = result.get('fallback_recovered', 0)
         result['report_path'] = self._write_kline_day_report(result, ctx.anomalies, timing)
 
         return result
 
     def _merge_kline_day_sources(self, qfq_list: List[Dict[str, Any]],
-                                 raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                                 raw_list: List[Dict[str, Any]],
+                                 trade_dates: Optional[List[str]] = None,
+                                 ts_code: Optional[str] = None,
+                                 raw_fallback_budget: Any = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         合并双源日K：前复权序列（同花顺源）为主表，原始序列（通达信源）提供
         amount 与 raw_close。以 trade_date 对齐，原始域缺失时留空。
         字段保持中间件原始单位（价格/成交额=厘，成交量=手），由 normalize 统一换算。
+
+        【raw 兜底（日K线raw兜底与自动恢复方案 V1.0）】qfq 主表缺失、而 raw 存在的
+        "尾部缺口"日期（td > qfq 序列最后日期，即 THS 前复权尚未发布的当日/近日），
+        在除权校验通过后用 raw 值构建兜底行：行带 raw_fallback=True 标记
+        （normalize 后 source='TDXAPI_RAWFB'），由台账 kline_day_raw_fallback 追踪、
+        恢复阶段（_recover_raw_fallback）在 THS 发布后用 qfq 覆盖销账。
+        仅兜底"尾部缺口"：qfq 序列中段/早期的缺失属结构性差异（如两源上市日不同），
+        维持原跳过行为。init 模式（trade_dates=None）不限制日期。
+
+        Returns:
+            (merged, raw_skips)：raw_skips 为除权校验未通过而跳过的明细
+            （trade_date/reason/raw_close），由调用方写入台账。
         """
         merged: Dict[str, Dict[str, Any]] = {}
         for item in qfq_list or []:
@@ -445,6 +528,11 @@ class SyncManager:
                 'Amount': None,
                 'RawClose': None,
             }
+        raw_skips: List[Dict[str, Any]] = []
+        fallback_enabled = bool(self.config_manager.get('sync.kline_day_raw_fallback.enabled', True))
+        last_qfq_date = max(merged.keys()) if merged else None
+        allowed_td = set(trade_dates) if trade_dates else None
+        stock_budget_acquired = False
         for item in raw_list or []:
             if not isinstance(item, dict):
                 continue
@@ -453,36 +541,163 @@ class SyncManager:
                 continue
             row = merged.get(td)
             if row is None:
-                # 前复权主表没有的日期（两源早期历史不一致），跳过
+                # 前复权主表没有的日期：仅对"尾部缺口"做 raw 兜底（除权校验通过后）
+                if not (fallback_enabled and last_qfq_date and td > last_qfq_date):
+                    continue
+                if allowed_td is not None and td not in allowed_td:
+                    # 请求区间外（P-11 日期过滤语义），不兜底
+                    continue
+                ok, fail_reason = self._raw_fallback_no_exrights(item, raw_list, td, ts_code)
+                if not ok:
+                    raw_skips.append({
+                        'trade_date': td,
+                        'reason': fail_reason or 'exrights_suspected',
+                        'raw_close': self._to_float(item.get('Close')),
+                    })
+                    continue
+                if raw_fallback_budget is not None and not stock_budget_acquired:
+                    # 一股一额度：本股首条兜底行时占用；额度耗尽则本股不再兜底
+                    if not raw_fallback_budget.try_acquire():
+                        continue
+                    stock_budget_acquired = True
+                merged[td] = {
+                    'Time': item.get('Time'),
+                    'Open': item.get('Open'),
+                    'High': item.get('High'),
+                    'Low': item.get('Low'),
+                    'Close': item.get('Close'),
+                    'Last': item.get('Last'),
+                    'Volume': item.get('Volume'),
+                    'Amount': item.get('Amount'),
+                    'RawClose': item.get('Close'),
+                    'raw_fallback': True,
+                }
+            else:
+                row['Amount'] = item.get('Amount')
+                row['RawClose'] = item.get('Close')
+        return [merged[key] for key in sorted(merged.keys())], raw_skips
+
+    def _raw_fallback_no_exrights(self, raw_item: Dict[str, Any],
+                                  raw_list: List[Dict[str, Any]],
+                                  td: str, ts_code: Optional[str]) -> Tuple[bool, Optional[str]]:
+        """
+        raw 兜底的除权校验（唯一风险门）：raw 本日 Last（上一收盘）必须精确等于
+        前一交易日 raw 收盘——除权除息日交易所会把"上一收盘"调整为除权基准价，
+        必不相等；无除权日两者为同源整数厘，精确相等。校验数据不全时保守跳过。
+
+        前一日取值：优先 raw_list 内时间序紧邻前条；不在 raw_list 内（尾部窗口
+        恰好从兜底日开始）时回落查库 fetch_prev_his_kline_day_close（元口径，
+        与 raw 厘口径经 _scale_price 归一后比较）。
+
+        Returns:
+            (通过?, 失败原因)：通过时 (True, None)；失败原因
+            'missing_last'（Last 缺失/非法，校验数据不全）| 'exrights_suspected'（Last 与前日收盘不一致）
+        """
+        last_v = self._to_float(raw_item.get('Last'))
+        if not last_v or last_v <= 0:
+            return False, 'missing_last'
+
+        prev_v = None
+        best_prev_td = None
+        for item in raw_list or []:
+            if not isinstance(item, dict):
                 continue
-            row['Amount'] = item.get('Amount')
-            row['RawClose'] = item.get('Close')
-        return [merged[key] for key in sorted(merged.keys())]
+            d = self._normalize_date_str(item.get('Time') or item.get('time'))
+            if d and d < td and (best_prev_td is None or d > best_prev_td):
+                best_prev_td = d
+                prev_v = self._to_float(item.get('Close'))
+
+        last_yuan = self._scale_price(last_v)
+        if prev_v is not None:
+            prev_yuan = self._scale_price(prev_v)
+        elif ts_code:
+            prev_yuan = self._to_float(self.db_conn.fetch_prev_his_kline_day_close(ts_code, td))
+        else:
+            return False, 'missing_last'
+
+        if not prev_yuan or prev_yuan == 0 or not last_yuan:
+            return False, 'missing_last'
+        if abs(last_yuan - prev_yuan) < 1e-6:
+            return True, None
+        return False, 'exrights_suspected'
+
+    def _recover_raw_fallback(self, trade_dates: Optional[List[str]],
+                              result: Dict[str, Any]) -> int:
+        """
+        raw 兜底恢复阶段（方案 V1.0 §3.4）：每次 sync_kline_day 末尾自动执行。
+        对台账中仍为 fallback 的记录逐股重拉 qfq 尾部，THS 已发布该日的用 qfq 值
+        定点覆盖兜底行（source 回归 TDXAPI）并销账；仍缺的保留 open 下次再试。
+        定点更新只动价格/preclose/change_rate/source，volume/amount/基本面保持原值
+        （无除权时 qfq 与 raw 数值相同；若期间发生除权重基，由既有除权检测触发
+        整股重拉彻底修复）。任何异常不影响主同步结果。
+        """
+        open_rows = self.db_conn.fetch_open_raw_fallback()
+        if not open_rows:
+            return 0
+
+        by_stock: Dict[str, List[str]] = {}
+        for r in open_rows:
+            by_stock.setdefault(r['ts_code'], []).append(r['trade_date'])
+
+        target = max(trade_dates) if trade_dates else date.today().strftime('%Y%m%d')
+        recovered_keys: List[tuple] = []
+        for ts_code, dates in by_stock.items():
+            api_code = ts_code.replace('.', '').upper()
+            oldest = min(dates)
+            try:
+                span_rows = self._get_trade_dates(oldest, target)
+                tail_limit = max(len(span_rows) + 3, 5)
+            except Exception:
+                tail_limit = 30
+            try:
+                qfq_list = self.tdx_api_source.get_kline_qfq_tail(api_code, tail_limit)
+            except Exception as e:
+                self.logger.warning(f"raw 兜底恢复 qfq 拉取失败: {ts_code} {e}")
+                continue
+            qmap = {}
+            for item in qfq_list or []:
+                if isinstance(item, dict):
+                    d = self._normalize_date_str(item.get('Time') or item.get('time'))
+                    if d:
+                        qmap[d] = item
+            for d in dates:
+                item = qmap.get(d)
+                if not item:
+                    continue  # THS 仍未发布 → 保留 open
+                close_v = self._scale_price(self._to_float(item.get('Close')))
+                if not close_v:
+                    continue
+                open_v = self._scale_price(self._to_float(item.get('Open')))
+                high_v = self._scale_price(self._to_float(item.get('High')))
+                low_v = self._scale_price(self._to_float(item.get('Low')))
+                preclose_v = self._scale_price(self._to_float(item.get('Last')))
+                change_rate_v = None
+                if preclose_v and preclose_v != 0:
+                    change_rate_v = (close_v - preclose_v) / preclose_v * 100
+                updated = self.db_conn.update_raw_fallback_row_prices(
+                    ts_code, d, open_v, high_v, low_v, close_v, preclose_v, change_rate_v)
+                if updated:
+                    recovered_keys.append((ts_code, d))
+
+        if recovered_keys:
+            self.db_conn.mark_raw_fallback_recovered(recovered_keys, recover_source='recovery_stage')
+            self.logger.info(
+                f"raw 兜底恢复完成: {len(recovered_keys)}/{len(open_rows)} 条"
+                f"（{','.join(f'{c}@{d}' for c, d in recovered_keys[:10])}"
+                f"{'...' if len(recovered_keys) > 10 else ''}）"
+            )
+        result['fallback_recovered'] = len(recovered_keys)
+        return len(recovered_keys)
 
     def _latest_closed_trade_date(self) -> str:
         """增量目标日：交易日历中 ≤ 今天的最近交易日；若为"今天"且未收盘（15:30 前）再退一日。
 
-        目的是让"今天"语义收敛为"最近已收盘的数据交易日"（问题记录 P-11：
-        date.today() 在跨零点补跑/盘中误跑时会导致增量数据被允许日期过滤丢弃）。
+        目的是让"今天"语义收敛为"最近已收盘的数据交易日"（问题记录 P-11）。
+        F1 起逻辑抽为 review_common.latest_closed_trade_date 公共函数（巡检/编排复用），
+        本方法保留为薄委托以维持既有调用面。
         """
-        today_str = date.today().strftime('%Y-%m-%d')
-        rows = self.db_conn.execute_query(
-            "SELECT calendar_date FROM base_trade_calendar "
-            "WHERE calendar_date <= %s AND is_trading_day = 1 "
-            "ORDER BY calendar_date DESC LIMIT 1", (today_str,))
-        if not rows:
-            return today_str
-        latest = rows[0]['calendar_date']
-        latest_str = latest.strftime('%Y-%m-%d') if hasattr(latest, 'strftime') else str(latest)
-        if latest_str == today_str and datetime.now().time() < datetime.strptime('15:30', '%H:%M').time():
-            prev = self.db_conn.execute_query(
-                "SELECT calendar_date FROM base_trade_calendar "
-                "WHERE calendar_date < %s AND is_trading_day = 1 "
-                "ORDER BY calendar_date DESC LIMIT 1", (latest_str,))
-            if prev:
-                p = prev[0]['calendar_date']
-                return p.strftime('%Y-%m-%d') if hasattr(p, 'strftime') else str(p)
-        return latest_str
+        from .review_common import latest_closed_trade_date
+        return latest_closed_trade_date(self.db_conn)
 
     def _write_adjust_trigger(self, ts_codes: List[str], trade_date: Optional[str] = None) -> str:
         """落除权触发清单（tmp/adjust_trigger_YYYYMMDD.json，与已有清单合并幂等）。
@@ -514,7 +729,11 @@ class SyncManager:
         """
         日常增量的除权/修订检测（跨快照）：
         1) 新拉最旧 bar 的 Last（同花顺前复权昨收）vs 库存上一交易日 close —— 命中即除权重基
+           【F11①】库内 prev_close 缺失（上一交易日同步失败/新股）时，降级用
+           "最旧 bar 的 fresh Close vs 库内同日 close" 比对（重叠日期跨快照可比）
         2) 重叠日期 fresh raw_close vs 库存 raw_close —— 命中即源数据修订
+           【F11⑤】同批次增加 fresh qfq Close vs 库存 close 比对——覆盖 qfq 中段
+           历史修订（002083 案例：前一日价格被源端重算，原检测仅比 raw_close 漏检）
 
         返回 (是否命中, 明细)
         """
@@ -528,6 +747,7 @@ class SyncManager:
         oldest = merged[0]
         oldest_date = self._normalize_date_str(oldest.get('Time') or oldest.get('time'))
         fresh_last = self._scale_price(self._to_float(oldest.get('Last')))
+        fresh_oldest_close = self._scale_price(self._to_float(oldest.get('Close')))
 
         # 1) 前复权重基检测
         if oldest_date and fresh_last:
@@ -542,34 +762,69 @@ class SyncManager:
                         'fresh_last': round(fresh_last, 4),
                         'diff': round(fresh_last - prev_close, 4)
                     }
+            elif fresh_oldest_close:
+                # F11①：库内 prev_close 缺失 → 降级用重叠日期同日 close 跨快照比对
+                stored_same = self.db_conn.fetch_one(
+                    "SELECT close FROM his_kline_day WHERE ts_code = %s AND trade_date = %s",
+                    (ts_code, oldest_date))
+                stored_close = self._to_float((stored_same or {}).get('close'))
+                if stored_close:
+                    threshold = max(abs_threshold, abs(stored_close) * pct_threshold)
+                    if abs(fresh_oldest_close - stored_close) > threshold:
+                        return True, {
+                            'type': 'qfq_rebase',
+                            'date': oldest_date,
+                            'stored_close': round(stored_close, 4),
+                            'fresh_close': round(fresh_oldest_close, 4),
+                            'diff': round(fresh_oldest_close - stored_close, 4),
+                            'note': 'prev_close 缺失，降级同日 close 比对（F11①）'
+                        }
 
-        # 2) 原始域不可变校验（重叠日期）
+        # 2) 原始域不可变校验（重叠日期）+ F11⑤ qfq 域修订比对
         dates = [self._normalize_date_str(r.get('Time') or r.get('time')) for r in merged]
         dates = [d for d in dates if d]
         if dates:
             min_d, max_d = min(dates), max(dates)
             stored_rows = self.db_conn.execute_query(
-                "SELECT trade_date, raw_close FROM his_kline_day "
-                "WHERE ts_code = %s AND trade_date >= %s AND trade_date <= %s AND raw_close IS NOT NULL",
+                "SELECT trade_date, close, raw_close FROM his_kline_day "
+                "WHERE ts_code = %s AND trade_date >= %s AND trade_date <= %s",
                 (ts_code, min_d, max_d))
             if stored_rows:
-                fresh_raw_map = {}
+                fresh_map = {}
                 for r in merged:
                     d = self._normalize_date_str(r.get('Time') or r.get('time'))
-                    fresh_raw_map[d] = self._scale_price(self._to_float(r.get('RawClose')))
+                    fresh_map[d] = {
+                        'raw': self._scale_price(self._to_float(r.get('RawClose'))),
+                        'qfq': self._scale_price(self._to_float(r.get('Close'))),
+                    }
                 for row in stored_rows:
                     d = row['trade_date']
-                    stored_close = self._to_float(row['raw_close'])
-                    fresh_close = fresh_raw_map.get(d)
-                    if stored_close is None or fresh_close is None:
-                        continue
-                    if abs(fresh_close - stored_close) > max(raw_tolerance, abs(stored_close) * pct_threshold):
-                        return True, {
-                            'type': 'raw_revision',
-                            'date': d,
-                            'stored_raw_close': round(stored_close, 4),
-                            'fresh_raw_close': round(fresh_close, 4)
-                        }
+                    fresh = fresh_map.get(d, {})
+                    stored_close = self._to_float(row.get('close'))
+                    stored_raw = self._to_float(row.get('raw_close'))
+                    # 2a) raw 域不可变校验（原逻辑）
+                    fresh_close_raw = fresh.get('raw')
+                    if stored_raw is not None and fresh_close_raw is not None:
+                        if abs(fresh_close_raw - stored_raw) > max(raw_tolerance, abs(stored_raw) * pct_threshold):
+                            return True, {
+                                'type': 'raw_revision',
+                                'date': d,
+                                'stored_raw_close': round(stored_raw, 4),
+                                'fresh_raw_close': round(fresh_close_raw, 4)
+                            }
+                    # 2b) F11⑤ qfq 域修订比对（raw 无变化而 qfq 变 → 源端前复权重算）
+                    fresh_qfq = fresh.get('qfq')
+                    if stored_close is not None and fresh_qfq is not None:
+                        threshold = max(abs_threshold, abs(stored_close) * pct_threshold)
+                        if abs(fresh_qfq - stored_close) > threshold:
+                            return True, {
+                                'type': 'qfq_revision',
+                                'date': d,
+                                'stored_close': round(stored_close, 4),
+                                'fresh_qfq_close': round(fresh_qfq, 4),
+                                'diff': round(fresh_qfq - stored_close, 4),
+                                'note': 'raw 域一致而 qfq 变动 → 源端前复权修订（F11⑤）'
+                            }
         return False, {}
 
     def sync_anal_kline_rise_25pre(
@@ -740,6 +995,7 @@ class SyncManager:
         prev_close = None
         for record in normalized:
             last_value = self._to_float(record.pop('_raw_last', None))
+            is_raw_fallback = bool(record.pop('_raw_fallback', False))
             if last_value is not None and last_value != 0:
                 preclose = last_value
             else:
@@ -781,7 +1037,8 @@ class SyncManager:
             else:
                 record['turnover_rate'] = None
 
-            record['source'] = 'TDXAPI'
+            # raw 兜底行标记 TDXAPI_RAWFB（方案 V1.0），由台账追踪、恢复阶段回归 TDXAPI
+            record['source'] = 'TDXAPI_RAWFB' if is_raw_fallback else 'TDXAPI'
 
             limit_rate = self._get_kline_limit_rate(record.get('stock_code'), record.get('stock_name'))
             change_rate = record.get('change_rate')
@@ -835,7 +1092,9 @@ class SyncManager:
             '_raw_last': last_v,
             'raw_close': raw_close_v,
             'volume': volume_v,
-            'amount': amount_v
+            'amount': amount_v,
+            # raw 兜底标记随行传递（merge 层打标，normalize 出口转 source 列）
+            '_raw_fallback': bool(raw.get('raw_fallback'))
         }
 
     def _filter_raw_kline_by_dates(self, raw_data: List[Dict[str, Any]], trade_dates: Optional[List[str]]) -> List[Dict[str, Any]]:
@@ -1035,6 +1294,11 @@ class SyncManager:
             f"整股重拉 {result.get('detection', {}).get('refetched', 0)}",
             f"- 数据源缺失: 前复权空 {result.get('source_missing', {}).get('qfq_empty', 0)} 只，"
             f"原始域空 {result.get('source_missing', {}).get('raw_empty', 0)} 只",
+            "",
+            "## raw 兜底（V1.0）",
+            f"- 兜底写入: {result.get('fallback_written', 0)} 行（source=TDXAPI_RAWFB，台账追踪）",
+            f"- 除权跳过: {result.get('fallback_skipped_exrights', 0)} 行（等 THS 恢复后正常入库）",
+            f"- 恢复销账: {result.get('fallback_recovered', 0)} 条（qfq 覆盖，source 回归 TDXAPI）",
             "",
             "## 性能信息",
             f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",

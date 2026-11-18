@@ -23,7 +23,7 @@
   sync-bj-kline             北交所日K（通达信官网盘后包，P0-2 方案 B，2026-09-30 新增）
   sync-macro-indicator      宏观指标（东财+金十直连，第三阶段-1，2026-10-23 新增）
   sync-option-daily         ETF 期权（上交所官方接口直连，第三阶段-2，2026-10-23 新增）
-  sync-north-flow-detail    北向个股明细（东财直连，第三阶段-3，2026-10-23 新增）
+  sync-north-flow-detail    北向个股明细（已退役：交易所 2024-08-19 起停披露，仅历史留存；F1 巡检豁免）
   review generate           复盘报告生成（六维 MD+HTML，复盘报告层方案 §5.5）
 """
 
@@ -125,6 +125,27 @@ def sync_review_all(ctx, sources, as_of, skip_kline, dry_run):
                        f"{e['duration']}s）{(' ' + e['detail']) if e['detail'] else ''}")
     if result.get('report_path'):
         click.echo(f"  - 汇总报告: {result['report_path']}")
+
+
+@click.command('sync-freshness-check')
+@click.pass_context
+def sync_freshness_check(ctx):
+    """数据新鲜度巡检（F1）：全部日频/周频表 max(日期) vs 最近已收盘交易日，红黄绿灯报告"""
+    from src.sync.freshness_check_manager import FreshnessCheckManager
+    manager = FreshnessCheckManager(ctx.obj['config_manager'])
+    result = manager.execute()
+    for r in result['rows']:
+        status = r['status']
+        marker = '🔴' if status == '红灯' else ('🟡' if status == '黄灯' else ('⚪' if status == '豁免' else '🟢'))
+        lag = r.get('lag_days')
+        lag_txt = f"{'超前' if (lag or 0) < 0 else '滞后'} {abs(lag)} 天" if lag is not None else '-'
+        click.echo(f"  {marker} {r['label']}（{r['table']}）: 最新 {r.get('max_date') or '-'}，"
+                   f"{lag_txt}，阈值 {r['max_lag_days']} [{status}]"
+                   + (f"（{r.get('detail')}）" if r.get('detail') else ''))
+    click.echo(f"\n{'✓' if result['success'] else '✗'} 巡检完成: 红灯 {len(result['red'])} 项 / "
+               f"黄灯 {len(result['yellow'])} 项（基准日 {result['base_date']}）")
+    if result.get('report_path'):
+        click.echo(f"  - 报告: {result['report_path']}")
 
 
 @click.command('sync-index-kline')
@@ -236,10 +257,19 @@ def sync_news_telegraph(ctx, pages, dry_run):
 @click.option('--full-market/--no-full-market', default=None,
               help='覆盖 config full_market（P2 全市场扩面；缺省用配置值）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行：只输出异动子集清单')
+@click.option('--yes', is_flag=True, default=False, help='确认继续（15:30 前缺省当日会被拦）')
 @click.pass_context
-def sync_money_flow(ctx, trade_date, codes, full_market, dry_run):
+def sync_money_flow(ctx, trade_date, codes, full_market, dry_run, yes):
     """同步分笔资金流（P2 全市场扩面后为全池；口径：分笔分桶）"""
     from src.sync.money_flow_manager import MoneyFlowManager
+    # F14（方案 V1.0 §F14）：缺省日期陷阱保护——补历史必须显式 --trade-date
+    # （2026-11-18 实测：不带 --trade-date 默认当日，289 只历史补抓全失败）
+    if not trade_date:
+        from datetime import datetime as _dt
+        if _dt.now().time() < _dt.strptime('15:30', '%H:%M').time() and not yes:
+            click.echo("✗ 未传 --trade-date 且当前未收盘（15:30 前）：缺省'当日'将采不到数据。"
+                       "补历史请显式 --trade-date yyyyMMdd；确要采当日请加 --yes。")
+            ctx.exit(2)
     manager = MoneyFlowManager(ctx.obj['config_manager'])
     if full_market is not None:
         manager.full_market = bool(full_market)
@@ -415,9 +445,9 @@ def sync_ths_finance(ctx, init_mode, as_of, codes, dry_run):
 @click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
 @click.option('--daily-reports', is_flag=True, default=False,
               help='调试用：回填模式逐日落盘报告（默认抑制，只写一份汇总，X-19）')
-@click.option('--dry-run', is_flag=True, default=False, help='试运行，不写库')
+@click.option('--yes', is_flag=True, default=False, help='确认继续（15:30 前缺省当日会被拦）')
 @click.pass_context
-def sync_lhb(ctx, trade_date, start_date, end_date, daily_reports, dry_run):
+def sync_lhb(ctx, trade_date, start_date, end_date, daily_reports, dry_run, yes):
     """同步龙虎榜（沪深交易所官网，含席位明细）
 
     历史回填模式（开发项 C）：--start-date/--end-date 同给时按交易日历逐日回填，
@@ -427,6 +457,13 @@ def sync_lhb(ctx, trade_date, start_date, end_date, daily_reports, dry_run):
     manager = LhbManager(ctx.obj['config_manager'])
     if bool(start_date) != bool(end_date):
         raise click.UsageError('--start-date 与 --end-date 必须同时给出')
+    # F14（方案 V1.0 §F14）：龙虎榜缺省只抓当日（17:30 后发布），补历史必须显式日期
+    if not trade_date and not start_date:
+        from datetime import datetime as _dt
+        if _dt.now().time() < _dt.strptime('15:30', '%H:%M').time() and not yes:
+            click.echo("✗ 未传 --trade-date/--start-date 且当前未收盘（15:30 前）：缺省'当日'"
+                       "将采不到数据（17:30 后发布）。补历史请显式指定日期；确要采当日请加 --yes。")
+            ctx.exit(2)
     if start_date:
         if not dry_run:
             _acquire_szse_backfill_lock()
@@ -947,6 +984,7 @@ def sync_option_daily(ctx, trade_date, start_date, end_date, dry_run):
 
 @click.command('sync-north-flow-detail')
 @click.option('--trade-date', default=None, help='yyyyMMdd（缺省对库内有持仓股票重拉；披露止于 20240816）')
+# F15：源侧已停披露（2024-08-19），本命令退役——仅保留历史数据与 CLI 入口，不再入盘后编排
 @click.option('--start-date', default=None, help='回填区间起 yyyyMMdd（与 --end-date 同给走回填模式）')
 @click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
 @click.option('--symbols', default=None,
@@ -994,6 +1032,7 @@ def sync_north_flow_detail(ctx, trade_date, start_date, end_date, symbols, dry_r
 review_commands = [
     sync_review_all,
     sync_review_data,
+    sync_freshness_check,
     sync_index_kline,
     sync_adjust_factor,
     sync_hkex_connect,

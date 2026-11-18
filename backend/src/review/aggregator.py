@@ -207,7 +207,14 @@ class ReviewAggregator:
     #:      news reason 三态分支（T6a），聚合产物变更一次升版
     #: v14：V4.3——candidates 增 R1_filtered（A2）、cycle 增 nearest_miss（B2）、
     #:      chan items 增 close（C1）、consec_premium 增 best（B3），聚合产物变更升版
-    AGG_CACHE_VERSION = 'v14-20261026'
+    #: v15：指标面板窗口起点去 -1（off-by-one，20261027 对拍 2 处失配共因）——
+    #:      七模块状态/交叉榜/parity 全部重算，聚合产物变更升版
+    #: v16：卖一占比 VETO 修复（LIKE 裸 % 致 psycopg2 插值失败，维度自 P4-1 起
+    #:      静默失效，20261028 修复）——candidates 否决输入变更，聚合产物升版
+    #: v17：市场宽度判据升格定位（X4 用户决策 20261028：阈值 2.0→2.5、role
+    #:      reference→position、回暖/震荡偏暖标注）——sentiment 判据表/basis
+    #:      变更，聚合产物升版
+    AGG_CACHE_VERSION = 'v17-20261028'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -1268,16 +1275,18 @@ class ReviewAggregator:
         premium_mean = m.get('premium_mean')
         cycle, basis = '试用版判据待校准', []
         criteria: List[Dict[str, Any]] = []
+        breadth_warm: Optional[bool] = None
         try:
             climax = rules.get('climax') or {}
             ice = rules.get('ice') or {}
             ebb = rules.get('ebb') or {}
-            # P4-5（B8）：高潮判据第二独立证据——涨跌家数比（全市场宽度，与涨停
-            # cohort 不同源）。初版参考阈值未校准，仅并列披露不参与定位。
+            # 市场宽度（涨跌家数比，全市场宽度独立于涨停 cohort；P4-5 引入时为
+            # 参考判据，2026-10-28 按校准包升格定位判据（阈值 2.0→2.5）：高潮日
+            # 作第二证据确认/分歧披露，非高潮日（回暖/震荡档）宽度达标记「偏暖」。
             up_count, down_count = m.get('up_count'), m.get('down_count')
             breadth_ratio = (round(up_count / down_count, 2)
                              if up_count and down_count else None)
-            br_gte = climax.get('breadth_ratio_gte', 2.0)
+            br_gte = climax.get('breadth_ratio_gte', 2.5)
             criteria = [
                 {'name': '高潮',
                  'expr': f"高度≥{climax.get('max_streak_gte')} 且 "
@@ -1293,14 +1302,15 @@ class ReviewAggregator:
                  'expr': f"溢价均值≤{ebb.get('premium_mean_lte')}%",
                  'values': f"溢价均值{_disp_pct(premium_mean)}",
                  'hit': False, 'role': 'position'},
-                {'name': '高潮·第二证据（独立）',
+                {'name': '市场宽度（涨跌家数比）',
                  'expr': f"涨跌家数比≥{br_gte}（市场宽度，独立于涨停 cohort；"
-                         "初版参考阈值未校准，仅并列披露不参与定位）",
+                         "2026-10-28 校准升格定位判据——高潮日作第二证据"
+                         "确认/分歧，非高潮日宽度达标记「偏暖」）",
                  'values': (f"涨{up_count if up_count is not None else '—'} / "
                             f"跌{down_count if down_count is not None else '—'} / "
                             f"比{breadth_ratio if breadth_ratio is not None else '—'}"),
                  'hit': bool(breadth_ratio is not None and breadth_ratio >= br_gte),
-                 'role': 'reference'},
+                 'role': 'position'},
             ]
             if (max_streak >= climax.get('max_streak_gte', 99)
                     and (premium_mean is not None and premium_mean >= climax.get('premium_mean_gte', 99))):
@@ -1320,6 +1330,14 @@ class ReviewAggregator:
                 criteria[2]['hit'] = True
             else:
                 cycle, basis = '回暖/震荡', ['未命中冰点/高潮/退潮判据']
+                # 2026-10-28 升格：非高潮日宽度达标（涨跌家数比≥阈值）→ 定位标
+                # 注「偏暖」（校准依据：ge2.5 非高潮日次日溢价 2.44% vs 基线
+                # 1.95%）。档名不变（候选联动/核验口径零影响），仅定位读数加向。
+                breadth_warm = (bool(breadth_ratio >= br_gte)
+                                if breadth_ratio is not None else None)
+                if breadth_warm:
+                    basis.append(f"宽度确认偏暖（涨跌家数比{breadth_ratio}"
+                                 f"≥{br_gte}）")
         except Exception as e:
             logger.warning(f'情绪周期判据计算失败: {e}')
             cycle, basis = '试用版判据待校准', [f'判据计算异常: {e}']
@@ -1356,6 +1374,7 @@ class ReviewAggregator:
         # P1-4（C1）：原第二个不可达 return（trial 水印永不显示）删除，
         # trial 并入本 return——sentiment.py/conclusion.py 的水印消费恢复生效
         return {'position': cycle, 'basis': basis, 'criteria': criteria,
+                'breadth_warm': breadth_warm,
                 'trial': not self.sentiment_calibrated,
                 'quantile_position': q_cycle, 'quantile_basis': q_basis,
                 'quantile_calibration': q_calib,
@@ -1978,20 +1997,21 @@ class ReviewAggregator:
 
         与链同一实现两入口（indicator_panel.compute_indicator_states 调同一批
         modules），窗口与链 daily_review 逐字节对齐（520+2，2026-10-25 修复
-        133d 错位——此前对拍 731 处失配的根因，附录 C.6）；常量闸见
+        133d 错位——此前对拍 731 处失配的根因，附录 C.6）；窗口起点统一走
+        panel_window_start（20261027 修复调用处 -1 的 off-by-one）；常量闸见
         test_review_indicator_parity.py。
         失败/空面板 → available=False（报告渲染「⏳ 待补」，不阻塞其他维度）。
         """
         from .indicator_panel import (
-            INDICATOR_WINDOW_DAYS, compute_indicator_states,
-            load_indicator_panel, summarize_indicator_states,
+            compute_indicator_states, load_indicator_panel,
+            panel_window_start, summarize_indicator_states,
         )
         try:
-            start = self.reader.nth_trading_day_back(as_of, INDICATOR_WINDOW_DAYS - 1)
+            start = panel_window_start(self.reader, as_of)
             if start is None:
                 return AggregationResult(
                     available=False,
-                    reason=f'交易日历不足 {INDICATOR_WINDOW_DAYS} 日，无法满足指标 warmup')
+                    reason='交易日历不足 522 日，无法满足指标 warmup')
             panel = load_indicator_panel(self.reader, as_of, start)
             if panel.empty:
                 return AggregationResult(available=False, reason='指标面板窗口内无日K数据')

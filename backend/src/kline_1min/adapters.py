@@ -151,6 +151,11 @@ class TradeCalendarPortAdapter(Kline1MinTradeCalendarPort):
     def get_trade_dates(self, start_date: str, end_date: str) -> List[str]:
         return self.manager._get_trade_dates(start_date, end_date)
 
+    def latest_closed_trade_date(self) -> str:
+        """F12（数据采集链路风险修复方案 V1.0）：暴露"最近已收盘交易日"口径（P-11）"""
+        from ..sync.review_common import latest_closed_trade_date
+        return latest_closed_trade_date(self.manager.db_conn)
+
 
 class StockPortAdapter(Kline1MinStockPort):
     def __init__(self, manager):

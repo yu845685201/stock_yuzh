@@ -63,6 +63,16 @@ sync:
   kline_day_detect_threshold_abs: 0.01     # 除权检测绝对阈值（元）
   kline_day_detect_threshold_pct: 0.002    # 除权检测相对阈值（占价格比例）
   kline_day_raw_match_tolerance: 0.005     # 原始域不可变校验容差（元）
+  # raw 兜底（日K线raw兜底与自动恢复方案 V1.0）：qfq 尾部缺口（THS 未发布）时用 raw 值兜底，
+  # 行级标记 source='TDXAPI_RAWFB'，台账 kline_day_raw_fallback 追踪，恢复阶段自动销账
+  kline_day_raw_fallback:
+    enabled: true                          # 总开关（除权校验始终强制执行，不受此开关影响）
+    max_stocks_per_run: 1500               # 单次运行兜底股票数上限（防系统性故障时异常放大）
+  # ---- 数据采集链路风险修复（方案 V1.0，2026-11-18）----
+  tdx_strict_mode: true                    # F8 strict 总开关：中间件连接/业务失败在行情主路径抛 TdxApiUnavailableError（false=退回旧行为返回空）
+  kline_day_replace_min_ratio: 0.9         # F3 整股替换完整性：新行数 < 旧行数×比值时拒绝替换（0=关闭校验）
+  kline_day_circuit_breaker: 20            # F5 连续 conn 类失败股票数熔断阈值（仅连接层错误计数，业务错误不计）
+  stock_list_snapshot_min: 3000            # F6 股票快照下限：低于则中止本轮维护（缺席计数/退市判定/落库均不执行）
   # 中间件增强路径开关（V3.0 M-C）：true=qfq走/api/kline-qfq缓存、raw尾部走/api/kline-recent；
   # false=保持 V2.0 直连路径（/api/kline-history + /api/kline-all）。验证通过前保持 false
   kline_day_use_enhanced_api: true
@@ -93,9 +103,12 @@ cninfo:
   query_interval: 0.5      # 检索接口请求间隔（秒）
   download_interval: 0.5   # PDF下载间隔（秒）
   page_size: 30
-  max_pages_per_window: 120 # 单检索窗口分页上限（超过自动对半拆窗；单日窗口无法拆分。
+  max_pages_per_window: 200 # 单检索窗口分页上限（超过自动对半拆窗；单日窗口无法拆分。
                            # 80 不够：探路 T18 实测年报截止日 4-30 单日 2703 条≈91 页，
                            # K 回补实测这些窗口全部失败→年报期披露日缺口（2026-10-03 修）
+                           # 120 不够：2026-10-28（Q3 披露截止 10-31 前冲刺）单日 4501 条≈151 页
+                           # 失败→披露日缺口；深分页实测 page 60~151 稳定、同页两次一致（2026-10-31 修）
+                           # 160 仍不够：2026-10-30（Q3 截止前最后交易日）单日 5469 条≈183 页→200（2026-10-31 修）
   backfill_years: 5        # 无进度股票的默认回补年数（报告期口径；pdf_recent_years>0 时被其取代）
   pdf_recent_years: 10     # 仅采集/保留近 N 个报告年度（滚动窗口，2026 → 报告期 2017 起；0=全历史。
                            # 用户决策 2026-10-01：磁盘余量不足 150G，缩范围至近 10 年；
@@ -159,7 +172,7 @@ review:
   sentiment_rules:              # 命中顺序：高潮 → 冰点 → 退潮 → 回暖/震荡（复盘框架.MD §3）
     ice: {max_streak_lte: 2, burst_rate_gte: 0.5}      # 冰点：高度≤2 或 炸板率≥50%
     ebb: {premium_mean_lte: 0}                          # 退潮：昨日涨停溢价均值≤0
-    climax: {max_streak_gte: 5, premium_mean_gte: 4.0, breadth_ratio_gte: 2.0}  # 高潮：高度≥5 且 溢价≥4%；第二证据（P4-5 独立披露不参与定位）：涨跌家数比≥2（初版未校准）
+    climax: {max_streak_gte: 5, premium_mean_gte: 4.0, breadth_ratio_gte: 2.5}  # 高潮：高度≥5 且 溢价≥4%；市场宽度（涨跌家数比，独立于涨停 cohort）2026-10-28 校准升格定位判据（阈值 2.0→2.5，依据 data/calibration/breadth_calibration_20261026_0024.md：ge2.5 非高潮日次日溢价 2.44% vs 基线 1.95%）——形态=非高潮日宽度达标记「偏暖」标注，档名/候选联动不变；2026-10-27 前为 2.0 参考口径（不参与定位）
   # 转天交易预案（第六章子节）判据初版：2026-10-05 新增，阈值待用户校准定稿
   # （流程同情绪判据 §3；用途=条件-动作参考框架，非次日涨跌预测）
   tomorrow_plan:
@@ -188,8 +201,19 @@ chan:
 review_sync:
   # 通用（http_collector_base）
   default_timeout: [5, 30]        # 连接5s/读30s
-  blocked_cooldown_seconds: 600   # 风控急停冷却
+  blocked_cooldown_seconds: 1800  # 风控急停冷却（20261117 600→1800：交易所 403 封禁为小时级，600s 重试必失败且多暴露一次；单源冷却占用一个 worker 槽，其余源不受阻）
   retry_attempts: 3               # 网络类异常重试次数（风控信号不重试）
+  # ---- 数据采集链路风险修复（方案 V1.0，2026-11-18）----
+  freshness_check_enabled: true   # F1 数据新鲜度巡检（编排末尾自动跑；独立 CLI sync-freshness-check）
+  # freshness_rules:               # F1 规则可覆盖缺省 18 表规则，格式：
+  #   - {table: his_kline_day, date_column: trade_date, freq: daily, max_lag_days: 3, label: 全市场日K}
+  data_date_check_enabled: true   # F2 "成功≠有当日数据"校验（源自报 data_date_max < 基准日 → 降级待补）
+  middleware_health_check_enabled: true  # F4 中间件健康预检（请求集含 tdx 依赖源时调度前统一预检）
+  kline_gate_min_rows: 3000       # F9 日K门控：当日行数下限
+  kline_gate_min_ratio: 0.95      # F9 日K门控：当日/前日行数比下限（原 0.8 过宽，11-17 放行 697 漏采）
+  kline_gate_max_abs_diff: 300    # F9 日K门控：|当日-前日| 行数绝对差上限
+  # （F16 告警推送已按用户要求整体移除，2026-11-18：汇总报告仍是唯一出口，
+  #  静默缺口依赖 F1 巡检报告人工查看）
   # user_agent: 可覆盖默认 UA（与 cninfo 现用同款策略）
   # bypass_proxy: false           # 默认外网走系统代理；true 显式绕过
   # 各源请求间隔（秒）
@@ -203,9 +227,12 @@ review_sync:
   sina_sector_interval: 2.0     # 新浪 vip 板块接口（行业分类/概念成分，缺失数据采集方案 20260928）
   sw_interval: 5.0              # 申万一级行业分类文件（swsresearch 下载中心，31+1 请求/次）
   tdx_official_interval: 2.0    # 通达信官网盘后包（北交所日K/全市场对拍，每交易日仅 1 请求）
-  # 源间并发（用户决策 2026-09-27）：独立源波次并行，各源内部仍串行限速
+  # 源间并发（用户决策 2026-09-27）：依赖驱动调度（2026-11-01 升级）——各源声明依赖，
+  # 依赖完成即提交（THS 只等公告/披露、与日K并行）；各源内部仍按各自限速节奏执行。
+  # 外网源源内并发仅 THS 财报放开（用户拍板 2026-11-01，并发 2 保守起步）；
+  # tdx 本地源（日K/资金流）无风控语义，节拍/线程独立调优。
   parallel_sources: true
-  parallel_workers: 4            # 波内并发源数上限
+  parallel_workers: 4            # 同时运行的源数上限（依赖就绪队列）
   # 市场要闻（四期方案 §4 2026-10-07）：新浪 7x24 快讯公开接口（无签名）
   # 选型记录：财联社 cls.cn 全部数据端点要求签名（公开页客户端渲染）→ 按合规红线
   # "不破解任何技术措施"不采；同花顺热榜 hexin-v 同红线不采；东财系数据源红线不采
@@ -215,8 +242,9 @@ review_sync:
     max_pages: 5                 # 单次增量最大翻页数（首采可 --pages 显式放大）
   # 分笔资金流（tdx 本地；P2 全市场扩面，量价资金方案 V1.1 2026-10-05）
   money_flow:
-    concurrent_workers: 3
-    request_interval: 0.15
+    concurrent_workers: 4        # 20261031 3→4：tdx 本地源无风控，配合节拍 0.05s 全市场 ~5 分钟
+    request_interval: 0.05       # 全局节拍（共享锁限速）20261031 0.15→0.05（5500 只 14→5 分钟；
+                                 # 上游抖动时超时率超阈值自动降速 ×2 兜底）
     full_market: true             # P2 全市场扩面（用户决策不灰度；单股历史分笔走 2000 笔/次聚合）
     super_big_threshold: 1000000  # 超大单阈值（元；大单 big_* 保持 ≥50 万口径含超大）
     big_amount_threshold: 500000  # 大单阈值（元）
@@ -260,6 +288,9 @@ review_sync:
   ths_finance:
     enabled: true
     backfill_years: 5
+    concurrent_workers: 2        # 增量源内并发（2026-11-01 用户拍板放开外网源内部串行；
+                                 # 每线程仍 2s 限速，总速率 1 req/s；披露高峰日 ~1000 只
+                                 # 35→18 分钟。观察一个披露季无风控再议上调）
   concept:
     enabled: true
   # 行业分类（缺失数据采集方案 20260928 §3；主源新浪行业板块 source=sina_hy 日更）

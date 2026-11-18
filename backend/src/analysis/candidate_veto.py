@@ -89,7 +89,7 @@ def load_candidate_veto_map(db, as_of: str, rules: Dict[str, Any],
                 """
                 SELECT ts_code,
                        100.0 * SUM(CASE WHEN side = '卖1' THEN amount END)
-                       / NULLIF(SUM(CASE WHEN side LIKE '卖%' THEN amount END), 0)
+                       / NULLIF(SUM(CASE WHEN side LIKE '卖%%' THEN amount END), 0)
                 FROM lhb_detail
                 WHERE trade_date = %s
                 GROUP BY ts_code

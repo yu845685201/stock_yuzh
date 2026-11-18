@@ -149,6 +149,19 @@ class AdjustFactorManager:
                 if init_mode and i % 50 == 0:
                     self._log_progress(stats, started)
             result['success'] = not stats['failed']
+            # F2（方案 V1.0 §F2）：增量模式触发清单非空但 rows==0 → success=False
+            # 并注明"疑 THS 拦截"（原行为空结果也报成功，THS 拦截不可见）
+            if not init_mode and target and stats['rows'] == 0 and not result['errors']:
+                result['success'] = False
+                result['errors'].append(
+                    f"增量触发清单 {len(target)} 只全部空结果（疑 THS 拦截或源不可用），"
+                    f"复权因子可能未更新——请稍后重跑 sync-adjust-factor")
+            # F2：自报数据日（因子表当日 max），供编排层数据日校验
+            try:
+                r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM base_adjust_factor')
+                stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
+            except Exception:
+                stats['data_date_max'] = None
             # 全量模式末轮：对 manifest 中失败/空结果股票自动重试一轮（THS 拦截多为瞬时）
             if init_mode and stats['failed']:
                 retry_list = list(dict.fromkeys(stats['failed']))

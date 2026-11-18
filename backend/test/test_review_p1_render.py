@@ -44,7 +44,7 @@ class TestSentimentCriteria:
         out = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.22, 'premium_mean': 3.38}, '20261023')
         names = [c['name'] for c in out['criteria']]
-        assert names == ['高潮', '冰点', '退潮', '高潮·第二证据（独立）']
+        assert names == ['高潮', '冰点', '退潮', '市场宽度（涨跌家数比）']
         climax = out['criteria'][0]
         assert '高度≥5' in climax['expr'] and '溢价≥4.0%' in climax['expr']
         assert '高度6' in climax['values'] and '溢价3.38%' in climax['values']
@@ -59,13 +59,14 @@ class TestSentimentCriteria:
         assert out['criteria'][1]['hit'] is False
 
     def test_climax_second_evidence_breadth(self):
-        """P4-5（B8）：第 4 行=涨跌家数比独立证据；climax 命中时 basis 带确认/未确认"""
+        """P4-5（B8）+ 2026-10-28 升格：第 4 行=市场宽度定位判据（缺省阈值 2.5）；
+        climax 命中时 basis 带确认/未确认"""
         out = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5,
              'up_count': 3000, 'down_count': 1000}, '20261023')
         sec = out['criteria'][3]
         assert sec['hit'] is True and '比3.0' in sec['values']
-        assert '涨跌家数比≥2.0' in sec['expr']
+        assert '涨跌家数比≥2.5' in sec['expr']
         assert any('确认' in b and '未确认' not in b for b in out['basis'])
         out2 = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5,
@@ -76,6 +77,35 @@ class TestSentimentCriteria:
         out3 = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.2, 'premium_mean': 4.5}, '20261023')
         assert out3['criteria'][3]['hit'] is False and '比—' in out3['criteria'][3]['values']
+
+    def test_breadth_warm_annotation_on_residual_stage(self):
+        """2026-10-28 升格：非高潮日宽度达标（≥2.5）→ 定位标「宽度确认偏暖」，
+        档名不变；冰点/退潮档不标注（校准依据仅覆盖非高潮日）。"""
+        # 回暖/震荡 + 宽度 3.0 → basis 带偏暖行，position 档名不变
+        warm = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 3, 'burst_rate': 0.22, 'premium_mean': 1.0,
+             'up_count': 3000, 'down_count': 1000}, '20261023')
+        assert warm['position'] == '回暖/震荡'
+        assert any('宽度确认偏暖' in b for b in warm['basis'])
+        assert warm['breadth_warm'] is True
+        # 回暖/震荡 + 宽度 0.46（<2.5）→ 无标注
+        cool = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 3, 'burst_rate': 0.22, 'premium_mean': 1.0,
+             'up_count': 1200, 'down_count': 2600}, '20261023')
+        assert cool['position'] == '回暖/震荡'
+        assert all('宽度确认偏暖' not in b for b in cool['basis'])
+        assert cool['breadth_warm'] is False
+        # 冰点档即使宽度达标也不标注（校准数据仅支撑非高潮日）；不适用=None
+        ice_warm = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 1, 'burst_rate': 0.55, 'premium_mean': 1.0,
+             'up_count': 3000, 'down_count': 1000}, '20261023')
+        assert ice_warm['position'] == '冰点'
+        assert all('宽度确认偏暖' not in b for b in ice_warm['basis'])
+        assert ice_warm['breadth_warm'] is None
+        # 缺涨跌家数：breadth_warm=None 不硬造
+        none_data = _agg_cfg(True)._sentiment_cycle(
+            {'max_streak': 3, 'burst_rate': 0.22, 'premium_mean': 1.0}, '20261023')
+        assert none_data['breadth_warm'] is None
 
     def test_criteria_values_pct_and_none_safe_w1(self):
         """W1：values/basis 炸板率/溢价统一百分数显示；None→'—' 不印字面 None"""
@@ -93,11 +123,11 @@ class TestSentimentCriteria:
         assert '溢价—' in vals and '炸板率—' in vals and 'None' not in vals
 
     def test_criteria_role_w5(self):
-        """W5：前三行 role=position、第二证据 role=reference（digest 据此分款渲染）"""
+        """W5：全行 role=position（2026-10-28 宽度判据升格定位，digest 据此同款渲染）"""
         out = _agg_cfg(True)._sentiment_cycle(
             {'max_streak': 6, 'burst_rate': 0.22, 'premium_mean': 3.38}, '20261023')
         assert [c.get('role') for c in out['criteria']] == [
-            'position', 'position', 'position', 'reference']
+            'position', 'position', 'position', 'position']
 
     def test_trial_flag_two_states(self):
         """P1-4：trial 键随 sentiment_calibrated 开关两态（水印消费恢复）"""

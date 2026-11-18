@@ -11,7 +11,30 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import threading
 import time
+
+from ..data_sources.tdx_api_source import TdxApiUnavailableError
+
+
+class RawFallbackBudget:
+    """单次同步 raw 兜底股票数上限（线程安全，一股一额度；方案 V1.0 §3.5）"""
+
+    def __init__(self, max_stocks: int):
+        self._remaining = max(0, int(max_stocks))
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self._remaining <= 0:
+                return False
+            self._remaining -= 1
+            return True
+
+    @property
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._remaining <= 0
 
 
 @dataclass
@@ -26,6 +49,15 @@ class KlineDaySharedState:
     # 当日检出除权（qfq_rebase 命中并整股重拉）的 ts_code 清单：
     # sync 完成后由调用方落 tmp/adjust_trigger_YYYYMMDD.json，供复权因子增量同步使用（方案 4.2）
     xdxr_hit_codes: List[str] = field(default_factory=list)
+    # raw 兜底计数（方案 V1.0）：merge 层兜底写入/除权跳过；恢复阶段计数由 _recover_raw_fallback 直写 result
+    fallback_written: int = 0
+    fallback_skipped_exrights: int = 0
+    # F5 整批熔断（数据采集链路风险修复方案 V1.0）：连续 conn 类失败计数，
+    # 达阈值置 circuit_tripped；处理成功归零。业务类（biz）错误不累计（ chronic BJ qfq）。
+    circuit_lock: Any = field(default_factory=threading.Lock)
+    consecutive_conn_errors: int = 0
+    circuit_tripped: bool = False
+    circuit_error: str = ''
     api_time: float = 0.0
     csv_time: float = 0.0
     db_time: float = 0.0
@@ -56,6 +88,8 @@ class KlineDayDeps:
     detect_refetch: Callable
     filter_raw: Callable
     normalize_records: Callable
+    raw_fallback_budget: Any = None
+    circuit_breaker_threshold: int = 20
 
 
 def process_one_stock(
@@ -86,6 +120,8 @@ def process_one_stock(
 
     per_stock_records: List[Dict[str, Any]] = []
     raw_for_csv: List[Dict[str, Any]] = []
+    fallback_ledger: List[Dict[str, Any]] = []
+    skipped_ledger: List[Dict[str, Any]] = []
     local_api_time = 0.0
     local_csv_time = 0.0
     local_db_time = 0.0
@@ -99,18 +135,43 @@ def process_one_stock(
 
     # ---- 双源拉取与合并（init/区间=双全量；日常=双尾部）----
     merged_records: List[Dict[str, Any]] = []
+    raw_skips: List[Dict[str, Any]] = []
     refetched = False
     stock_detection_details: List[Dict[str, Any]] = []
     fetch_start = time.time()
     if api_start_wall is None:
         api_start_wall = fetch_start
 
-    if deps.fetch_full:
-        qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code)
-        raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
-    else:
-        qfq_list = deps.tdx_api_source.get_kline_qfq_tail(api_code, deps.tail_limit)
-        raw_list = deps.tdx_api_source.get_kline_raw_tail(api_code, deps.tail_limit)
+    try:
+        if deps.fetch_full:
+            qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code)
+            raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
+        else:
+            qfq_list = deps.tdx_api_source.get_kline_qfq_tail(api_code, deps.tail_limit)
+            raw_list = deps.tdx_api_source.get_kline_raw_tail(api_code, deps.tail_limit)
+    except TdxApiUnavailableError as e:
+        # F8/F5（数据采集链路风险修复方案 V1.0）：中间件不可用显式计失败并喂熔断计数
+        with ctx.circuit_lock:
+            if e.err_type == 'conn':
+                ctx.consecutive_conn_errors += 1
+                if (not ctx.circuit_tripped
+                        and ctx.consecutive_conn_errors >= deps.circuit_breaker_threshold):
+                    ctx.circuit_tripped = True
+                    ctx.circuit_error = (f"连续 {ctx.consecutive_conn_errors} 只连接失败，"
+                                         f"整批熔断（中间件疑似不可用）: {e}")
+        if ctx.circuit_tripped:
+            deps.logger.error(ctx.circuit_error)
+        return {
+            'records': 0, 'db_rows': 0,
+            'fallback_written': 0, 'fallback_skipped_exrights': 0,
+            'api_time': time.time() - fetch_start, 'csv_time': 0.0, 'db_time': 0.0,
+            'api_span': (fetch_start, time.time()),
+            'csv_span': None, 'db_span': None,
+            'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
+            'detection_details': [], 'source_missing': local_source_missing,
+            'error': f'tdx-api 不可用: {e}',
+            'circuit_tripped': ctx.circuit_tripped,
+        }
     api_end_wall = time.time()
     local_api_time += api_end_wall - fetch_start
     deps.log_progress('数据采集', stock_index, deps.total_stocks, stock_code, stock_name, api_end_wall - fetch_start)
@@ -121,7 +182,10 @@ def process_one_stock(
     if not raw_list:
         local_source_missing['raw_empty'] = 1
 
-    merged_records = deps.merge_sources(qfq_list, raw_list)
+    merged_records, raw_skips = deps.merge_sources(qfq_list, raw_list, deps.trade_dates, ts_code, deps.raw_fallback_budget)
+    # F5：本股拉取成功 → 连接失败计数归零
+    with ctx.circuit_lock:
+        ctx.consecutive_conn_errors = 0
 
     # ---- 日常增量的跨快照除权检测（命中→整股重拉自愈）----
     # 仅日常增量执行：显式区间补齐不做整股重拉，避免触发全量回源
@@ -138,11 +202,52 @@ def process_one_stock(
             qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code, refresh=True)
             raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
             local_api_time += time.time() - refetch_start
-            merged_records = deps.merge_sources(qfq_list, raw_list)
+            merged_records, raw_skips = deps.merge_sources(qfq_list, raw_list, deps.trade_dates, ts_code, deps.raw_fallback_budget)
             stock_detection['refetched'] = 1
             refetched = True
+    elif deps.is_explicit_range and merged_records and not deps.fetch_full:
+        # F11④（数据采集链路风险修复方案 V1.0）：显式区间补齐跨除权日不整股重拉
+        # （避免全量回源），但对重叠窗口执行同款接缝检测——命中仅告警，提示可人工
+        # `sync-kline-day --init --codes <该股>` 彻底重拉
+        try:
+            hit, detail = deps.detect_refetch(ts_code, merged_records)
+            stock_detection['checked'] = 1
+            if hit:
+                stock_detection['hits'] = 1
+                detail['explicit_range_warning'] = True
+                stock_detection_details.append({'ts_code': ts_code, **detail})
+                deps.logger.warning(
+                    f"显式区间接缝告警（F11④，不整股重拉）: {ts_code} {detail}"
+                    f"——如需彻底修复请对该股执行 --init 重拉")
+        except Exception as e:
+            deps.logger.warning(f"显式区间接缝检测异常: {ts_code} {e}")
 
     if not merged_records:
+        # F11②③（数据采集链路风险修复方案 V1.0）：双源同空不再纯静默——
+        # 库内近 10 自然日有数据的"突兀空"与 raw 源空各记单股异常样本（仅报告可见，
+        # 不触发重拉；strict 模式下中间件不可用已在上方抛错，此处空=源真无数据）
+        empty_anomalies: List[Dict[str, Any]] = []
+        try:
+            recent = deps.db_conn.execute_query(
+                "SELECT MAX(trade_date) AS d FROM his_kline_day WHERE ts_code = %s", (ts_code,))
+            last_d = (recent[0].get('d') if recent else None)
+            if last_d:
+                from datetime import date as _date, datetime as _dt
+                s = str(last_d).replace('-', '')
+                if len(s) == 8:
+                    age = (_dt.now().date()
+                           - _date(int(s[:4]), int(s[4:6]), int(s[6:8]))).days
+                    if age <= 10:
+                        empty_anomalies.append({
+                            'ts_code': ts_code, 'type': 'merged_empty_with_history',
+                            'trade_date': s,
+                            'note': f'双源同空但库内 {age} 天前有数据（疑源端异常）'})
+        except Exception:
+            pass
+        if local_source_missing.get('raw_empty') and len(empty_anomalies) < 200:
+            empty_anomalies.append({
+                'ts_code': ts_code, 'type': 'raw_source_empty',
+                'note': 'raw 源空（F11③：raw_revision 检测本轮失效，仅报告可见）'})
         return {
             'records': 0,
             'db_rows': 0,
@@ -152,7 +257,7 @@ def process_one_stock(
             'api_span': (api_start_wall, api_end_wall) if api_start_wall and api_end_wall else None,
             'csv_span': None,
             'db_span': None,
-            'anomalies': [],
+            'anomalies': empty_anomalies,
             'detection': stock_detection,
             'detection_details': stock_detection_details,
             'source_missing': local_source_missing,
@@ -204,12 +309,32 @@ def process_one_stock(
         db_end_wall = time.time()
         local_db_time += db_end_wall - db_start
         deps.log_progress('数据入库-', stock_index, deps.total_stocks, stock_code, stock_name, db_end_wall - db_start)
+
+        # ---- raw 兜底台账（方案 V1.0 §3.3）：与数据写库同批落账；失败不影响已写数据 ----
+        fallback_ledger = [
+            {'ts_code': r['ts_code'], 'trade_date': r['trade_date'], 'status': 'fallback',
+             'reason': 'qfq_missing', 'raw_close': r.get('raw_close')}
+            for r in per_stock_records if r.get('source') == 'TDXAPI_RAWFB'
+        ]
+        skipped_ledger = [
+            {'ts_code': ts_code, 'trade_date': s.get('trade_date'), 'status': 'skip_exrights',
+             'reason': s.get('reason'), 'raw_close': s.get('raw_close')}
+            for s in raw_skips
+        ]
+        if fallback_ledger or skipped_ledger:
+            try:
+                deps.db_conn.upsert_raw_fallback_records(fallback_ledger + skipped_ledger)
+            except Exception as e:
+                # 台账写失败只降级追踪能力（source 列标记仍在），不影响已入库数据
+                deps.logger.warning(f"raw 兜底台账写入失败（不影响日K数据）: {ts_code} {e}")
     else:
         db_rows = 0
 
     return {
         'records': len(per_stock_records),
         'db_rows': db_rows,
+        'fallback_written': len(fallback_ledger),
+        'fallback_skipped_exrights': len(skipped_ledger),
         'api_time': local_api_time,
         'csv_time': local_csv_time,
         'db_time': local_db_time,
@@ -265,6 +390,9 @@ def merge_stock_result(res: Dict[str, Any], ctx: KlineDaySharedState) -> None:
             ctx.xdxr_hit_codes.append(d['ts_code'])
     for k, v in (res.get('source_missing') or {}).items():
         ctx.source_missing[k] = ctx.source_missing.get(k, 0) + v
+
+    ctx.fallback_written += res.get('fallback_written', 0) or 0
+    ctx.fallback_skipped_exrights += res.get('fallback_skipped_exrights', 0) or 0
 
     result['records'] += res['records']
     result['db_rows'] += res['db_rows']

@@ -185,6 +185,12 @@ class HkexConnectManager:
             result['success'] = False
             result['errors'].append(str(e))
         finally:
+            # F2（方案 V1.0 §F2）：自报数据日（hkex_connect_daily 当日 max）
+            try:
+                r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM hkex_connect_daily')
+                stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
+            except Exception:
+                stats['data_date_max'] = None
             stats['duration'] = round((datetime.now() - started).total_seconds(), 1)
             result['report_path'] = self._write_report(result) if write_report else None
         return result

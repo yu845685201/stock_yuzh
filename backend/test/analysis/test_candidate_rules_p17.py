@@ -143,3 +143,39 @@ class TestR2ClusterStrength:
     def test_cluster_missing_no_filter(self):
         """家数缺失不过滤（不硬造）。"""
         assert is_r2(1, False, ['创新药'], ['创新药'], cluster_count=None)
+
+
+class TestLoadCandidateVetoMapSell1Sql:
+    """卖一占比 VETO 的 SQL 回归（20261027 复盘实跑发现）。
+
+    带参查询里 LIKE 通配 % 必须写作 %%：裸 % 被 psycopg2 参数插值当作格式符
+    （IndexError: tuple index out of range），该否决维度自 P4-1 接线起静默失效。
+    """
+
+    def test_sell1_like_percent_escaped_and_mapped(self):
+        from datetime import datetime
+
+        from src.analysis.candidate_veto import load_candidate_veto_map
+
+        class StubDB:
+            def __init__(self):
+                self.sqls = []
+
+            def _query(self, sql, params=None):
+                self.sqls.append(' '.join(sql.split()))
+                if 'base_financial_report' in sql:
+                    return []
+                if 'announcement_daily' in sql:
+                    return []
+                if 'lhb_detail' in sql:
+                    return [('sh.600127', 37.26), ('sh.517300', None)]
+                raise AssertionError(f'未覆盖 SQL: {sql[:80]}')
+
+        db = StubDB()
+        out = load_candidate_veto_map(db, '20261027', {},
+                                      now=datetime(2026, 10, 28, 1, 0))
+        sell1_sql = next(s for s in db.sqls if 'lhb_detail' in s)
+        assert "LIKE '卖%%'" in sell1_sql, \
+            'LIKE 通配 % 须转义为 %%（psycopg2 带参插值），裸 % 使维度静默失效'
+        assert any('卖一占比' in r for r in out['sh.600127'])   # 37.26 > 30
+        assert 'sh.517300' not in out                          # None 行过滤不硬造

@@ -1081,3 +1081,23 @@ CREATE TRIGGER update_anal_kline_rise_25pre_modtime
 BEFORE UPDATE ON anal_kline_rise_25pre 
 FOR EACH ROW 
 EXECUTE FUNCTION update_modified_column();
+-- ============================================================
+-- raw 兜底台账（日K线raw兜底与自动恢复方案 V1.0，2026-11-18）
+-- 追踪 qfq 尾部缺口（THS 前复权未发布）期间用 raw 值兜底的行：
+--   status='fallback'      已兜底待恢复（行级标记 his_kline_day.source='TDXAPI_RAWFB'）
+--   status='skip_exrights' 除权校验未过、未兜底（等 THS 恢复后正常入库）
+--   status='recovered'     恢复阶段用 qfq 覆盖销账（source 回归 TDXAPI）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kline_day_raw_fallback (
+    id bigserial PRIMARY KEY,
+    ts_code varchar(16) NOT NULL,
+    trade_date varchar(8) NOT NULL,
+    status varchar(16) NOT NULL,
+    reason varchar(32),
+    q_factor numeric,
+    raw_close numeric,
+    fallback_at timestamptz DEFAULT now(),
+    recovered_at timestamptz,
+    recover_source varchar(24),
+    CONSTRAINT kline_day_raw_fallback_pk UNIQUE (ts_code, trade_date)
+);

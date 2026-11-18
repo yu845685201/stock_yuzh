@@ -95,8 +95,12 @@ def _indicator_blocks(indicators: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [{'type': 'note',
                  'text': f"⏳ 待补：技术指标状态（{indicators.get('reason', '面板为空')}）"}]
     d = indicators['data']
+    # 窗口标签取自 INDICATOR_WINDOW_DAYS 单一出处（此前硬编码"133 日"在
+    # 2026-10-25 窗口扩到 522 后未跟上，属陈旧标签）
+    from ..indicator_panel import INDICATOR_WINDOW_DAYS
     blocks: List[Dict[str, Any]] = [
-        {'type': 'heading', 'level': 3, 'text': '技术指标状态（通达信口径，133 日窗口复算）'},
+        {'type': 'heading', 'level': 3,
+         'text': f'技术指标状态（通达信口径，{INDICATOR_WINDOW_DAYS} 日窗口复算）'},
     ]
     blocks.append({'type': 'table',
                    'headers': ['指标', '分布'],

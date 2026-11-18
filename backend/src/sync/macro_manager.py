@@ -151,11 +151,19 @@ class MacroManager:
 
     def _to_rows(self, code: str, rows: List[Dict[str, Any]]
                  ) -> List[Dict[str, Any]]:
-        name, unit, freq = INDICATOR_META.get(code, (code, '', ''))
-        return [{'trade_date': r['trade_date'], 'indicator_code': code,
-                 'value': r['value'], 'unit': unit or None,
-                 'period': freq or None, 'source': 'eastmoney/jin10'}
-                for r in rows]
+        """行转库行。多指标源（fetch_lpr/fetch_pmi）一次返回两个 indicator_code 的
+        混合行——以行内自带 indicator_code 为准：原实现整批盖当前循环 code，会让
+        LPR_1Y/LPR_5Y、PMI_MFG/PMI_NONMFG 相互串值（PK 覆盖后写错数值，风险排查
+        报告 A#15 高危项）。
+        """
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            eff_code = r.get('indicator_code') or code
+            name, unit, freq = INDICATOR_META.get(eff_code, (eff_code, '', ''))
+            out.append({'trade_date': r['trade_date'], 'indicator_code': eff_code,
+                        'value': r['value'], 'unit': unit or None,
+                        'period': freq or None, 'source': 'eastmoney/jin10'})
+        return out
 
     def _write_report(self, result: Dict[str, Any]) -> Optional[str]:
         stats = result['stats']

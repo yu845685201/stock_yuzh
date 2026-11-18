@@ -347,43 +347,65 @@ def run_pipeline(
             if item is None:
                 fetch_queue.task_done()
                 break
-            stock_item = item['stock']
-            stock_index = item['index']
-            ts_code = stock_item.get('ts_code')
-            stock_code = stock_item.get('stock_code')
-            stock_name = stock_item.get('stock_name') or ''
-            local_api_start = time.time()
-            local_api_end = local_api_start
-            raw = None
-            if ts_code and stock_code:
-                raw = run_with_failure_capture(
-                    lambda: deps.source.fetch_kline_all(stock_code, 'minute1'),
-                    item.get('fallback_dates', [])
-                )
-            local_api_end = time.time()
+            # F12（数据采集链路风险修复方案 V1.0）：worker 主体包 try/finally——
+            # 异常时 task_done 必须执行（否则 fetch_queue.join() 永久挂死），
+            # 并向 normalize_queue 投递空 raw 错误 item 保持队列计数守恒，worker 不死亡
+            try:
+                stock_item = item['stock']
+                stock_index = item['index']
+                ts_code = stock_item.get('ts_code')
+                stock_code = stock_item.get('stock_code')
+                stock_name = stock_item.get('stock_name') or ''
+                local_api_start = time.time()
+                local_api_end = local_api_start
+                raw = None
+                if ts_code and stock_code:
+                    raw = run_with_failure_capture(
+                        lambda: deps.source.fetch_kline_all(stock_code, 'minute1'),
+                        item.get('fallback_dates', [])
+                    )
+                local_api_end = time.time()
 
-            local = {
-                'stock': stock_item,
-                'index': stock_index,
-                'stock_code': stock_code,
-                'stock_name': stock_name,
-                'raw': raw or [],
-                'raw_for_csv': [],
-                'api_time': local_api_end - local_api_start,
-                'api_span': (local_api_start, local_api_end)
-            }
+                local = {
+                    'stock': stock_item,
+                    'index': stock_index,
+                    'stock_code': stock_code,
+                    'stock_name': stock_name,
+                    'raw': raw or [],
+                    'raw_for_csv': [],
+                    'api_time': local_api_end - local_api_start,
+                    'api_span': (local_api_start, local_api_end)
+                }
 
-            if raw and save_to_csv:
-                raw_for_csv = []
-                for item_raw in raw:
-                    if isinstance(item_raw, dict):
-                        item_raw['ts_code'] = ts_code
-                        raw_for_csv.append(item_raw)
-                local['raw_for_csv'] = raw_for_csv
+                if raw and save_to_csv:
+                    raw_for_csv = []
+                    for item_raw in raw:
+                        if isinstance(item_raw, dict):
+                            item_raw['ts_code'] = ts_code
+                            raw_for_csv.append(item_raw)
+                    local['raw_for_csv'] = raw_for_csv
 
-            deps.log_progress('数据采集', stock_index, total_stocks, stock_code or '', stock_name, local_api_end - local_api_start)
-            normalize_queue.put(local)
-            fetch_queue.task_done()
+                deps.log_progress('数据采集', stock_index, total_stocks, stock_code or '', stock_name, local_api_end - local_api_start)
+                normalize_queue.put(local)
+            except Exception as e:
+                deps.logger.exception(
+                    f"1min fetch_worker 异常（股票 {item.get('stock', {}).get('ts_code')}）: {e}")
+                try:
+                    normalize_queue.put({
+                        'stock': item.get('stock'),
+                        'index': item.get('index'),
+                        'stock_code': item.get('stock', {}).get('stock_code'),
+                        'stock_name': item.get('stock', {}).get('stock_name') or '',
+                        'raw': [],
+                        'raw_for_csv': [],
+                        'api_time': 0.0,
+                        'api_span': None,
+                        'fetch_error': str(e),
+                    })
+                except Exception:
+                    pass
+            finally:
+                fetch_queue.task_done()
 
     def normalize_worker() -> None:
         while True:

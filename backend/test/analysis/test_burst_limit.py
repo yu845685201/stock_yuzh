@@ -61,6 +61,30 @@ class TestBurstLimit:
         ])
         assert self.mod.analyze(df, _ctx()).value == "否"
 
+    def test_one_tick_below_board_not_burst_with_raw_close(self):
+        """P0-1 动态口径回归：最高价差一个最小报价单位够不到真实板价 → 否。
+
+        20261027 实盘形态（000995 皇台酒业）：preclose 13.37 → 真实板价
+        14.71，high 14.70（涨幅 9.9476% 在固定阈值 9.90 与动态阈值 9.9626
+        之间）——旧内联固定 −0.10 误判炸板，动态口径正确拒绝。
+        """
+        df = _df([
+            {"trade_date": "20260923", "change_rate": 4.7121, "close": 14.0,
+             "high": 14.70, "preclose": 13.37, "is_st": 0, "raw_close": 14.0},
+        ])
+        assert self.mod.analyze(df, _ctx()).value == "否"
+
+    def test_dynamic_threshold_rejects_between_fixed_and_dynamic(self):
+        """raw_close 在列时走动态阈值：涨幅 9.93% 落在固定阈值 9.90 与动态
+        阈值 9.95（est 昨收 10 元 → 下浮 0.05）之间 → 否（固定口径误判是）；
+        涨幅 9.96% 触板 → 是。"""
+        base = {"trade_date": "20260923", "close": 10.5, "preclose": 10.0,
+                "is_st": 0, "raw_close": 10.5}          # est = 10.5/1.05 = 10.0
+        between = _df([dict(base, change_rate=5.0, high=10.993)])   # gain 9.93
+        touched = _df([dict(base, change_rate=5.0, high=10.996)])   # gain 9.96
+        assert self.mod.analyze(between, _ctx()).value == "否"
+        assert self.mod.analyze(touched, _ctx()).value == "是"
+
     def test_open_at_limit_then_fall_counts_as_burst(self):
         """一字开板后回落：开盘即涨停价（high=涨停价）但收盘回落 → 是。"""
         df = _df([

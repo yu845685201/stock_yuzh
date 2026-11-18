@@ -88,20 +88,22 @@ def _build_orchestrator(monkeypatch, db, runners):
     return ReviewSyncOrchestrator(FakeConfigManager(CONFIG))
 
 
-# ---------- 一键模式：波次重排 ----------
+# ---------- 一键模式：依赖驱动调度（2026-11-01，替代波次 barrier） ----------
 
 def test_one_key_wave_layout(monkeypatch):
-    """kline 编入波1与独立源并发位（串行模式下按序），依赖源顺延波2/波3"""
+    """串行退化（1 worker）执行序 = 拓扑序：THS 只等公告/披露（不再串行在日K后），
+    factor/money_flow/估值自算等 kline 完成后才跑"""
     order = []
     orch = _build_orchestrator(monkeypatch, FakeOrchDB(), _make_runners(order))
     result = orch.execute(as_of=TUESDAY, include_kline=True)
 
     assert [name for name, _ in order] == [
-        'kline', 'index', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
-        'disclosure', 'lhb', 'margin', 'industry', 'hkex_connect', 'etf_scale',
-        'news', 'bj_kline',
-        'factor', 'money_flow', 'ths_finance',
-        'valuation_calc', 'sentiment_metrics',
+        'index', 'overseas', 'overseas_kline', 'valuation_idx', 'announcement',
+        'disclosure', 'lhb', 'margin', 'ths_finance', 'industry', 'bj_kline',
+        'news', 'hkex_connect', 'etf_scale',
+        # F15（方案 V1.0 §F15）：macro/option 入盘后编排
+        'macro', 'option',
+        'kline', 'factor', 'money_flow', 'valuation_calc', 'sentiment_metrics',
     ]
     assert [e['source'] for e in result['summary']] == [KLINE_SOURCE] + DEFAULT_SOURCES
     assert result['summary'][0]['source'] == KLINE_SOURCE
@@ -146,14 +148,14 @@ def test_one_key_kline_rowcheck_gate(monkeypatch):
 # ---------- 缺省模式回归：sync-review-data 行为不变 ----------
 
 def test_default_mode_unchanged(monkeypatch):
-    """include_kline 缺省 False：不编入 kline，波次与原 SOURCE_WAVES 一致"""
+    """include_kline 缺省 False：不编入 kline；执行序 = DEFAULT_SOURCES 序
+    （无 kline 在请求集，factor/money_flow 的依赖视为外部已满足，前置校验兜底）"""
     order = []
     orch = _build_orchestrator(monkeypatch, FakeOrchDB(), _make_runners(order))
     result = orch.execute(as_of=TUESDAY)
 
     assert 'kline' not in [name for name, _ in order]
-    assert [name for name, _ in order] == [
-        name for wave in SOURCE_WAVES for name in wave if name in DEFAULT_SOURCES]
+    assert [name for name, _ in order] == list(DEFAULT_SOURCES)
     assert result['summary'][0]['source'] == 'index'
     assert result['kline_check']  # 前置校验照旧执行并记录
 
@@ -168,6 +170,131 @@ def test_default_mode_kline_missing_aborts(monkeypatch):
     assert order == []
     assert result['summary'] == []
     assert any('sync-kline-day' in e for e in result['errors'])
+
+
+# ---------- 依赖驱动并发调度（2026-11-01：THS 不被日K阻塞） ----------
+
+def test_ths_finance_not_blocked_by_kline(monkeypatch):
+    """并发调度的核心收益：kline 慢（全市场逐股）不再阻塞 ths_finance——
+    公告/披露完成后 THS 立即启动，两者并行；其余快源流水消化不受影响"""
+    import threading
+    par_config = {'review_sync': {'parallel_sources': True, 'parallel_workers': 4,
+                                  'weekly_refresh_weekday': 6}}
+    started, finished = [], []
+    kline_block = threading.Event()
+
+    def make(name, block=None):
+        def runner(dry):
+            started.append(name)
+            if block is not None:
+                block.wait(5)  # 防死锁上限；主线程 finally 必 set
+            finished.append(name)
+            return {'success': True, 'stats': {'rows': 1}, 'errors': [], 'blocked': False}
+        return runner
+
+    runners = {name: (make(KLINE_SOURCE, block=kline_block) if name == KLINE_SOURCE
+                      else make(name))
+               for name in ALL_RUNNERS}
+
+    monkeypatch.setattr(review_sync_orchestrator, 'DatabaseConnection',
+                        lambda cm: FakeOrchDB())
+    monkeypatch.setattr(review_sync_orchestrator, 'write_review_report',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(ReviewSyncOrchestrator, '_build_runners',
+                        lambda self, as_of: runners)
+    orch = ReviewSyncOrchestrator(FakeConfigManager(par_config))
+    try:
+        result = orch.execute(as_of=TUESDAY, include_kline=True)
+    finally:
+        kline_block.set()
+
+    assert 'ths_finance' in started
+    # THS 启动早于 kline 完成——THS 只等公告/披露，不等日K（并行性）
+    assert started.index('ths_finance') < finished.index(KLINE_SOURCE)
+    assert result['success'] is True
+
+
+# ---------- 交易所系源串行化（2026-11-17：disclosure→lhb→margin 防同域并发风控） ----------
+
+def test_exchange_dependency_chain_declared():
+    """SOURCE_DEPENDENCIES 含 disclosure→lhb→margin 链，且全图无环"""
+    deps = review_sync_orchestrator.SOURCE_DEPENDENCIES
+    assert deps.get('lhb') == {'disclosure'}
+    assert deps.get('margin') == {'lhb'}
+
+    def reaches(src, dst, seen=None):
+        """src 沿依赖边出发能否到达 dst（含 src==dst）——用于环检测"""
+        seen = seen or set()
+        if src == dst:
+            return True
+        if src in seen:
+            return False
+        seen.add(src)
+        return any(reaches(d, dst, seen) for d in deps.get(src, set()))
+
+    for name, ds in deps.items():
+        for d in ds:
+            assert not reaches(d, name), f'{name} -> {d} 形成依赖环'
+
+
+def test_exchange_sources_serialized_by_dependency(monkeypatch):
+    """并行槽位空闲时 lhb/margin 仍必须等前序交易所源完成（同域防并发）；
+    依赖"完成即放行（无论成败）"：disclosure 失败也放行 lhb → margin"""
+    import threading
+    import time
+    par_config = {'review_sync': {'parallel_sources': True, 'parallel_workers': 4,
+                                  'weekly_refresh_weekday': 6}}
+    started, finished = [], []
+    disclosure_block = threading.Event()
+    observed = {}
+
+    def make(name, block=None, fail=False):
+        def runner(dry):
+            started.append(name)
+            if block is not None:
+                block.wait(5)  # 防死锁上限；观察线程必 set
+            finished.append(name)
+            r = {'success': True, 'stats': {'rows': 1}, 'errors': [], 'blocked': False}
+            if fail:
+                r['success'] = False
+                r['errors'] = [f'{name} simulated failure']
+            return r
+        return runner
+
+    runners = {
+        'disclosure': make('disclosure', block=disclosure_block, fail=True),
+        'lhb': make('lhb'),
+        'margin': make('margin'),
+    }
+
+    monkeypatch.setattr(review_sync_orchestrator, 'DatabaseConnection',
+                        lambda cm: FakeOrchDB())
+    monkeypatch.setattr(review_sync_orchestrator, 'write_review_report',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(ReviewSyncOrchestrator, '_build_runners',
+                        lambda self, as_of: runners)
+    orch = ReviewSyncOrchestrator(FakeConfigManager(par_config))
+
+    def watcher():
+        # 等 disclosure 进入运行中，再留一个抢跑窗口供 lhb/margin"若依赖失效则已启动"
+        for _ in range(50):
+            if 'disclosure' in started:
+                break
+            time.sleep(0.02)
+        time.sleep(0.15)
+        observed['lhb_held'] = 'lhb' not in started
+        observed['margin_held'] = 'margin' not in started
+        disclosure_block.set()  # 放行 disclosure（其 runner 返回失败）
+
+    threading.Thread(target=watcher, daemon=True).start()
+    result = orch.execute(sources='disclosure,lhb,margin', as_of=TUESDAY,
+                          include_kline=False)
+
+    assert observed.get('lhb_held') is True, 'lhb 在 disclosure 未完成时抢跑'
+    assert observed.get('margin_held') is True, 'margin 在前序源未完成时抢跑'
+    assert started == ['disclosure', 'lhb', 'margin']
+    assert finished.index('disclosure') < started.index('lhb')
+    assert finished.index('lhb') < started.index('margin')
 
 
 # ---------- 周频自动纳入 ----------
@@ -189,7 +316,7 @@ def test_weekly_auto_include_on_sunday_only(monkeypatch):
 
     order.clear()
     orch.execute(sources='index', as_of=SUNDAY, include_kline=True)
-    assert [name for name, _ in order] == ['kline', 'index']
+    assert [name for name, _ in order] == ['index', 'kline']
 
 
 # ---------- 公告历史回补（开发项 K：显式区间不推游标） ----------
@@ -443,3 +570,61 @@ def test_announcement_reclassify_dry_run_no_write(monkeypatch):
     r = m.reclassify(days_back=7, dry_run=True)
     assert r['stats']['changed'] == 1
     assert db.updates == []                       # dry-run 不写库
+
+
+# ---------- THS 财报：增量并发 + 连续失败快速中止（2026-11-01） ----------
+
+def test_ths_finance_fast_fail_aborts_increment(monkeypatch):
+    """增量模式连续 15 只失败：快速中止——未跑完全部目标（20 只只跑 15），
+    整源标失败并注明重跑续采；成功会清零连续计数"""
+    from datetime import datetime
+    from src.sync.ths_finance_manager import ThsFinanceManager
+    monkeypatch.setattr('src.sync.ths_finance_manager.write_review_report',
+                        lambda *a, **k: None)
+    m = ThsFinanceManager.__new__(ThsFinanceManager)
+    m.enabled = True
+    m.concurrent_workers = 2
+    m._sync_one = lambda code, share: 0  # 空结果（THS 瞬时拦截语义 = 失败）
+    calls = []
+
+    def counting_sync_one(code, share):
+        calls.append(code)
+        return 0
+    m._sync_one = counting_sync_one
+
+    stats = {'mode': '增量', 'targets': 20, 'rows': 0, 'stocks_ok': 0,
+             'stocks_empty': 0, 'failed': []}
+    result = {'success': False, 'stats': stats, 'errors': [], 'blocked': False}
+    m._run_concurrent(list('ABCDEFGHIJKLMNOPQRST'), {}, stats, result, datetime.now())
+
+    assert len(calls) == 15                       # 第 16 只起被中止（20 只目标未跑完）
+    assert len(stats['failed']) == 15
+    assert stats['stocks_empty'] == 15
+    assert any('快速中止' in e for e in result['errors'])
+
+
+def test_ths_finance_fast_fail_resets_on_success(monkeypatch):
+    """成功穿插清零连续计数：2 失败 + 1 成功 + 2 失败 + 1 成功……不触发中止"""
+    from datetime import datetime
+    from src.sync.ths_finance_manager import ThsFinanceManager
+    monkeypatch.setattr('src.sync.ths_finance_manager.write_review_report',
+                        lambda *a, **k: None)
+    m = ThsFinanceManager.__new__(ThsFinanceManager)
+    m.enabled = True
+    m.concurrent_workers = 2
+    calls = []
+
+    def alternating_sync_one(code, share):
+        calls.append(code)
+        # 每组 [失败,失败,成功] 循环：连续失败最多 2，永不达 15
+        return 0 if len(calls) % 3 != 0 else 5
+    m._sync_one = alternating_sync_one
+
+    stats = {'mode': '增量', 'targets': 30, 'rows': 0, 'stocks_ok': 0,
+             'stocks_empty': 0, 'failed': []}
+    result = {'success': False, 'stats': stats, 'errors': [], 'blocked': False}
+    m._run_concurrent([f'{i:06d}' for i in range(30)], {}, stats, result, datetime.now())
+
+    assert len(calls) == 30                       # 无中止，跑完全部
+    assert not result['errors']
+    assert stats['stocks_ok'] == 10 and stats['stocks_empty'] == 20

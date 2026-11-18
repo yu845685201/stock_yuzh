@@ -11,6 +11,8 @@ THS 财报指标同步（方案 4.3，M2；同花顺个股财务页=首选来源
 """
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +30,12 @@ from .review_common import (
 logger = logging.getLogger(__name__)
 
 MANIFEST_NAME = 'ths_finance_manifest.json'
+#: 连续失败快速中止阈值（2026-11-01）：连续 N 只空结果/异常判站点异常（风控/宕机），
+#: 中止本轮并标失败——避免逐只 30s 超时把披露高峰日拖成小时级泥潭；重跑自动续采。
+FAST_FAIL_CONSECUTIVE = 15
+#: 增量模式进度日志间隔（只数）；THS 单股 2s 限速下披露高峰日 1000+ 只全程静默
+#: 40+ 分钟无法判断死活（2026-10-31 实测教训），必须周期性打点。
+PROGRESS_LOG_EVERY = 100
 
 
 class ThsFinanceManager:
@@ -43,6 +51,10 @@ class ThsFinanceManager:
         ths_cfg = review.get('ths_finance', {}) or {}
         self.enabled = bool(ths_cfg.get('enabled', True))
         self.backfill_years = int(ths_cfg.get('backfill_years', 5))
+        # 增量模式源内并发数（2026-11-01）：每线程仍保持 ths_source 2s 限速，
+        # 总速率 = workers/2 请求每秒——并发 2 即 1 req/s，保守起步（用户拍板
+        # 2026-11-01 放开"各源内部串行"对外网源的限制，观察一个披露季无风控再议上调）
+        self.concurrent_workers = max(1, int(ths_cfg.get('concurrent_workers', 2)))
         from pathlib import Path
         from .review_common import tmp_dir
         self.manifest_path = Path(manifest_path) if manifest_path else tmp_dir() / MANIFEST_NAME
@@ -89,42 +101,13 @@ class ThsFinanceManager:
 
             total_share_map = self.db.fetch_latest_total_shares()
             manifest = load_manifest(self.manifest_path)
-            for i, code in enumerate(targets, 1):
-                if init_mode:
-                    done = manifest.get('stocks', {}).get(code, {}).get('done')
-                    if done:
-                        stats['stocks_ok'] += 1
-                        continue
-                try:
-                    share = total_share_map.get(code6_to_ts_code(code))
-                    n = self._sync_one(code, share)
-                    stats['rows'] += n
-                    if n:
-                        stats['stocks_ok'] += 1
-                        if init_mode:
-                            manifest.setdefault('stocks', {})[code] = {
-                                'done': True, 'rows': n,
-                                'updated_at': datetime.now().isoformat(timespec='seconds')}
-                            save_manifest(self.manifest_path, manifest)
-                    else:
-                        # 空结果可能是 THS 瞬时拦截：不记 done，标记 error 供末轮/重跑找回
-                        stats['stocks_empty'] += 1
-                        stats['failed'].append(code)
-                        if init_mode:
-                            manifest.setdefault('stocks', {})[code] = {
-                                'done': False, 'error': 'ths_empty',
-                                'updated_at': datetime.now().isoformat(timespec='seconds')}
-                            save_manifest(self.manifest_path, manifest)
-                except Exception as e:
-                    logger.exception(f'{code} THS 财报采集失败: {e}')
-                    stats['failed'].append(code)
-                    if init_mode:
-                        manifest.setdefault('stocks', {}).setdefault(code, {})['error'] = str(e)
-                        save_manifest(self.manifest_path, manifest)
-                if init_mode and i % 25 == 0:
-                    elapsed = (datetime.now() - started).total_seconds()
-                    eta = elapsed / i * (len(targets) - i) / 60
-                    logger.info(f'THS 财报进度 {i}/{len(targets)}，ETA {eta:.0f} 分钟')
+            if init_mode:
+                # 全量初始化保持串行：manifest 断点逐只落盘的顺序语义 + 低频操作
+                self._run_serial(targets, total_share_map, manifest, stats, started)
+            else:
+                # 日常增量并发（2026-11-01）：每线程保持 2s 限速，披露高峰日 1000+ 只
+                # 从 ~35 分钟压到 ~18 分钟；带进度打点与连续失败快速中止
+                self._run_concurrent(targets, total_share_map, stats, result, started)
             result['success'] = not stats['failed'] and stats['targets'] > 0
             if not stats['targets']:
                 result['success'] = True  # 当日无披露：空跑即成功
@@ -158,6 +141,105 @@ class ThsFinanceManager:
     def backfill_disclosure_dates(self) -> int:
         """披露日回填：disclosure_date = COALESCE(公告 ann_date, 官网 actual_date)（独立步骤）"""
         return self.db.backfill_financial_disclosure_dates()
+
+    # ---------- 采集循环（串行/并发两条路径） ----------
+
+    def _run_serial(self, targets: List[str], total_share_map: Dict[str, Any],
+                    manifest: Dict[str, Any], stats: Dict[str, Any],
+                    started: datetime) -> None:
+        """全量初始化路径：串行 + manifest 断点（顺序语义保留，见方案 4.3）"""
+        for i, code in enumerate(targets, 1):
+            done = manifest.get('stocks', {}).get(code, {}).get('done')
+            if done:
+                stats['stocks_ok'] += 1
+                continue
+            try:
+                share = total_share_map.get(code6_to_ts_code(code))
+                n = self._sync_one(code, share)
+                stats['rows'] += n
+                if n:
+                    stats['stocks_ok'] += 1
+                    manifest.setdefault('stocks', {})[code] = {
+                        'done': True, 'rows': n,
+                        'updated_at': datetime.now().isoformat(timespec='seconds')}
+                    save_manifest(self.manifest_path, manifest)
+                else:
+                    # 空结果可能是 THS 瞬时拦截：不记 done，标记 error 供末轮/重跑找回
+                    stats['stocks_empty'] += 1
+                    stats['failed'].append(code)
+                    manifest.setdefault('stocks', {})[code] = {
+                        'done': False, 'error': 'ths_empty',
+                        'updated_at': datetime.now().isoformat(timespec='seconds')}
+                    save_manifest(self.manifest_path, manifest)
+            except Exception as e:
+                logger.exception(f'{code} THS 财报采集失败: {e}')
+                stats['failed'].append(code)
+                manifest.setdefault('stocks', {}).setdefault(code, {})['error'] = str(e)
+                save_manifest(self.manifest_path, manifest)
+            if i % 25 == 0:
+                elapsed = (datetime.now() - started).total_seconds()
+                eta = elapsed / i * (len(targets) - i) / 60
+                logger.info(f'THS 财报进度 {i}/{len(targets)}，ETA {eta:.0f} 分钟')
+
+    def _run_concurrent(self, targets: List[str], total_share_map: Dict[str, Any],
+                        stats: Dict[str, Any], result: Dict[str, Any],
+                        started: datetime) -> None:
+        """日常增量路径：源内并发（concurrent_workers，每线程保持 THS 2s 限速）+
+        周期进度打点 + 连续失败快速中止。
+
+        ThsSource 的限速在请求前逐线程 sleep（interval 语义=每线程节拍），共享
+        Session 连接池线程安全（THS 接口无 cookie 会话依赖，UA+Referer 即可）；
+        stats 累计与失败清单由 _lock 串行化。快速中止：连续 FAST_FAIL_CONSECUTIVE
+        只空结果/异常判站点异常，取消未开始任务并整源标失败（重跑自动续采）。
+        """
+        lock = threading.Lock()
+        counters = {'consecutive_fail': 0, 'done': 0}
+        aborted = threading.Event()
+
+        def worker(code: str) -> None:
+            if aborted.is_set():
+                return
+            n = 0
+            try:
+                n = self._sync_one(code, total_share_map.get(code6_to_ts_code(code)))
+                ok = n > 0
+            except Exception as e:
+                logger.warning(f'{code} THS 财报采集失败: {e}')
+                ok = False
+            with lock:
+                counters['done'] += 1
+                if ok:
+                    stats['rows'] += n
+                    stats['stocks_ok'] += 1
+                    counters['consecutive_fail'] = 0
+                else:
+                    stats['stocks_empty'] += 1
+                    stats['failed'].append(code)
+                    counters['consecutive_fail'] += 1
+                if counters['done'] % PROGRESS_LOG_EVERY == 0 or counters['done'] == len(targets):
+                    elapsed = (datetime.now() - started).total_seconds()
+                    eta = elapsed / counters['done'] * (len(targets) - counters['done']) / 60
+                    logger.info(f'THS 财报进度 {counters["done"]}/{len(targets)}，'
+                                f'成功 {stats["stocks_ok"]}，失败 {len(stats["failed"])}，'
+                                f'ETA {eta:.0f} 分钟')
+                if counters['consecutive_fail'] >= FAST_FAIL_CONSECUTIVE \
+                        and not aborted.is_set():
+                    aborted.set()
+                    logger.warning(f'THS 财报连续 {counters["consecutive_fail"]} 只失败，'
+                                   f'快速中止本轮（重跑自动续采）')
+
+        if self.concurrent_workers <= 1:
+            for code in targets:
+                worker(code)
+        else:
+            with ThreadPoolExecutor(max_workers=self.concurrent_workers) as executor:
+                futures = {executor.submit(worker, code): code for code in targets}
+                for future in as_completed(futures):
+                    future.result()
+            if aborted.is_set():
+                result['errors'].append(
+                    f'连续 {FAST_FAIL_CONSECUTIVE} 只失败，快速中止（疑似 THS 站点异常/风控），'
+                    f'重跑自动续采')
 
     # ---------- 单股 ----------
 

@@ -188,6 +188,12 @@ class EtfScaleManager:
                 stats['szse_rows'] = len(szse_rows)
             except Exception as e:
                 stats['errors'].append(f'szse: {e}')
+            # F2（方案 V1.0 §F2）：自报数据日（etf_scale_daily 当日 max），供编排层数据日校验
+            try:
+                r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM etf_scale_daily')
+                stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
+            except Exception:
+                stats['data_date_max'] = None
         except ReviewBlockedError as e:
             result['success'] = False
             result['errors'].append(f'风控急停: {e}')

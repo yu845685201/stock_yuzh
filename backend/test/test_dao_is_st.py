@@ -103,9 +103,14 @@ class _CapturingReplaceDao(KlineDayDaoMixin):
         self.conn = _FakeConn()
         self.captured_sql = None
         self.captured_params = None
+        self.config_manager = None  # F3 replace 完整性校验读取配置（None → 默认 0.9）
 
     def get_connection(self):
         return self.conn
+
+    def fetch_one(self, query, params=None):
+        # F3：替换前旧行数查询——假 DAO 返回 0（首次建库语义，校验放行）
+        return {'n': 0}
 
 
 def _row(name):

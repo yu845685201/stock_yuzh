@@ -24,6 +24,52 @@ class TdxApiBusinessError(RuntimeError):
     """中间件业务层错误（code=-1）：调用方应视为瞬时故障，与"查询成功但结果为空"区分"""
 
 
+class TdxApiUnavailableError(RuntimeError):
+    """tdx-api 中间件不可用（F8，数据采集链路风险修复方案 V1.0）：
+    连接失败/重试耗尽/HTTP 5xx/业务错误码 code=-1 统一上抛，
+    与"查询成功但结果为空"（返回 []）严格区分。
+    err_type: 'conn'=连接/HTTP 层故障（中间件不可达，F5 熔断只计此类）
+              'biz'=业务错误码 code=-1（中间件可达但查询失败，慢性问题不计熔断）
+    全局退回开关：sync.tdx_strict_mode=false（strict 模式关闭后回落旧行为返回 None）。"""
+
+    def __init__(self, message: str, err_type: str = 'conn'):
+        super().__init__(message)
+        self.err_type = err_type
+
+
+_STRICT_MODE_CACHE: Optional[bool] = None
+
+
+def _tdx_strict_mode() -> bool:
+    """F8 全局总开关（sync.tdx_strict_mode，默认 true=严格模式开启）；进程内缓存"""
+    global _STRICT_MODE_CACHE
+    if _STRICT_MODE_CACHE is None:
+        try:
+            from ..config.config_manager import ConfigManager
+            _STRICT_MODE_CACHE = bool(ConfigManager().get('sync.tdx_strict_mode', True))
+        except Exception:
+            _STRICT_MODE_CACHE = True
+    return _STRICT_MODE_CACHE
+
+
+def middleware_health_check(base_url: str, timeout: int = 3) -> tuple:
+    """F4 中间件健康预检（数据采集链路风险修复方案 V1.0）。
+
+    GET {base_url}/api/health（中间件已有 handleHealthCheck），独立短超时、
+    不重试、不限速。返回 (ok, message)；失败 message 含错误摘要。
+    """
+    if not base_url:
+        return False, 'tdx-api base_url 未配置'
+    try:
+        resp = requests.get(f"{base_url.rstrip('/')}/api/health", timeout=timeout,
+                            proxies={'http': None, 'https': None})
+        if resp.status_code == 200:
+            return True, 'ok'
+        return False, f'HTTP {resp.status_code}'
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
 class TdxApiSource(DataSourceBase):
     """Tdx API数据源，获取K线数据"""
 
@@ -51,6 +97,10 @@ class TdxApiSource(DataSourceBase):
         self._connected = True
         return True
 
+    def health_check(self, timeout: int = 3) -> tuple:
+        """F4 健康预检：GET /api/health，独立短超时不重试。返回 (ok, message)"""
+        return middleware_health_check(self.base_url, timeout=timeout)
+
     def disconnect(self) -> None:
         """HTTP API无需显式断开"""
         self._connected = False
@@ -63,9 +113,19 @@ class TdxApiSource(DataSourceBase):
         """Tdx API不提供基本面数据"""
         return None
 
-    def _request(self, path: str, params: Dict[str, Any], retries: int = 3) -> Optional[Any]:
+    def _request(self, path: str, params: Dict[str, Any], retries: int = 3,
+                 allow_empty: bool = True) -> Optional[Any]:
+        """中间件请求统一出口。
+
+        F8（数据采集链路风险修复方案 V1.0）：allow_empty=False 且 sync.tdx_strict_mode
+        开启（默认）时，连接失败/重试耗尽/HTTP 5xx/业务错误码 code=-1 一律抛
+        TdxApiUnavailableError——把"中间件故障"与"查询成功但结果为空"严格区分；
+        allow_empty=True（默认）保持旧行为返回 None，兼容既有调用方。
+        """
         if not self.base_url:
             logger.error("Tdx API base_url未配置")
+            if not allow_empty and _tdx_strict_mode():
+                raise TdxApiUnavailableError('tdx-api base_url 未配置', err_type='conn')
             return None
 
         url = f"{self.base_url}{path}"
@@ -84,6 +144,7 @@ class TdxApiSource(DataSourceBase):
         def _on_error(attempt, e):
             logger.warning(f"Tdx API请求失败(第{attempt}次): {url} params={params} error={e}")
 
+        last_error: Optional[str] = None
         try:
             data = run_with_retry(
                 _attempt,
@@ -92,12 +153,18 @@ class TdxApiSource(DataSourceBase):
                 on_error=_on_error
             )
         except Exception as e:
+            last_error = f'{type(e).__name__}: {e}'
             logger.error(f"Tdx API重试耗尽: {url} params={params} error={e}")
+            if not allow_empty and _tdx_strict_mode():
+                raise TdxApiUnavailableError(f'{url} 重试耗尽: {last_error}', err_type='conn') from e
             return None
 
         if isinstance(data, dict) and data.get('code') not in (0, None):
             # 中间件业务层错误（code=-1）
-            logger.warning(f"Tdx API业务错误: {url} params={params} message={data.get('message')}")
+            message = data.get('message')
+            logger.warning(f"Tdx API业务错误: {url} params={params} message={message}")
+            if not allow_empty and _tdx_strict_mode():
+                raise TdxApiUnavailableError(f'{url} 业务错误: {message}', err_type='biz')
             return None
 
         if isinstance(data, dict):
@@ -130,14 +197,14 @@ class TdxApiSource(DataSourceBase):
             params = {'code': code, 'type': 'day'}
             if refresh:
                 params['refresh'] = 1
-            data = self._request('/api/kline-qfq', params)
+            data = self._request('/api/kline-qfq', params, allow_empty=False)
         else:
-            data = self._request('/api/kline', {'code': code, 'type': 'day'})
+            data = self._request('/api/kline', {'code': code, 'type': 'day'}, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def get_kline_raw_full(self, code: str) -> List[Dict[str, Any]]:
         """原始（不复权）日K全量（/api/kline-all type=day，含真实 amount）"""
-        data = self._request('/api/kline-all', {'code': code, 'type': 'day'})
+        data = self._request('/api/kline-all', {'code': code, 'type': 'day'}, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def get_kline_qfq_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -147,9 +214,9 @@ class TdxApiSource(DataSourceBase):
         - 传统路径：/api/kline-history（日期参数中间件未实现，仅最近N条，服务端全量回源）
         """
         if self.use_enhanced_api:
-            data = self._request('/api/kline-qfq', {'code': code, 'type': 'day', 'limit': limit})
+            data = self._request('/api/kline-qfq', {'code': code, 'type': 'day', 'limit': limit}, allow_empty=False)
         else:
-            data = self._request('/api/kline-history', {'code': code, 'type': 'day', 'limit': limit})
+            data = self._request('/api/kline-history', {'code': code, 'type': 'day', 'limit': limit}, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def get_kline_raw_tail(self, code: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -159,9 +226,9 @@ class TdxApiSource(DataSourceBase):
         - 传统路径：/api/kline-all?limit=N（服务端全量拼接后截取）
         """
         if self.use_enhanced_api:
-            data = self._request('/api/kline-recent', {'code': code, 'type': 'day', 'limit': limit})
+            data = self._request('/api/kline-recent', {'code': code, 'type': 'day', 'limit': limit}, allow_empty=False)
         else:
-            data = self._request('/api/kline-all', {'code': code, 'type': 'day', 'limit': limit})
+            data = self._request('/api/kline-all', {'code': code, 'type': 'day', 'limit': limit}, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def get_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
@@ -170,7 +237,7 @@ class TdxApiSource(DataSourceBase):
             'code': code,
             'type': kline_type
         }
-        data = self._request('/api/kline-all', params)
+        data = self._request('/api/kline-all', params, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def get_kline_history(
@@ -192,7 +259,7 @@ class TdxApiSource(DataSourceBase):
         if end_date:
             params['end_date'] = end_date
 
-        data = self._request('/api/kline-history', params)
+        data = self._request('/api/kline-history', params, allow_empty=False)
         return data if isinstance(data, list) else []
 
     def fetch_kline_all(self, code: str, kline_type: str = 'minute1') -> List[Dict[str, Any]]:
@@ -262,8 +329,9 @@ class TdxApiSource(DataSourceBase):
             return []
         last_bar = _date.fromisoformat(max(index_days))
 
-        # 尾部（K线未覆盖）用 workday 节假日表推断，仅信任 2026 内（表覆盖范围）
-        table_horizon = _date(2026, 12, 31)
+        # 尾部（K线未覆盖）用 workday 节假日表推断，仅信任表覆盖范围内
+        # （F7，2026-11-18：Go 表已补 2027 预测值——国务院公布后须校正并同步此 horizon）
+        table_horizon = _date(2027, 12, 31)
         tail_days = set()
         tail_start = last_bar + _timedelta(days=1)
         if tail_start <= table_horizon:

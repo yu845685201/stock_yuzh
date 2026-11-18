@@ -206,6 +206,17 @@ class TestMaArrangement:
         res = MaArrangement().analyze(_df([10.0] * 140), _ctx())
         assert res.value == "纠缠"
 
+    def test_equal_ma5_ma10_not_strict_order(self):
+        """平价防护：前 5 日和恰等于后 5 日和 → MA5 与 MA10 数学相等，多空严格序
+        不成立 → 纠缠（20261027 实盘 002182/002488：rolling 浮点误差曾把相等
+        翻成空头排列，链/面板互斥翻车）。"""
+        first5 = [11.12, 10.7, 11.01, 10.98, 10.88]    # 和 = 54.69
+        last5 = [11.13, 10.94, 11.11, 11.08, 10.43]    # 和 = 54.69
+        res = MaArrangement().analyze(_df([10.0] * 130 + first5 + last5), _ctx())
+        assert res.value == "纠缠"
+        # detail 的 MA 值应严格相等（同精度输出）
+        assert res.detail["ma5"] == res.detail["ma10"]
+
     def test_cross_detail_consistency(self):
         """若命中「收盘上穿MA60」，则当日 close>MA60 且前一日 close≤MA60。"""
         df = _df(list(np.concatenate([np.linspace(100, 50, 100),

@@ -108,7 +108,7 @@ class ChainEngine:
         domain = get_domain(chain.domain)
 
         with DataReader(self.config_manager) as reader:
-            as_of = domain.resolve_as_of(reader, opts.as_of)
+            as_of = domain.resolve_as_of(reader, opts.as_of, self.config_manager)
             universe = domain.load_universe(reader, self.config_manager, as_of)  # P4-3 as-of 感知建池
             if not universe:
                 raise ValueError(domain.universe_empty_error)

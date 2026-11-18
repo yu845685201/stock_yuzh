@@ -96,6 +96,22 @@ class IndexValuationManager:
             if not dry_run and perf_rows:
                 self.db.upsert_index_klines(perf_rows)
             result['success'] = stats['indices_ok'] > 0
+            # F2（方案 V1.0 §F2）：自报数据日——本次入库行的最大 trade_date（无新行
+            # 则报库内 max），供编排层"成功 ≠ 有当日数据"校验降级
+            candidate_dates = [p.get('trade_date') for p in rows
+                               if isinstance(p, dict) and p.get('trade_date')]
+            perf_dates = [p.get('trade_date') for p in perf_rows
+                          if isinstance(p, dict) and p.get('trade_date')]
+            all_dates = [str(d) for d in candidate_dates + perf_dates if d]
+            if all_dates:
+                stats['data_date_max'] = max(all_dates)
+            else:
+                try:
+                    r = self.db.execute_query(
+                        'SELECT MAX(trade_date) AS mx FROM index_valuation_daily')
+                    stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
+                except Exception:
+                    stats['data_date_max'] = None
         except Exception as e:
             logger.exception(f'指数估值采集失败: {e}')
             result['errors'].append(str(e))

@@ -38,6 +38,17 @@ from ..analysis.modules.volume_surge import VolumeSurge
 #: 链 module_days = max(effective_lookback) = 缠论 520，引擎取 nth_back(module_days + 2)
 INDICATOR_WINDOW_DAYS = 522
 
+
+def panel_window_start(reader, as_of: str):
+    """面板窗口起点 = ``nth_back(INDICATOR_WINDOW_DAYS)``，与链引擎
+    ``nth_back(module_days + 2)`` 同一表达式（逐字节同输入红线）。
+
+    勿加 ``-1``：那会让面板少 1 行，ewm 播种与平价股浮点边界随之漂移
+    （20261027 对拍 2 处均线排列失配的共因之一）。常量闸见
+    ``test_review_indicator_parity.py``。
+    """
+    return reader.nth_trading_day_back(as_of, INDICATOR_WINDOW_DAYS)
+
 #: 面板复算的模块（顺序即输出列序；后两个供交叉榜使用）
 _PANEL_MODULES = [
     MacdState(), KdjState(), RsiState(), BollPos(), AtrPct(), ObvTrend(),

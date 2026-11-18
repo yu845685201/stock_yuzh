@@ -132,7 +132,10 @@ class Kline1MinSyncUseCase:
                 if start_date and end_date:
                     trade_dates = self.trade_calendar.get_trade_dates(start_date, end_date)
                 else:
-                    today_str = date.today().strftime('%Y-%m-%d')
+                    # F12（数据采集链路风险修复方案 V1.0）：跨零点补跑/盘中误跑防呆
+                    # （P-11 同款口径，日K已在 _latest_closed_trade_date 修复，
+                    # 1min 经 TradeCalendarPortAdapter 暴露同款逻辑）
+                    today_str = self.trade_calendar.latest_closed_trade_date()
                     trade_dates = self.trade_calendar.get_trade_dates(today_str, today_str)
 
                 if not trade_dates:
@@ -226,6 +229,18 @@ class Kline1MinSyncUseCase:
                 pipeline_span = (pipeline_start, pipeline_end)
                 pipeline_time = pipeline_end - pipeline_start
             else:
+                # F12（方案 V1.0 §F12）：单股隔离——一股失败不再整场中断
+                # （对齐日K safe_process_one_stock 模式）
+                def safe_process_one_stock(stock, idx):
+                    try:
+                        return process_one_stock(stock, idx, ctx=ctx, deps=deps)
+                    except Exception as e:
+                        self.logger.exception(
+                            f"1分钟单股采集失败: {stock.get('ts_code')} {e}")
+                        return {'records': 0, 'db_rows': 0,
+                                'error': f"{stock.get('ts_code')}: {e}",
+                                'anomalies': []}
+
                 for batch_no, batch_start in enumerate(range(0, total_stocks, stock_batch_size), start=1):
                     stock_batch = stocks[batch_start:batch_start + stock_batch_size]
                     batch_end = batch_start + len(stock_batch)
@@ -237,14 +252,14 @@ class Kline1MinSyncUseCase:
                         from concurrent.futures import ThreadPoolExecutor, as_completed
                         with ThreadPoolExecutor(max_workers=max_workers) as executor:
                             futures = [
-                                executor.submit(process_one_stock, s, batch_start + i + 1, ctx=ctx, deps=deps)
+                                executor.submit(safe_process_one_stock, s, batch_start + i + 1)
                                 for i, s in enumerate(stock_batch)
                             ]
                             for future in as_completed(futures):
                                 merge_stock_result(future.result(), ctx)
                     else:
                         for i, stock in enumerate(stock_batch):
-                            merge_stock_result(process_one_stock(stock, batch_start + i + 1, ctx=ctx, deps=deps), ctx)
+                            merge_stock_result(safe_process_one_stock(stock, batch_start + i + 1), ctx)
 
                     self.logger.info(
                         f"1分钟K线批次完成: 第{batch_no}/{total_batches}批, 累计记录{result['records']}条, 累计写库{result['db_rows']}条"
@@ -311,6 +326,12 @@ class Kline1MinSyncUseCase:
         result['duration'] = timing['total_time']
         if failed_dates:
             result['failed_dates'] = sorted(failed_dates)
+            # F12（方案 V1.0 §F12）：failed_dates 进 errors——原实现只进报告不进错误清单
+            result['errors'].append(
+                f"{len(failed_dates)} 个交易日 1 分钟数据采集失败（清单见 failed_dates）")
+            if len(failed_dates) >= len(trade_dates or []) and trade_dates:
+                # 全部目标日期失败 → 全场失败（如中间件不可用），不再"成功 0 记录"
+                result['success'] = False
         result['report_path'] = self.report.write_report(result, anomalies, timing)
 
         return result
