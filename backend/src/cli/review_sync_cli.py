@@ -51,6 +51,18 @@ def _acquire_szse_backfill_lock():
     return fd
 
 
+def orchestrator_exit_code(result: dict) -> int:
+    """编排结果 → 进程退出码（每日复盘采集与分析闭环技术方案 V1.0 §6.1）。
+
+    约定：完整执行 0、失败 1、参数错误 2、部分完成 3。execution_status 由
+    编排器记账层产出（'0'/'1'/'3'）；早退（前置校验/中间件预检失败等无记账
+    场景）回退 success 布尔映射 0/1。"""
+    execution_status = result.get('execution_status')
+    if execution_status in ('0', '1', '3'):
+        return int(execution_status)
+    return 0 if result.get('success') else 1
+
+
 @click.command('sync-review-data')
 @click.option('--sources', default='all',
               help='逗号分隔子集：index,factor,overseas,overseas_kline,valuation_idx,'
@@ -66,11 +78,12 @@ def sync_review_data(ctx, sources, as_of, dry_run):
     from src.sync.review_sync_orchestrator import ReviewSyncOrchestrator
     try:
         orchestrator = ReviewSyncOrchestrator(ctx.obj['config_manager'])
+        click.echo(f"开始每日复盘数据采集（as_of={as_of or '当日'}, sources={sources}）...")
+        result = orchestrator.execute(sources=sources, as_of=as_of, dry_run=dry_run)
     except ValueError as e:
+        # 未知源名等参数错误（含 execute 内 _parse_sources 抛出）→ 退出码 2
         click.echo(f"\n✗ 参数错误: {e}")
-        return
-    click.echo(f"开始每日复盘数据采集（as_of={as_of or '当日'}, sources={sources}）...")
-    result = orchestrator.execute(sources=sources, as_of=as_of, dry_run=dry_run)
+        sys.exit(2)
 
     if result['kline_check']:
         click.echo(f"  - 日K前置校验: {result['kline_check']}")
@@ -86,6 +99,9 @@ def sync_review_data(ctx, sources, as_of, dry_run):
                        f"{e['duration']}s）{(' ' + e['detail']) if e['detail'] else ''}")
     if result.get('report_path'):
         click.echo(f"  - 汇总报告: {result['report_path']}")
+    code = orchestrator_exit_code(result)
+    click.echo(f"  - 退出码: {code}")
+    sys.exit(code)
 
 
 @click.command('sync-review-all')
@@ -103,13 +119,14 @@ def sync_review_all(ctx, sources, as_of, skip_kline, dry_run):
     from src.sync.review_sync_orchestrator import ReviewSyncOrchestrator
     try:
         orchestrator = ReviewSyncOrchestrator(ctx.obj['config_manager'])
+        kline_mode = '跳过（--skip-kline）' if skip_kline else '内置同步（与独立源并发）'
+        click.echo(f"开始盘后一键采集（as_of={as_of or '当日'}, sources={sources}, 日K={kline_mode}）...")
+        result = orchestrator.execute(sources=sources, as_of=as_of, dry_run=dry_run,
+                                      include_kline=not skip_kline)
     except ValueError as e:
+        # 未知源名等参数错误（含 execute 内 _parse_sources 抛出）→ 退出码 2
         click.echo(f"\n✗ 参数错误: {e}")
-        return
-    kline_mode = '跳过（--skip-kline）' if skip_kline else '内置同步（与独立源并发）'
-    click.echo(f"开始盘后一键采集（as_of={as_of or '当日'}, sources={sources}, 日K={kline_mode}）...")
-    result = orchestrator.execute(sources=sources, as_of=as_of, dry_run=dry_run,
-                                  include_kline=not skip_kline)
+        sys.exit(2)
 
     if result['kline_check']:
         click.echo(f"  - 日K门控: {result['kline_check']}")
@@ -125,6 +142,9 @@ def sync_review_all(ctx, sources, as_of, skip_kline, dry_run):
                        f"{e['duration']}s）{(' ' + e['detail']) if e['detail'] else ''}")
     if result.get('report_path'):
         click.echo(f"  - 汇总报告: {result['report_path']}")
+    code = orchestrator_exit_code(result)
+    click.echo(f"  - 退出码: {code}")
+    sys.exit(code)
 
 
 @click.command('sync-freshness-check')

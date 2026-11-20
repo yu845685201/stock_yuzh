@@ -38,11 +38,15 @@ _BASE_POSITIONING = {
     '高潮': '谨慎乐观、防分歧兑现——高位兑现为主不追高，炸板率与梯队晋级验证优先于进攻',
     '回暖': '中性偏多、跟随确认——主线与梯队验证通过后再参与，不左侧抢跑',
     '震荡': '中性观望、等方向——主线清晰前降低操作频率，重点跟踪量能与梯队验证',
+    # 组合态单独处理（技术方案 V1.0 §8.2：不通过子串包含"回暖"推导中性偏多，
+    # 组合态话术不得偏向单边定性）
+    '回暖/震荡': '中性偏观望、方向待确认——回暖与震荡证据并存时不单边定性：'
+                 '主线与梯队验证通过后再参与，主线不清晰时降低操作频率',
     '冰点': '观察等企稳——跌停家数收敛与溢价转正前不左侧；企稳信号=跌停<涨停 且 溢价>0',
     '退潮': '防守降仓——避开高位股与断板梯队，等待高度重建或冰点后的企稳信号',
 }
 
-#: 兜底倾向（组合定位如「回暖/震荡」或未知状态时，按震荡口径处理）
+#: 未知状态兜底倾向（按震荡口径处理；组合态已有专属映射，不再兜底到"回暖"）
 _FALLBACK_POSITIONING = _BASE_POSITIONING['震荡']
 
 #: 盘前情景锚定的外围指数（A 股联动最强；数据来自报告口径 overseas_indices）
@@ -253,10 +257,13 @@ def build(agg: Dict[str, Any], review_cfg: Optional[Dict[str, Any]] = None) -> L
 
 
 def _match_positioning(position: str) -> str:
-    """组合定位（如「回暖/震荡」）→ 取首个可识别态；未知态走震荡兜底。"""
-    for key in ('高潮', '冰点', '退潮', '回暖', '震荡'):
-        if key in position:
-            return _BASE_POSITIONING[key]
+    """情绪定位 → 基准倾向（精确枚举映射，技术方案 V1.0 §8.2）。
+
+    组合态「回暖/震荡」有专属映射，不通过子串包含"回暖"推导为中性偏多；
+    未知态（如试用版判据待校准）走震荡兜底。
+    """
+    if position in _BASE_POSITIONING:
+        return _BASE_POSITIONING[position]
     return _FALLBACK_POSITIONING
 
 
@@ -435,13 +442,15 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                        'text': '⏳ 待补：候选池数据缺失（截面为空），转天买入候选无法生成'})
         return blocks
 
-    # 情绪开放度（与基准定位同一匹配顺序：高潮 → 冰点 → 退潮 → 回暖/震荡）
+    # 情绪开放度（精确枚举映射，技术方案 V1.0 §8.2：不通过子串包含推导——
+    # 原写法 '回暖' in position 会把未来可能新增的组合态（如"回暖初期"）误判
+    # 为四类全开；四态字符串与 aggregator._sentiment_cycle 的 cycle 赋值一致）
     sentiment = (agg.get('sentiment') or {}).get('data') or {}
     position = str(((sentiment.get('cycle') or {}).get('position')) or '')
-    if '高潮' in position:
+    if position == '高潮':
         openness, open_types = ('高潮（防分歧）：仅开放 R1 梯队接力观察，'
                                 '强承接确认前不进'), ('R1',)
-    elif '冰点' in position:
+    elif position == '冰点':
         blocks.append({'type': 'para',
                        'text': '情绪定位冰点：本轮不出买入候选；企稳信号（跌停<涨停 且 '
                                '昨日涨停溢价>0 且 空间板高度回升）触发后，下一报告期再开放候选'})
@@ -449,7 +458,7 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                        'text': '候选为规则筛选的观察名单，非推荐；是否买入由转天走势对决策树'
                                '的验证决定；判据初版待校准，本报告不构成投资建议'})
         return blocks
-    elif '退潮' in position:
+    elif position == '退潮':
         blocks.append({'type': 'para',
                        'text': '情绪定位退潮：本轮不出买入候选（防守降仓期，避开高位股与'
                                '断板梯队）；高度重建或冰点企稳后再开放'})
@@ -457,7 +466,7 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                        'text': '候选为规则筛选的观察名单，非推荐；判据初版待校准，'
                                '本报告不构成投资建议'})
         return blocks
-    elif '回暖' in position or '震荡' in position:
+    elif position == '回暖/震荡':
         openness = '回暖/震荡：四类候选全开'
         open_types = ('R1', 'R2', 'R3', 'R4')
     else:

@@ -159,7 +159,7 @@ def fundamental_dim(digest: Any) -> Optional[float]:
 def event_dim(announcements: Optional[List[dict]]) -> Optional[float]:
     """P4-2 事件维（0~100，初版线性映射**未校准**）：归因极性锚。
 
-    利好 80 / 利空 20 / 其他极性 40 / 无利好显式结论（题材炒作或跟风上涨）
+    利好 80 / 利空 20 / 其他极性 40 / 无利好显式结论（窗口内未识别催化）
     10；窗口内无公告 → None（缺维，与"有公告但归因为无利好"区分）。
     """
     if not announcements:

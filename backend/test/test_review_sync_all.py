@@ -628,3 +628,32 @@ def test_ths_finance_fast_fail_resets_on_success(monkeypatch):
     assert len(calls) == 30                       # 无中止，跑完全部
     assert not result['errors']
     assert stats['stocks_ok'] == 10 and stats['stocks_empty'] == 20
+
+
+# ---------- CLI 退出码映射（技术方案 §6.1：0 完整 / 1 失败 / 2 参数错误 / 3 部分） ----------
+
+class TestOrchestratorExitCode:
+    from src.cli.review_sync_cli import orchestrator_exit_code as _fn  # noqa: 模块级引用走函数内 import
+
+    def test_full_execution_is_zero(self):
+        from src.cli.review_sync_cli import orchestrator_exit_code
+        assert orchestrator_exit_code({'execution_status': '0'}) == 0
+
+    def test_failed_is_one(self):
+        from src.cli.review_sync_cli import orchestrator_exit_code
+        assert orchestrator_exit_code({'execution_status': '1'}) == 1
+
+    def test_partial_is_three(self):
+        from src.cli.review_sync_cli import orchestrator_exit_code
+        assert orchestrator_exit_code({'execution_status': '3'}) == 3
+
+    def test_early_abort_falls_back_to_success_flag(self):
+        # 早退路径（前置校验/中间件预检失败）无记账 → 按 success 布尔回退
+        from src.cli.review_sync_cli import orchestrator_exit_code
+        assert orchestrator_exit_code({'execution_status': None, 'success': False}) == 1
+        assert orchestrator_exit_code({'execution_status': None, 'success': True}) == 0
+
+    def test_dry_run_success_is_zero(self):
+        from src.cli.review_sync_cli import orchestrator_exit_code
+        # dry-run 不记账：execution_status=None、success=True
+        assert orchestrator_exit_code({'execution_status': None, 'success': True}) == 0

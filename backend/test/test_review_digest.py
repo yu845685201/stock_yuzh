@@ -167,10 +167,15 @@ def test_render_tldr_full_t1():
 
 
 def test_render_tldr_degrade_t1():
-    """T1 渲染降级：缺 note 字段逐项省略；倾向回退 _match_positioning 规则表"""
+    """T1 渲染降级：缺 note 字段逐项省略；倾向回退 _match_positioning 规则表
+
+    技术方案 V1.0 §8.2：组合态「回暖/震荡」有专属话术（中性偏观望、不单边定性），
+    不再通过子串包含"回暖"回退为"中性偏多"词条。
+    """
     html = _render_tldr({'trunk': None, 'bias': None}, {'position': '回暖/震荡'}, {}, {})
     assert '主干' not in html and '两市' not in html and '涨停' not in html
-    assert '中性偏多、跟随确认' in html     # 回暖词条回退
+    assert '中性偏观望、方向待确认' in html     # 组合态专属词条（不单边定性）
+    assert '中性偏多' not in html
     html2 = _render_tldr({'trunk': '主干句', 'bias': None},
                          {'position': '冰点'}, {}, {})
     assert '观察等企稳' in html2            # 冰点词条回退

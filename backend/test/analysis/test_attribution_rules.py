@@ -98,7 +98,7 @@ class TestPickAttribution:
         assert src['ann_id'] == 2          # 同优先级取最新
 
     def test_no_bulls_fallback(self):
-        """仅利空/中性公告 → 题材炒作或跟风上涨（利好=0 显式结论）。"""
+        """仅利空/中性公告 → 窗口内未识别催化（利好=0 显式结论）。"""
         anns = [
             {'ann_id': 1, 'ann_date': '20260930', 'ann_type': '解禁', 'title': '限售股上市流通'},
             {'ann_id': 2, 'ann_date': '20260929', 'ann_type': '定期报告', 'title': '第三季度报告'},

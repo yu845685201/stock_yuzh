@@ -60,8 +60,10 @@ ANN_TYPE_POLARITY = {
     '定期报告': '中性', '其他': '中性',
 }
 
-#: 利好=0 的显式结论（不硬凑归因）
-FALLBACK_LABEL = '题材炒作或跟风上涨'
+#: 无利好显式结论（不硬凑归因）。技术方案 V1.0 §8.3：原「题材炒作或跟风上涨」
+#: 伪归因（把缺证据说成有结论）改为诚实标签——关键词匹配说明存在相关公告，
+#: 不等于证实上涨因果；41 家涨停中 39 家默认归因时应显示「窗口内未识别催化」
+FALLBACK_LABEL = '窗口内未识别催化'
 
 #: 公告覆盖断代日（YYYYMMDD；此前仅定期报告，非定期类自该日起才有量）
 COVERAGE_CUTOFF = '20260928'
@@ -94,7 +96,7 @@ def classify(title: str, ann_type: str) -> Tuple[str, str]:
 def pick_attribution(announcements: List[dict]) -> Tuple[str, str, Optional[dict]]:
     """从个股公告窗口选最佳归因：``(标签, 极性, 源公告)``。
 
-    优先级：关键词利好 > 利好类型 > 无利好（题材炒作或跟风上涨）；
+    优先级：关键词利好 > 利好类型 > 无利好（窗口内未识别催化）；
     同优先级取窗口内最新一条（ann_date 降序兜底）。
     """
     if not announcements:

@@ -22,12 +22,22 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait as wait_futures
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config.config_manager import ConfigManager
 from ..database.connection import DatabaseConnection
 from .review_common import write_review_report
+
+# D01（每日复盘采集与分析闭环技术方案 V1.0 §3/§6.1）：作业/分区记账与源期望
+from .collection_contracts import (
+    PartitionStatus,
+    RunContext,
+    RunMode,
+    entry_to_partition_result,
+    new_id,
+)
+from .source_expectations import DATASET_REGISTRY, expected_partition
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +136,7 @@ class ReviewSyncOrchestrator:
 
     def execute(self, sources: Optional[str] = None, as_of: Optional[str] = None,
                 dry_run: bool = False, include_kline: bool = False) -> Dict[str, Any]:
-        started = datetime.now()
+        started = datetime.now(timezone.utc)
         requested = self._parse_sources(sources)
         as_of_date = self._parse_as_of(as_of)
         as_of_str = as_of_date.strftime('%Y%m%d')
@@ -134,7 +144,29 @@ class ReviewSyncOrchestrator:
         result: Dict[str, Any] = {
             'success': False, 'as_of': as_of_str, 'sources': requested, 'summary': [],
             'errors': [], 'kline_check': None, 'duration': 0.0, 'report_path': None,
+            # D01 作业记账（技术方案 §6.1：编排结果输出 job_id 与分层状态）
+            'job_id': None, 'execution_status': None, 'data_readiness': None,
         }
+
+        # T10（技术方案 §6.1）：调度启动前检查依赖图循环，删除死锁时强行提交
+        # 任务绕过依赖的做法（原"防意外死锁强提"分支随本次改造移除）
+        cycles = self._check_dependency_cycles(SOURCE_DEPENDENCIES)
+        if cycles:
+            result['errors'].append(
+                f'源依赖声明存在循环依赖，调度拒绝启动: {cycles}（请修正 SOURCE_DEPENDENCIES）')
+            result['report_path'] = self._write_report(result, started)
+            return result
+
+        # D01：运行上下文（目标业务日与运行模式解耦的第一步——显式 as_of 记为
+        # BACKFILL，缺省 DAILY；runner 侧行为解耦属 D04/D05 范畴）
+        ctx = RunContext(
+            job_id=new_id(),
+            target_date=as_of_str,
+            run_mode=RunMode.BACKFILL if as_of else RunMode.DAILY,
+            cutoff_at=started,
+            dry_run=dry_run,
+        )
+        result['job_id'] = ctx.job_id
 
         if include_kline:
             # 一键模式：缺省源集在周频日自动并入 concept/unlock（显式 --sources 以显式为准）
@@ -181,6 +213,9 @@ class ReviewSyncOrchestrator:
                     logger.info(f'中间件健康预检通过: {base_url}')
 
         wave_requested = list(requested) + ([KLINE_SOURCE] if include_kline else [])
+        # D01：作业记账开始（调度前；dry-run 不写任何控制表——T11 零业务写入）
+        if not dry_run:
+            self._account_job_start(ctx, requested)
         summary_by_source, kline_gate_detail = self._run_waves(
             wave_requested, runners, dry_run,
             include_kline=include_kline, as_of_str=as_of_str)
@@ -196,7 +231,17 @@ class ReviewSyncOrchestrator:
 
         result['success'] = any(e['status'] == '成功' for e in result['summary']) \
             and not all(e['status'] in ('失败', '跳过') for e in result['summary'])
-        result['duration'] = (datetime.now() - started).total_seconds()
+        result['duration'] = (datetime.now(timezone.utc) - started).total_seconds()
+
+        # D01：作业记账收尾——逐源 PartitionResult 写 sync_partition + finish_job
+        # （§6.1：NOT_DUE 不算执行失败；execution_status 完整=0/失败=1/部分=3，
+        # CLI 退出码接线属 D05）
+        execution_status, data_readiness = self._derive_execution_status(summary)
+        result['execution_status'] = execution_status
+        result['data_readiness'] = data_readiness
+        if not dry_run:
+            self._account_job_finish(ctx, summary, execution_status, data_readiness,
+                                     result)
 
         # F1（方案 V1.0 §F1）：数据新鲜度巡检挂载——编排末尾自动跑，红灯进
         # result['freshness_red'] 并入汇总报告（不改变各源自身状态）
@@ -325,12 +370,18 @@ class ReviewSyncOrchestrator:
                 if not pending_set and not running:
                     break
                 if not progressed and not running:
-                    # 防意外死锁：存在就绪但未提交的源（理论上不可达），强制提交
+                    # T10（技术方案 §6.1）：依赖无法满足（循环依赖或依赖源未注册）时
+                    # 显式失败，不再强行提交绕过依赖（原"防意外死锁强提"分支已删除，
+                    # 循环依赖在 execute() 启动前已拦截；此处兜底依赖源 runner 未注册）
                     stuck = [s for s in pending_order if s in pending_set]
-                    logger.warning(f'依赖等待超时，强制提交剩余源: {stuck}')
                     for s in stuck:
                         pending_set.discard(s)
-                        running[executor.submit(self._run_source, s, runners[s], dry_run)] = s
+                        dep_txt = '、'.join(sorted(effective_deps(s))) or '无'
+                        summary[s] = {
+                            'source': s, 'label': SOURCE_LABELS.get(s, s),
+                            'status': '失败', 'rows': 0, 'duration': 0.0,
+                            'detail': f'依赖无法满足: {dep_txt}（循环依赖或依赖源未注册）'}
+                    logger.error(f'依赖无法满足，以下源显式失败（不绕过依赖）: {stuck}')
         # runner 未注册的源补"跳过"
         for s in requested:
             if s not in summary:
@@ -441,6 +492,131 @@ class ReviewSyncOrchestrator:
             return False, f'日K行数校验未过（{detail}），日K依赖源跳过'
         return True, f'内置日K已同步：{detail}'
 
+    # ---------- D01 作业记账与依赖检查 ----------
+
+    @staticmethod
+    def _check_dependency_cycles(deps: Dict[str, set]) -> List[str]:
+        """源依赖图循环检测（T10）：DFS 三色标记，返回环描述（无环返回空）"""
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {n: WHITE for n in deps}
+        stack: List[str] = []
+        cycles: List[str] = []
+
+        def dfs(node: str) -> None:
+            color[node] = GRAY
+            stack.append(node)
+            for nxt in sorted(deps.get(node, set())):
+                if nxt not in deps:
+                    continue  # 依赖声明外的源视为外部已满足（单源补跑语义）
+                if color.get(nxt, WHITE) == GRAY:
+                    ring = stack[stack.index(nxt):] + [nxt]
+                    cycles.append(' → '.join(ring))
+                elif color.get(nxt, WHITE) == WHITE:
+                    dfs(nxt)
+            stack.pop()
+            color[node] = BLACK
+
+        for n in sorted(deps):
+            if color.get(n) == WHITE:
+                dfs(n)
+        return cycles
+
+    def _account_job_start(self, ctx: RunContext, requested: List[str]) -> None:
+        """创建 sync_job（RUNNING）。记账失败只告警，不影响采集主流程"""
+        try:
+            self.db.ensure_collection_tables()
+            with self.db.get_connection() as conn:
+                self.db.create_job_tx(
+                    conn, ctx.job_id, ctx.target_date, ctx.run_mode.value,
+                    cutoff_at=ctx.cutoff_at, requested_sources=requested)
+                conn.commit()
+        except Exception as e:
+            logger.warning(f'采集作业记账启动失败（不影响采集）: {e}')
+
+    def _derive_execution_status(self, summary: List[Dict[str, Any]]) -> tuple:
+        """分层状态推导（技术方案 §6.1：完整执行 0 / 失败 1 / 部分完成 3）。
+
+        NOT_DUE 类"跳过"不算失败；NOT_APPLICABLE（未注册等）不进应到分母。
+        返回 (execution_status: '0'|'1'|'3', data_readiness: {source: status})。"""
+        data_readiness: Dict[str, str] = {}
+        hard_bad = 0
+        effective = 0
+        for e in summary:
+            name = e['source']
+            status_raw = e['status']
+            if status_raw == '成功':
+                pr_status = PartitionStatus.COMPLETE if (e.get('rows') or 0) > 0 \
+                    else PartitionStatus.CONFIRMED_EMPTY
+            elif status_raw == '失败':
+                pr_status = PartitionStatus.FAILED
+            elif status_raw == '待补':
+                pr_status = PartitionStatus.PARTIAL
+            else:  # 跳过
+                detail_l = e.get('detail') or ''
+                pr_status = PartitionStatus.BLOCKED if ('日K' in detail_l or '门控' in detail_l
+                                                        or '依赖' in detail_l) \
+                    else PartitionStatus.NOT_APPLICABLE
+            data_readiness[name] = pr_status.value
+            if pr_status in (PartitionStatus.COMPLETE, PartitionStatus.CONFIRMED_EMPTY):
+                effective += 1
+            if pr_status in (PartitionStatus.FAILED, PartitionStatus.BLOCKED):
+                hard_bad += 1
+        # §6.1 退出码语义：完整执行 0（无失败且无部分）、失败 1（无完整成功源）、
+        # 部分完成 3（有完整成功源但也存在失败/部分）
+        if effective == 0:
+            execution_status = '1'
+        elif hard_bad or any(v == PartitionStatus.PARTIAL.value for v in data_readiness.values()):
+            execution_status = '3'
+        else:
+            execution_status = '0'
+        return execution_status, data_readiness
+
+    def _account_job_finish(self, ctx: RunContext, summary: List[Dict[str, Any]],
+                            execution_status: str,
+                            data_readiness: Dict[str, str],
+                            result: Dict[str, Any]) -> None:
+        """逐源写 sync_partition + finish_job（单事务；失败只告警）"""
+        if not ctx.job_id:
+            return
+        try:
+            partition_rows = []
+            for e in summary:
+                name = e['source']
+                spec = DATASET_REGISTRY.get(name)
+                market = spec.market if spec else 'CN'
+                exchange = spec.exchanges[0] if (spec and len(spec.exchanges) == 1) else None
+                expected_date = ctx.target_date
+                try:  # 应到日按源期望计算（两融 T-1 等）；查日历失败回退目标日
+                    exp = expected_partition(ctx, name, db=self.db, config=self.config)
+                    if exp.get('expected_date'):
+                        expected_date = exp['expected_date']
+                except Exception:
+                    pass
+                pr = entry_to_partition_result(
+                    e, dataset=name, market=market, target_date=expected_date,
+                    source=(spec.source if spec else name), exchange=exchange)
+                pr.job_id = ctx.job_id
+                partition_rows.append(pr.to_row(ctx.job_id))
+            job_status = {'0': 'SUCCEEDED', '3': 'PARTIAL', '1': 'FAILED'} \
+                .get(execution_status, 'FAILED')
+            with self.db.get_connection() as conn:
+                for row in partition_rows:
+                    self.db.upsert_partition_tx(conn, row)
+                self.db.finish_job_tx(
+                    conn, ctx.job_id, job_status, execution_status=execution_status,
+                    data_readiness=data_readiness,
+                    result_summary={
+                        'duration': result.get('duration'),
+                        'success': bool(result.get('success')),
+                        'freshness_red': result.get('freshness_red') or [],
+                        'kline_check': result.get('kline_check'),
+                    })
+                conn.commit()
+            logger.info(f'采集作业记账完成: job_id={ctx.job_id} status={job_status} '
+                        f'partitions={len(partition_rows)}')
+        except Exception as e:
+            logger.warning(f'采集作业记账收尾失败（不影响采集结果）: {e}')
+
     # ---------- 工具 ----------
 
     @staticmethod
@@ -548,10 +724,17 @@ class ReviewSyncOrchestrator:
 
         detail_errors = '; '.join((src_result.get('errors') or [])[:2])
         failed_n = len((stats.get('failed') or []))
+        # D01（技术方案 §6.1）：警告、错误等 detail 为累积列表语义——此前末段赋值
+        # 会覆盖 F2 已写入的"数据日滞后"原因（问题确认：detail_errors 为空且无
+        # 个股失败时 detail 被清空），改为追加不覆盖
+        extra: List[str] = []
         if failed_n and not detail_errors:
-            entry['detail'] = f'{failed_n} 只失败（明细见该源报告/manifest）'
-        else:
-            entry['detail'] = detail_errors
+            extra.append(f'{failed_n} 只失败（明细见该源报告/manifest）')
+        elif detail_errors:
+            extra.append(detail_errors)
+        if extra:
+            existing = entry['detail'] or ''
+            entry['detail'] = '；'.join([d for d in (existing, *extra) if d])
         if src_result.get('report_path'):
             entry['report_path'] = src_result['report_path']
 

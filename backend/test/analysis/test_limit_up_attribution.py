@@ -47,13 +47,13 @@ class TestLimitUpAttribution:
         res = LimitUpAttribution().analyze(
             pd.DataFrame(), _ctx(limit_up='是', ann_map={
                 'sh.600000': [_ann(1, '20260930', '解禁', '限售股上市流通')]}))
-        assert res.value == '题材炒作或跟风上涨'
+        assert res.value == '窗口内未识别催化'
         assert res.detail['kind'] == '无'
 
     def test_limit_up_no_announcements(self):
         res = LimitUpAttribution().analyze(
             pd.DataFrame(), _ctx(limit_up='是', ann_map={}))
-        assert res.value == '题材炒作或跟风上涨'
+        assert res.value == '窗口内未识别催化'
 
     def test_not_limit_up(self):
         res = LimitUpAttribution().analyze(
