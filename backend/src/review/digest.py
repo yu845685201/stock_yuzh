@@ -696,6 +696,73 @@ def _chan_linkage_state(position: str, review_cfg: Dict[str, Any]) -> str:
     return '/'.join(states) if states else rules.get('回暖', '弱化观察')
 
 
+def _render_candidate_digest(agg: Dict[str, Any]) -> Optional[str]:
+    """转天候选（正式名单·§3.3 2026-11-24）：由**同一发布批次**
+    ``agg['candidate_publication']`` 的 published 名单结构化生成（与六维正文
+    同批同源），摘要候选只能是该名单的子集——正文关闭的池不得在摘要以
+    候选身份出现（11-23 三只 R2 原始命中案例：归题材跟踪，不附交易条件）。
+    缺键（旧缓存）时现场构建（纯函数同输入同结果）。"""
+    from .candidate_publication import build_candidate_publication
+    pub = agg.get('candidate_publication')
+    if pub is None:
+        pub = build_candidate_publication(agg.get('candidates') or {},
+                                          agg.get('sentiment') or {}, {})
+    if not pub.get('available', True):
+        return None
+    parts: List[str] = ['<h2>转天候选（正式名单·与正文同批发布）</h2>']
+    open_types = list(pub.get('open_types') or [])
+    pools = pub.get('pools') or {}
+    n_published = sum((pools.get(k) or {}).get('n_published', 0) for k in open_types)
+    if open_types:
+        parts.append(f'<p>候选开放度：{_esc(pub.get("openness_text") or "—")}</p>')
+        bits = '；'.join(
+            f'{_esc(k)} {_esc(pools[k]["n_published"])} 只'
+            for k in open_types if pools.get(k))
+        parts.append(f'<p>正式右侧候选合计 <strong>{n_published}</strong> 只'
+                     + (f'（{bits}）' if bits else '') + '</p>')
+        for ctype in open_types:
+            st = pools.get(ctype) or {}
+            published = st.get('published') or []
+            if not published:
+                continue
+            rows_html = ''.join(
+                f'<tr><td>{_esc(r.get("code") or "—")}</td>'
+                f'<td>{_esc(r.get("name") or "—")}</td>'
+                f'<td>{_esc(r.get("label") or "—")}</td>'
+                f'<td>{_esc(len(r.get("evidence") or []))}</td>'
+                f'<td>{_fmt(r.get("score"), 1, True)}</td></tr>'
+                for r in published)
+            parts.append(
+                f'<table><thead><tr><th>{_esc(ctype)}</th><th>名称</th>'
+                f'<th>当日状态</th><th>证据数</th><th>五维评分</th></tr></thead>'
+                f'<tbody>{rows_html}</tbody></table>')
+    else:
+        parts.append(f'<p>正式右侧候选 <strong>0 只</strong>'
+                     f'（{_esc(pub.get("close_reason") or "各池均未开放")}）——'
+                     '该池次日战绩按已发布成员核验：不适用。</p>')
+    watch = pub.get('theme_watch') or []
+    if watch:
+        rows_html = ''.join(
+            f'<tr><td>{_esc(w.get("code") or "—")}</td>'
+            f'<td>{_esc(w.get("name") or "—")}</td>'
+            f'<td>{_esc(w.get("label") or "—")}</td>'
+            f'<td>{"/".join(_esc(str(c)) for c in (w.get("concepts") or [])) or "—"}</td></tr>'
+            for w in watch)
+        parts.append(f'<h3>题材跟踪（{len(watch)} 只，非正式候选）</h3>'
+                     f'<table><thead><tr><th>代码</th><th>名称</th>'
+                     f'<th>命中画像</th><th>所属概念</th></tr></thead>'
+                     f'<tbody>{rows_html}</tbody></table>'
+                     '<p class="note">来源：候选池未开放时的原始命中——题材样本仅作'
+                     '跟踪观察，不附正式候选的交易条件；次日核验不计入正式池战绩'
+                     '（研究样本另用 scope）。</p>')
+    chan_n = (pub.get('chan') or {}).get('n_published', 0)
+    parts.append(f'<p class="note">口径：本段为发布批次 published 名单的结构化'
+                 f'渲染（与六维正文同批，摘要候选为其子集）；缠论左侧观察池'
+                 f'{chan_n} 只独立展示（见下节）。发布批次各阶段计数'
+                 '（raw/eligible/published）随预测 payload 落库，可回放对账。</p>')
+    return '\n'.join(parts)
+
+
 def _render_chan_digest(agg: Dict[str, Any], cycle: Dict[str, Any],
                         industry_map: Dict[str, str],
                         review_cfg: Dict[str, Any]) -> Optional[str]:
@@ -850,6 +917,16 @@ def build_digest(config_manager, as_of: Optional[str] = None,
     parts.append(f'<p class="note">数据口径与 <code>daily_review_{_esc(as_of)}.md</code> '
                  f'六维报告同源（ReviewAggregator 同一次聚合）；外围为市场自身交易日历'
                  f'（qfq/指数原值），A 股锚定日 {as_of}、前一交易日 {prev_date or "—"}。</p>')
+    # §4.3 E1（2026-11-24）：采集覆盖说明（与首页/meta 同一 coverage 对象）——
+    # 缺行数并列在结论旁，读者据此判断涨停/题材读数的采样限制
+    from .coverage import coverage_note, coverage_sensitive_note
+    cov = agg.get('coverage') or {}
+    cov_note = coverage_note(cov)
+    if cov_note:
+        parts.append(f'<p class="note">数据质量：{_esc(cov_note)}。</p>')
+    cov_sens = coverage_sensitive_note(cov)
+    if cov_sens:
+        parts.append(f'<p class="note">{_esc(cov_sens)}</p>')
     # W2 引用体系统一：两份文档章节编号不同名异指，页首固定对照行
     parts.append('<p class="note">章节对照：图文§一~§三 对应六维§一~§三；'
                  '图文§四（外围）/§五（A-H）属六维§一；图文§六（缠论候选）属六维§六；'
@@ -870,7 +947,12 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                 open_bit = (f"，今日上证开盘 {_fmt(sc.get('open_gap'), 2, True)}% —— "
                             f"{_esc(sc['expectation'])}预期"
                             f"{_esc(sc.get('fulfilled') or '数据不足')}")
-            parts.append(f'<p>情景：<strong>{_esc(sc["triggered"])}</strong>'
+            elif sc.get('scenario_reason'):
+                # 非方向档（分歧/部分证据/待核/无新观测）：展示判档原因，
+                # 与报告「〇、昨日核验」同源（verifier 单一出处）
+                open_bit = f"，{_esc(sc['scenario_reason'])}"
+            parts.append(f'<p>情景：<strong>{_esc(sc["triggered"])}'
+                         f'</strong>（{_esc(sc.get("completeness") or "—")}）'
                          f'{open_bit}</p>')
         v2 = next((p for p in (ver_data.get('verify_points') or [])
                    if str(p.get('key', '')).startswith('V2')), None)
@@ -889,6 +971,38 @@ def build_digest(config_manager, as_of: Optional[str] = None,
                          + (f' {_fmt(mkt, 2, True)}%' if mkt is not None else '')
                          + '）：<strong>' + '；'.join(_esc(b) for b in excess_bits)
                          + '</strong></p>')
+        # §4.1 D1（2026-11-24）：R2 同类基准一行（对照全市场与前一日全部首板——
+        # "跑赢同类了吗"），与报告「〇、昨日核验」同源
+        r2c = (ver_data.get('cohorts') or {}).get('R2')
+        if r2c and (r2c.get('candidate') or {}).get('n_total'):
+            bits = []
+            if r2c.get('excess_vs_market') is not None:
+                bits.append(f'对全市场 {_fmt(r2c["excess_vs_market"], 2, True)}pct')
+            if r2c.get('excess_vs_peer') is not None:
+                bits.append(f'对昨日首板 {_fmt(r2c["excess_vs_peer"], 2, True)}pct')
+            if bits:
+                parts.append('<p>R2 同类基准（T 收盘→今日收盘同区间中位对比）：'
+                             '<strong>' + '；'.join(_esc(b) for b in bits)
+                             + '</strong>（三组入组/有效/统计天数见报告）</p>')
+        # §4.3 E2：三项次日回填摘要行
+        bf = ver_data.get('backfills') or {}
+        bf_bits = []
+        lu = bf.get('limit_up')
+        if lu and lu.get('n_valid'):
+            bf_bits.append(f'昨日 {lu["n_total"]} 只涨停今日中位 '
+                           f'{_fmt(lu.get("median"), 2, True)}%、翻红 '
+                           f'{lu.get("red_n", 0)}/{lu.get("n_valid", 0)}')
+        tb = bf.get('two_board')
+        if tb:
+            bf_bits.append(f'二进三 {tb.get("promoted", 0)}/{tb.get("judgeable", 0)}')
+        vp = bf.get('volume_price')
+        if vp and vp.get('chg_pct') is not None:
+            ratio = (f'{vp["ratio_5d"]:.2f} 倍' if vp.get('ratio_5d') is not None
+                     else '待核')
+            bf_bits.append(f'中证全指 {_fmt(vp["chg_pct"], 2, True)}%（量能 {ratio}）')
+        if bf_bits:
+            parts.append('<p>三项回填：' + '；'.join(_esc(b) for b in bf_bits)
+                         + '（明细见报告「〇、昨日核验」）</p>')
         if ver_data.get('rolling'):
             parts.append('<p class="note">滚动战绩（近 30 核验日）详见报告'
                          '「〇、昨日核验」章节。</p>')
@@ -1041,6 +1155,11 @@ def build_digest(config_manager, as_of: Optional[str] = None,
 
     # P1-8 缠论背驰候选（digest 固定渲染位，五节之后、解读区之前）：
     # 复用 agg['chan']（与 md 报告第六章同一聚合数据，不二次计算）
+    # 转天候选（正式名单·§3.3 2026-11-24）：置于缠论之前——右侧正式名单与
+    # 左侧观察池相邻，摘要候选只能取 published 子集（与正文同批发布）
+    cand_html = _render_candidate_digest(agg)
+    if cand_html:
+        parts.append(cand_html)
     try:
         industry_map = aggregator.industry_map(as_of)
     except Exception:

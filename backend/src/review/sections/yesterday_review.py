@@ -1,8 +1,10 @@
 """「〇、昨日核验（预期 vs 实际）」章节（四期方案 §1.4）。
 
 渲染 agg['verification']：情景核验（触发档+低开/高开兑现）→ 验点核验表（V1/V1.5
-记录、V2 三态、V3 记录）→ 候选池战绩（超额=池中位−全市场中位）→ 滚动战绩（近 30
-核验日）。昨日无预测记录 → "⏳ 无昨日预期记录"（核验体系 2026-10-07 起逐日积累）。
+记录、V2 三态、V3 记录）→ 候选池战绩（超额=池中位−全市场中位）→ R2 同类基准
+（§4.1 D1：候选 × 全市场 × 前一日首板三组中位与两条超额）→ 三项次日回填
+（§4.3 E2：涨停延续 / 二板晋级 / 量价延续）→ 滚动战绩（近 30 核验日）。
+昨日无预测记录 → "⏳ 无昨日预期记录"（核验体系 2026-10-07 起逐日积累）。
 本章节置顶：复盘先对账，再看今日事实。
 """
 
@@ -28,6 +30,8 @@ def build(verification: Dict[str, Any]) -> List[Dict[str, Any]]:
     blocks.extend(_scenario_blocks(data.get('scenario') or {}))
     blocks.extend(_verify_point_blocks(data.get('verify_points') or []))
     blocks.extend(_candidate_blocks(data.get('candidates') or {}))
+    blocks.extend(_cohort_benchmark_blocks(data.get('cohorts') or {}))
+    blocks.extend(_backfill_blocks(data.get('backfills') or {}))
     blocks.extend(_rolling_blocks(data.get('rolling')))
     blocks.append({'type': 'note',
                    'text': '三态规范：成立 / 不成立 / 数据不足——数据不足 ≠ 判错，不污染战绩；'
@@ -47,14 +51,25 @@ def _scenario_blocks(sc: Dict[str, Any]) -> List[Dict[str, Any]]:
         accum = (f"{m['accum']:+.2f}%" if m.get('accum') is not None else '—')
         last = (f"{m['last_close']:,.0f}" if m.get('last_close') is not None else '—')
         base = (f"{m['base_close']:,.0f}" if m.get('base_close') is not None else '—')
-        rows.append([m['name'], base, last, accum])
+        # 新观测业务日（防前视语义：仅业务日严格早于 as_of 的收盘可用；
+        # 与基准同业务日 → 无新观测，— 表示无开盘前可知新报价）
+        new_date = m.get('new_date') or '—'
+        note = '' if m.get('has_new') else (f"（{m['reason']}）" if m.get('reason') else '')
+        rows.append([m['name'], base, last, f'{new_date}{note}', accum])
     blocks = [
         {'type': 'heading', 'level': 3, 'text': '情景核验'},
         {'type': 'table',
-         'headers': [f"锚（较基准 ±{sc.get('gap_pct', 1.5):.1f}%）", '基准收盘', '最新收盘', '累计变动'],
+         'headers': [f"锚（较基准 ±{sc.get('gap_pct', 1.5):.1f}%）", '基准收盘',
+                     '最新收盘', '新观测业务日', '累计变动'],
          'rows': rows},
+        {'type': 'note',
+         'text': '口径（2026-11-24 修订）：新观测仅取 A 股当日开盘前已完成的海外'
+                 '交易时段收盘（业务日严格早于锚定日；同日港美收盘一律剔除）；'
+                 '同一旧报价重复出现记「无新观测」而非默认 P2。'},
     ]
-    text = f'实际触发档：{trig}'
+    text = f'判档：{trig}（{sc.get("completeness") or "—"}）'
+    if sc.get('scenario_reason'):
+        text += f"——{sc['scenario_reason']}"
     if sc.get('expectation'):
         open_gap = (f"{sc['open_gap']:+.2f}%" if sc.get('open_gap') is not None else '—')
         text += (f"（预期{sc['expectation']}）；今日上证开盘 {open_gap} —— "
@@ -122,6 +137,119 @@ def _candidate_blocks(cand: Dict[str, Any]) -> List[Dict[str, Any]]:
     return blocks
 
 
+def _cohort_benchmark_blocks(cohorts: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """R2 同类基准（§4.1 D1）：候选 × 全市场 × 前一日全部可确认首板。
+
+    三组同一段 T 收盘→N 收盘收益取中位数；超额 = 候选中位 − 基准中位
+    （百分点）。入组数、有效数、统计天数并列；候选有效数为零 → 两条超额
+    留空（不转零）；某基准无有效样本 → 仅对应超额留空。
+    """
+    r2 = cohorts.get('R2')
+    if not r2:
+        return []
+    cand = r2.get('candidate') or {}
+    market = r2.get('market') or {}
+    peer = r2.get('peer')
+    blocks: List[Dict[str, Any]] = [
+        {'type': 'heading', 'level': 3,
+         'text': f"R2 同类基准（T={r2.get('anchor_date') or '—'} 收盘 → 今日收盘同区间）"},
+    ]
+    if not cand.get('n_total'):
+        blocks.append({'type': 'para',
+                       'text': '昨日 R2 正式发布 0 只（池未开放）——同类基准不适用，'
+                               '两条超额留空（空池语义，不转零）。'})
+        return blocks
+    rows = [[_POOL_NAMES['R2'], cand.get('n_total'), cand.get('n_valid'),
+             f"{cand['median']:+.2f}%" if cand.get('median') is not None else '—',
+             '—']]
+    rows.append(['全市场（今日已交易）', '—', market.get('n'),
+                 f"{market['median']:+.2f}%" if market.get('median') is not None else '—',
+                 f"{r2.get('excess_vs_market'):+.2f}pct"
+                 if r2.get('excess_vs_market') is not None else '—'])
+    if peer is not None:
+        rows.append(['昨日全部可确认首板', peer.get('n_total'), peer.get('n_valid'),
+                     f"{peer['median']:+.2f}%" if peer.get('median') is not None else '—',
+                     f"{r2.get('excess_vs_peer'):+.2f}pct"
+                     if r2.get('excess_vs_peer') is not None else '—'])
+    blocks.append({'type': 'table',
+                   'headers': ['组', '入组', '有效', '中位数', '超额（百分点）'],
+                   'rows': rows})
+    inv = cand.get('invalid') or {}
+    inv_bits = '、'.join(f'{k} {v}' for k, v in inv.items() if v) or '无'
+    note = (f"口径：三组同一段 T 收盘→N 收盘收益（qfq 收盘对收盘）分别取中位数，"
+            f"偶数样本取中间两项均值——收盘到收盘衡量信号后的市场表现，"
+            f"可交易收益须另列入场时间、成交条件与费用（本表未计）；"
+            f"候选无效明细：{inv_bits}；"
+            f"全市场成员哈希 {market.get('member_hash') or '—'}（版本引用）")
+    if peer is not None and r2.get('peer_unknown_n'):
+        note += (f"；昨日首板 cohort 身份未知 {r2['peer_unknown_n']} 只"
+                 '（停牌缺行不入可确认名单）')
+    blocks.append({'type': 'note', 'text': note})
+    return blocks
+
+
+def _backfill_blocks(backfills: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """三项次日回填核验（§4.3 E2）：昨日首页冻结的三项跟踪问题今日回填。"""
+    if not backfills:
+        return []
+    blocks: List[Dict[str, Any]] = [
+        {'type': 'heading', 'level': 3, 'text': '三项次日回填（昨日首页冻结基准）'},
+    ]
+    rows = []
+    lu = backfills.get('limit_up')
+    if lu:
+        inv = lu.get('invalid') or {}
+        rows.append([
+            '涨停后的强势是否普遍延续',
+            f"{lu.get('anchor_date', '—')} 涨停 {lu.get('n_total', 0)} 只",
+            f"中位 {lu['median']:+.2f}%、翻红 {lu.get('red_n', 0)} / "
+            f"有效 {lu.get('n_valid', 0)}"
+            + (f"（{ '、'.join(f'{k} {v}' for k, v in inv.items() if v)}）"
+               if any(inv.values()) else ''),
+        ])
+    tb = backfills.get('two_board')
+    if tb:
+        rate = tb.get('promotion_rate')
+        rows.append([
+            '连板队伍有没有新的承接',
+            f"{tb.get('anchor_date', '—')} 可确认二板 {tb.get('n_total', 0)} 只",
+            f"二进三 {tb.get('promoted', 0)} / 可判定 {tb.get('judgeable', 0)}"
+            + (f"（晋级率 {rate:.0%}）" if rate is not None else '')
+            + (f"；不可判定 {tb.get('unjudgeable', 0)} 只" if tb.get('unjudgeable') else '')
+            + (f"；晋级组中位 {tb['median']:+.2f}%"
+               if tb.get('median') is not None else ''),
+        ])
+    vp = backfills.get('volume_price')
+    if vp:
+        anchor = vp.get('anchor') or {}
+        chg_txt = f"{vp['chg_pct']:+.2f}%" if vp.get('chg_pct') is not None else '—'
+        base_txt = ''
+        if anchor.get('chg_pct') is not None or anchor.get('ratio_5d') is not None:
+            base_txt = (f"（昨日基准 {anchor.get('chg_pct', 0):+.2f}%、"
+                        f"{anchor.get('ratio_5d', 0):.2f} 倍）")
+        today_txt = (f"{vp.get('ratio_5d'):.2f} 倍" if vp.get('ratio_5d') is not None
+                     else '待核')
+        if vp.get('status') != 'ok':
+            today_txt += f"——待核：{vp.get('reason') or '窗口缺日'}"
+        rows.append([
+            '普涨是否仍有成交配合',
+            f"中证全指（{anchor.get('anchor_date') or '—'} 锚）",
+            f"今日 {chg_txt}，成交额 / 前五日均额 {today_txt}{base_txt}"
+            f"；交易日 {vp.get('anchor_date', '—')}",
+        ])
+    if rows:
+        blocks.append({'type': 'table',
+                       'headers': ['跟踪的问题', '冻结的基准', '今日回填'],
+                       'rows': rows})
+        blocks.append({'type': 'note',
+                       'text': '口径：涨停延续组固定分组不缩小（缺行保留在分母说明中，'
+                               '翻红严格大于零）；二板晋级按日历相邻 T、N 同一代码'
+                               '确认连续封板，分母为零时晋级率为空；量能倍数按交易日历'
+                               '应到日期核对六个端点，窗口缺日或均额为零记待核，'
+                               '盘中占位行不能充当收盘。'})
+    return blocks
+
+
 def _rolling_blocks(rolling: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     if not rolling:
         return []
@@ -144,6 +272,20 @@ def _rolling_blocks(rolling: Dict[str, Any] = None) -> List[Dict[str, Any]]:
     if rolling.get('v2'):
         v2 = rolling['v2']
         items.append(f'V2 高度股晋级判定：观察 {v2["n"]} 次，晋级 {v2["ok"]} 次')
+    # §4.1（2026-11-24）：R2 同类基准滚动——两条基准各自的有效统计天数
+    bench = rolling.get('r2_benchmarks')
+    if bench:
+        for key, label in (('market', '全市场'), ('peer', '昨日首板')):
+            st = bench.get(key)
+            if not st:
+                continue
+            items.append(
+                f'R2 对{label}基准：{st["days"]} 个有效交易日（平均入组 '
+                f'{st.get("avg_valid_members", "—")} 只），平均超额 '
+                f'{st["avg_excess"]:+.2f}pct、跑赢 {st["win_rate"]:.0%} 的日子')
+        if bench.get('empty_pool_days'):
+            items.append(f'R2 空池日 {bench["empty_pool_days"]} 天'
+                         '（池未开放，不计两条基准的分母）')
     if not items:
         return []
     return [

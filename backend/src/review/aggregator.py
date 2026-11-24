@@ -35,6 +35,8 @@ from ..analysis.candidate_rules import (
 )
 from ..analysis.attribution_rules import FALLBACK_LABEL, pick_attribution
 from ..analysis.data_reader import DataReader
+from ..analysis.sector_metrics import industry_returns, theme_industry_links
+from .candidate_publication import build_candidate_publication
 from .cross_section import (
     annotate_panel,
     cross_section_at,
@@ -214,7 +216,14 @@ class ReviewAggregator:
     #: v17：市场宽度判据升格定位（X4 用户决策 20261028：阈值 2.0→2.5、role
     #:      reference→position、回暖/震荡偏暖标注）——sentiment 判据表/basis
     #:      变更，聚合产物升版
-    AGG_CACHE_VERSION = 'v17-20261028'
+    #: v18：报告优化第一轮（2026-11-24 §3.2/§3.3）——行业五日榜改逐日等权+复利
+    #:      （industry_5d/industry_5d_prev/industry_5d_sessions/membership 元数据
+    #:      新键）、新增 candidate_publication 发布名单；聚合产物结构变更升版
+    #: v19：报告优化第二轮（2026-11-24 §4.1/§4.2/§4.3）——新增 cohorts（样本身份
+    #:      冻结：limit_up/first_board/two_board/r2_published）、backfill_anchors
+    #:      （量价回填锚）、coverage（采集覆盖五层漏斗）；sector 增 theme_links
+    #:      （行业×题材代码交集 + 题材承接昨日分母冻结）；聚合产物结构变更升版
+    AGG_CACHE_VERSION = 'v19-20261124'
 
     def _agg_cache_path(self, as_of: str):
         """聚合结果缓存路径（<repo>/tmp/agg_cache/{as_of}_{ver}.pkl）；关闭返回 None。"""
@@ -286,7 +295,8 @@ class ReviewAggregator:
         out['verification'] = self._aggregate_verification(
             as_of, prev_date, cs_today, (out['sentiment'].data or {}))
         out['market_env'] = self._aggregate_market_env(panel, cs_today, as_of, prev_date)
-        out['sector'] = self._aggregate_sector(panel, cs_today, cs_prev, as_of)
+        out['sector'] = self._aggregate_sector(panel, cs_today, cs_prev, as_of,
+                                               prev_date=prev_date)
         out['movers'] = self._aggregate_movers(cs_today, as_of)
         # 量价资金维度（量价资金方案 V1.1 §3.3）：量价四象限双锚 / 板块资金聚合 / 资金锚
         out['volume_price'] = self._volume_price(as_of)
@@ -322,6 +332,37 @@ class ReviewAggregator:
         # 缠论背驰候选（2026-10-24 引入）：520d 面板独立复算，与链
         # chan_divergence_buy 模块同一实现两入口（chan.scan.scan_stock_anchor）
         out['chan'] = self._aggregate_chan(as_of)
+        # 候选发布名单（§3.3 2026-11-24）：情绪开放 + ADX 闸门 + 弱档 + 排序
+        # top_n 截取后的实际发布批次——正文/摘要/预测落库/次日核验同源读取
+        # （正文关闭的池不再出现在预测 payload 与摘要候选段）
+        chan_result = out['chan']
+        chan_items = list((getattr(chan_result, 'data', None) or {}).get('items') or []) \
+            if getattr(chan_result, 'available', False) else []
+        out['candidate_publication'] = build_candidate_publication(
+            out['candidates'], out['sentiment'],
+            self.config.get('review') or {}, chan_items=chan_items)
+        # 报告优化第二轮（2026-11-24）：样本身份冻结（§4.1/§4.3）——
+        # cohorts 供 build_predictions 随预测 payload 冻结（R2 发布 cohort /
+        # T 全部涨停 / 可确认首板 / 可确认二板；首板/二板身份按交易日历
+        # 连续性核验，停牌缺行记未知）
+        from . import cohorts as _cohorts_mod
+        out['cohorts'] = {
+            'limit_up': _cohorts_mod.limit_up_cohort(cs_today, as_of),
+            'first_board': _cohorts_mod.first_board_cohort(
+                cs_today, cs_prev, as_of),
+            'two_board': _cohorts_mod.two_board_cohort(
+                cs_today, cs_prev, as_of),
+            'r2_published': _cohorts_mod.r2_published_cohort(
+                out['candidate_publication'], as_of),
+        }
+        # §4.3 三项次日回填锚：量价锚（中证全指，应到日期检查）随聚合冻结；
+        # 涨停/二板名单已由 cohorts 覆盖
+        from .backfills import freeze_backfill_anchors
+        out['backfill_anchors'] = freeze_backfill_anchors(self.db, as_of)
+        # §4.3 E1：采集覆盖事实（scope 清单五层漏斗 + 缺行主因拆分）——
+        # 首页、正文与 meta 共用同一对象
+        from .coverage import coverage_facts
+        out['coverage'] = coverage_facts(as_of, cs_today)
         return out
 
     # ------------------------------------------------------------------ 维度1
@@ -1551,7 +1592,8 @@ class ReviewAggregator:
         return AggregationResult(data=data)
 
     def _aggregate_sector(self, panel: pd.DataFrame, cs_today: pd.DataFrame,
-                          cs_prev: pd.DataFrame, as_of: str) -> AggregationResult:
+                          cs_prev: pd.DataFrame, as_of: str,
+                          prev_date: Optional[str] = None) -> AggregationResult:
         industry_map = self._industry_map(as_of)
         concept_map = self._concept_map(as_of)
         if not industry_map and not concept_map:
@@ -1562,9 +1604,23 @@ class ReviewAggregator:
             source_map = self.industry_source_map(as_of)
             data['industry_today'] = self._industry_ranking(
                 panel, industry_map, [as_of], source_map)
-            last5 = self._last_n_dates(as_of, 5)
-            data['industry_5d'] = self._industry_ranking(
-                panel, industry_map, last5, source_map)
+            # §3.2（2026-11-24，B1/B2）：五日榜改逐日等权 + 五日复利——旧口径
+            # 对窗口内全部股日直接均值（729 股日、缺行日权重失衡）。今昨两个
+            # 五日榜一次读取 6 个连续交易日（T 榜=last6[-5:]、T−1 榜=last6[:5]），
+            # 成员逐日取当时可确认归属（_industry_membership_by_session）。
+            last6 = self._last_n_dates(as_of, 6)
+            membership = self._industry_membership_by_session(last6)
+            data['industry_5d'] = industry_returns(
+                panel, membership['by_session'], last6[-5:],
+                source_map=source_map)
+            data['industry_5d_prev'] = industry_returns(
+                panel, membership['by_session'], last6[:5],
+                source_map=source_map)
+            data['industry_5d_sessions'] = last6[-5:]
+            data['industry_5d_membership'] = {
+                'snapshot_only': bool(membership['snapshot_only']),
+                'window': [last6[0], last6[-1]],
+            }
         # N3（2026-10-04）：申万二级行业 Top10 子表（THS 快照口径）
         l2_map = self._industry_l2_map(as_of)
         if l2_map:
@@ -1575,10 +1631,83 @@ class ReviewAggregator:
         exclude = ((self.config.get('review') or {}).get('theme_exclude_concepts')) or []
         data['theme_concentration'] = _theme_concentration(
             data.get('limit_up_clusters') or [], cs_today, exclude)
+        # §4.2（2026-11-24 第二轮）：昨日概念关系单独时点取数——题材承接的
+        # 昨日分母按昨日成分冻结（跨日改标签不改分母）
+        concept_map_prev = self._concept_map(prev_date) if prev_date else {}
         data['theme_tree'] = self._theme_tree(cs_today, cs_prev, as_of,
                                               data.get('limit_up_clusters') or [],
-                                              concept_map, exclude)
+                                              concept_map, exclude,
+                                              concept_map_prev=concept_map_prev)
+        # §4.2：行业×题材代码交集 + 题材承接（聚合层计算，渲染层纯展示）；
+        # 行业前十沿用主线候选旧口径 = 5 日榜有效榜前 10；概念兜底板
+        # （is_concept，次新股/ST 板等）不入行业侧——行业归属采用行业数据源
+        _d5 = data.get('industry_5d') or []
+        _d5_top = []
+        for _r in _d5:
+            if _r.get('return_5d_pct') is None:
+                break
+            if _r.get('is_concept'):
+                continue
+            _d5_top.append(_r['industry'])
+            if len(_d5_top) >= 10:
+                break
+        data['theme_links'] = theme_industry_links(
+            cs_today, cs_prev, industry_map, concept_map, concept_map_prev,
+            data.get('limit_up_clusters') or [],
+            _d5_top, exclude=exclude)
         return AggregationResult(data=data)
+
+    def _industry_membership_by_session(self, dates: List[str]) -> Dict[str, Any]:
+        """逐交易日的 ts_code → 行业归属（§3.2：逐日取当时可确认的成员）。
+
+        单次查询窗口内任何时点可能有效的成员关系（out_date > 窗口首 且
+        in_date <= 窗口末），逐（日, 股）解析当日归属——优先级与稳定排序同
+        ``industry_map``（sw_2021 优先、sina_hy 兜底、概念代码序）。
+        窗口内无任何成员变更事件（加入/退出均不落在 (lo, hi]）时成员为快照
+        等价，返回 ``snapshot_only=True`` 供渲染注明快照口径与回放限制。
+
+        Returns:
+            {'by_session': {date: {ts_code: 行业名}}, 'snapshot_only': bool}
+        """
+        out: Dict[str, Any] = {'by_session': {d: {} for d in dates},
+                               'snapshot_only': True}
+        if not dates:
+            return out
+        lo, hi = dates[0], dates[-1]
+        try:
+            rows = self.db._query(
+                """
+                SELECT m.ts_code, c.concept_name, c.source,
+                       m.in_date, m.out_date
+                FROM sector_concept_map m
+                JOIN sector_concept c ON c.concept_code = m.concept_code
+                WHERE c.source IN ('sw_2021', 'sina_hy')
+                  AND (m.out_date IS NULL OR m.out_date > %s)
+                  AND (m.in_date IS NULL OR m.in_date <= %s)
+                ORDER BY m.ts_code,
+                         CASE c.source WHEN 'sw_2021' THEN 0 ELSE 1 END,
+                         c.concept_code
+                """, (lo, hi))
+        except Exception as e:
+            logger.warning(f'逐日行业成员读取失败: {e}')
+            return out
+        by_ts: Dict[str, List[tuple]] = {}
+        for ts_code, ind, src, in_date, out_date in rows:
+            if not ind:
+                continue
+            in_d = _plain(in_date) if in_date is not None else None
+            out_d = _plain(out_date) if out_date is not None else None
+            # 窗口内变更事件（中途加入/退出）→ 非快照
+            if (in_d and lo < in_d <= hi) or (out_d and lo < out_d <= hi):
+                out['snapshot_only'] = False
+            by_ts.setdefault(str(ts_code), []).append((str(ind), in_d, out_d))
+        for ts_code, entries in by_ts.items():
+            for d in dates:
+                for ind, in_d, out_d in entries:
+                    if (in_d is None or in_d <= d) and (out_d is None or out_d > d):
+                        out['by_session'][d][ts_code] = ind
+                        break
+        return out
 
     def _industry_map(self, as_of: str) -> Dict[str, str]:
         """ts_code → 行业名（评价-3 收口：委托 industry_map 统一实现——
@@ -2895,12 +3024,18 @@ class ReviewAggregator:
 
     def _theme_tree(self, cs_today: pd.DataFrame, cs_prev: pd.DataFrame, as_of: str,
                     clusters: List[Dict[str, Any]], concept_map: Dict[str, List[str]],
-                    exclude: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+                    exclude: Optional[List[str]] = None,
+                    concept_map_prev: Optional[Dict[str, List[str]]] = None
+                    ) -> List[Dict[str, Any]]:
         """题材跨日事件树（四期方案 §3；vibe-astock theme_tree 口径）：
 
         对涨停聚集前 3 概念（黑名单剔除后）：昨日题材涨停家数→今日家数（扩散/收敛）、
         昨日题材涨停股今日均值/翻红率/晋级数、今日题材内炸板数与最高板、题材内首封
         时间范围（首末拉开=发酵判读）。概念成分为 sina_gn 时点匹配口径。
+
+        §4.2（2026-11-24）：「昨日题材涨停股」按**昨日的成分关系**（concept_map_prev，
+        前一交易日时点匹配）与昨日涨停名单冻结——跨日改标签不改昨日分母；
+        concept_map_prev 缺省时回退当日成分（向后兼容旧调用）。
         """
         blacklist = [str(x) for x in (exclude or [])]
         top = [c['concept'] for c in (clusters or [])[:3]
@@ -2912,6 +3047,13 @@ class ReviewAggregator:
             for c in concepts:
                 if c in top:
                     members.setdefault(c, set()).add(ts_code)
+        # §4.2：昨日成分关系单独建索引（昨日分母冻结）
+        prev_members: Dict[str, set] = {}
+        if concept_map_prev is not None:
+            for ts_code, concepts in concept_map_prev.items():
+                for c in concepts:
+                    if c in top:
+                        prev_members.setdefault(c, set()).add(ts_code)
 
         change = pd.to_numeric(cs_today['change_rate'], errors='coerce')
         today: Dict[str, Dict[str, Any]] = {}
@@ -2933,7 +3075,9 @@ class ReviewAggregator:
         for concept in top:
             mem = members.get(concept) or set()
             today_up = [ts for ts in mem if today.get(ts, {}).get('up')]
-            prev_up_mem = [ts for ts in mem if ts in prev_up]
+            prev_base = prev_members.get(concept) if concept_map_prev is not None \
+                else mem
+            prev_up_mem = [ts for ts in (prev_base or set()) if ts in prev_up]
             chgs = [today[ts]['chg'] for ts in prev_up_mem
                     if today.get(ts) and today[ts]['chg'] is not None]
             relimit = sum(1 for ts in prev_up_mem if today.get(ts, {}).get('up'))

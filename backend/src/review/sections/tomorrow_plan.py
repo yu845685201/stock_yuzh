@@ -419,9 +419,11 @@ def _r1_empty_text(cand: Dict[str, Any]) -> str:
 
 
 def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """转天买入候选（观察池）：消费 aggregator._build_candidates 全量候选池
-    （谓词 candidate_rules 与 daily_review 链 R 列共用，同数据同结果），
-    按情绪开放度过滤视图 + top_n 截断展示 + 每类买入决策树。
+    """转天买入候选（观察池·§3.3 2026-11-24 修订）：消费**发布批次**
+    ``agg['candidate_publication']`` 的 published 名单（情绪开放 + ADX 闸门 +
+    弱档 + 五维评分排序 + top_n 截取在 candidate_publication 单一实现），
+    正文候选表逐项等于实际发布名单——摘要与预测落库同源（缺键时现场构建，
+    纯函数同输入同结果，向后兼容旧缓存/测试夹具）。
 
     候选 = 满足显式规则的观察名单，非推荐；「是否买入」由转天走势对决策树
     的验证决定（确认/否决/风控三分支）。判据初版，阈值 config
@@ -442,95 +444,54 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                        'text': '⏳ 待补：候选池数据缺失（截面为空），转天买入候选无法生成'})
         return blocks
 
-    # 情绪开放度（精确枚举映射，技术方案 V1.0 §8.2：不通过子串包含推导——
-    # 原写法 '回暖' in position 会把未来可能新增的组合态（如"回暖初期"）误判
-    # 为四类全开；四态字符串与 aggregator._sentiment_cycle 的 cycle 赋值一致）
-    sentiment = (agg.get('sentiment') or {}).get('data') or {}
-    position = str(((sentiment.get('cycle') or {}).get('position')) or '')
-    if position == '高潮':
-        openness, open_types = ('高潮（防分歧）：仅开放 R1 梯队接力观察，'
-                                '强承接确认前不进'), ('R1',)
-    elif position == '冰点':
-        blocks.append({'type': 'para',
-                       'text': '情绪定位冰点：本轮不出买入候选；企稳信号（跌停<涨停 且 '
-                               '昨日涨停溢价>0 且 空间板高度回升）触发后，下一报告期再开放候选'})
-        blocks.append({'type': 'note',
-                       'text': '候选为规则筛选的观察名单，非推荐；是否买入由转天走势对决策树'
-                               '的验证决定；判据初版待校准，本报告不构成投资建议'})
-        return blocks
-    elif position == '退潮':
-        blocks.append({'type': 'para',
-                       'text': '情绪定位退潮：本轮不出买入候选（防守降仓期，避开高位股与'
-                               '断板梯队）；高度重建或冰点企稳后再开放'})
+    # 发布批次（§3.3）：正文从同一发布名单渲染
+    pub = agg.get('candidate_publication')
+    if pub is None:
+        from ..candidate_publication import build_candidate_publication
+        pub = build_candidate_publication(cand, agg.get('sentiment') or {}, {})
+    position = pub.get('position') or ''
+    adx_info = pub.get('adx_gate') or {}
+    gate = str(adx_info.get('gate') or 'closed')
+    market_weak = bool(adx_info.get('market_weak'))
+    open_types = tuple(pub.get('open_types') or ())
+
+    # 整体关闭文案（冰点/退潮/异常定位/ADX closed——与发布批次 close_reason
+    # 同源；正式右侧候选 0 只对读者与次日核验同口径）
+    if not open_types:
+        reason = pub.get('close_reason') or ''
+        if position in ('冰点', '退潮'):
+            blocks.append({'type': 'para', 'text': f'情绪定位{position}：本轮不出买入候选'
+                            + ('；企稳信号（跌停<涨停 且 昨日涨停溢价>0 且 空间板高度回升）'
+                               ' 触发后，下一报告期再开放候选' if position == '冰点'
+                               else '（防守降仓期，避开高位股与断板梯队）；高度重建或冰点企稳后再开放')})
+        elif gate == 'closed' and position in ('高潮', '回暖/震荡'):
+            blocks.append({'type': 'para', 'text': _gate_note(adx_info, market_weak)})
+            blocks.append({'type': 'para',
+                           'text': '指数趋势闸门关闭（震荡/下行）：本轮不出买入候选——'
+                                   'ADX 闸门与情绪开放度叠加生效（任一层关闭即不出）'})
+        elif position in ('高潮', '回暖/震荡'):
+            # 高潮 × 弱档 / 回暖震荡 × 弱档全关（openness_text 已注明）
+            blocks.append({'type': 'para', 'text': pub.get('openness_text') or reason})
+            blocks.append({'type': 'para', 'text': _gate_note(adx_info, market_weak)})
+            if market_weak:
+                weak_txt = _r1_weak_veto_text(cand)
+                if weak_txt:
+                    blocks.append({'type': 'note', 'text': weak_txt})
+        else:
+            blocks.append({'type': 'para',
+                           'text': f'情绪定位异常（{position or "空"}）：本轮不出买入候选，'
+                                   '转人工复核——判据异常时兜底方向为全关而非全开（P4-4）'})
+        blocks.append({'type': 'para', 'text': '正式右侧候选 0 只（发布批次：各池均未开放）。'})
         blocks.append({'type': 'note',
                        'text': '候选为规则筛选的观察名单，非推荐；判据初版待校准，'
                                '本报告不构成投资建议'})
+        blocks.extend(_theme_watch_blocks(pub))
         return blocks
-    elif position == '回暖/震荡':
-        openness = '回暖/震荡：四类候选全开'
-        open_types = ('R1', 'R2', 'R3', 'R4')
-    else:
-        # P4-4（B6）：异常/未知定位（试用版判据待校准、数据不足、空等）兜底
-        # 从"四类候选全开"改为"全关+人工复核"——判据异常时不得向激进方向兜底
-        blocks.append({'type': 'para',
-                       'text': f'情绪定位异常（{position or "空"}）：本轮不出买入候选，'
-                               '转人工复核——判据异常时兜底方向为全关而非全开（P4-4）'})
-        blocks.append({'type': 'note',
-                       'text': '候选为规则筛选的观察名单，非推荐；情绪定位恢复为'
-                               '四态判据之一后自动恢复开放'})
-        return blocks
-    # ADX 闸门（P1-7 §4.6 E）：指数趋势强度挡位，叠加在情绪开放度之上
-    adx_info = cand.get('adx_gate') or {}
-    gate = str(adx_info.get('gate') or 'closed')
-    market_weak = bool(adx_info.get('market_weak'))
-    # 弱档判定随行渲染（V4.3 A1）：ma60/market_weak 在 adx_info 已算出，此前
-    # 零渲染——弱档否决对读者不可见，开放度行与 R1=0 表面矛盾（20261023 实况）。
-    # gate=full/half 且 market_weak 时触发源必为 MA60 简化规则（与 closed 取或）；
-    # 该分支下 MA60 必下行，↓ 标注准确；closed 档 MA60 方向未知不标。
-    weak_note = ''
-    if adx_info.get('ma60') is not None:
-        if market_weak:
-            src = 'ADX 闸门 closed' if gate == 'closed' else 'MA60 简化规则'
-            weak_note = (f"；MA60 {adx_info['ma60']:.0f}"
-                         f"{'↓' if gate != 'closed' else ''} vs 收盘 "
-                         f"{adx_info.get('close', 0):.0f}"
-                         f"——弱档判定生效（R1 不开放；触发源={src}）")
-        else:
-            weak_note = (f"；MA60 {adx_info['ma60']:.0f} vs 收盘 "
-                         f"{adx_info.get('close', 0):.0f}——弱档判定未生效")
-    gate_note = (f"指数 ADX 闸门：{gate}"
-                 + (f"（{adx_info['index']} ADX {adx_info['adx']}"
-                    f"{'↑' if adx_info.get('adx_rising') else '↓'}，"
-                    f"收盘 {adx_info['close']:.0f} vs MA20 {adx_info['ma20']:.0f}）"
-                    if adx_info.get('adx') is not None
-                    else f"（{adx_info.get('reason', '数据不足')}）")) + weak_note
-    if gate == 'closed':
-        blocks.append({'type': 'para', 'text': gate_note})
-        blocks.append({'type': 'para',
-                       'text': '指数趋势闸门关闭（震荡/下行）：本轮不出买入候选——'
-                               'ADX 闸门与情绪开放度叠加生效（任一层关闭即不出）'})
-        blocks.append({'type': 'note',
-                       'text': '候选为规则筛选的观察名单，非推荐；ADX 口径 = 通达信 '
-                               'SUM+MA 平滑（indicators.adx）；本报告不构成投资建议'})
-        return blocks
-    if gate == 'half':
-        open_types = tuple(t for t in open_types if t in ('R1', 'R2'))
-        openness += '；ADX 半开放（仅 R1/R2）'
-    else:
-        openness += '；ADX 全开放'
-    if market_weak:
-        # V4.3 A1：弱档否决随行——market_weak=True 时 is_r1 整类拒绝 R1（含
-        # half 档），不标注则本行与 R1 池空表面矛盾（到此处 gate 必非 closed，
-        # 触发源必为 MA60 简化规则，括注文字准确）；基础文案同步替换，
-        # 禁"四类候选全开"与 R1 剔除说明同行走缝
-        open_types = tuple(t for t in open_types if t != 'R1')
-        openness = openness.replace('四类候选全开',
-                                    'R2 开放（R1 因弱档否决不开放）'
-                                    if gate == 'half' else
-                                    'R2-R4 开放（R1 因弱档否决不开放）')
-        openness += '——P1-10：收盘<MA60 且 MA60 下行'
+
+    # 开放度行 + 闸门说明（文案与发布批次一致）
+    openness = pub.get('openness_text') or ''
     blocks.append({'type': 'para', 'text': f'候选开放度：{openness}'})
-    blocks.append({'type': 'para', 'text': gate_note})
+    blocks.append({'type': 'para', 'text': _gate_note(adx_info, market_weak)})
     # V4.3 A2：弱档否决 R1 明细随行（R1 已被剔出 open_types，空池三态文案
     # 不会触发）——链 CSV R1 列为全量命中（不带弱档闸门），链/报告差异看报告行
     if market_weak and 'R1' not in open_types:
@@ -559,26 +520,24 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
         'R3': lambda r: fmt_amt(r.get('amount')),
         'R4': lambda r: '龙虎榜席位口径（一日榜）',
     }
-    _HAS_MONEY = {'R1', 'R2', 'R3'}  # 资金确认列合并进证据列后不再单独输出
 
     for ctype in open_types:
         label, rule_desc = _CANDIDATE_META[ctype]
         rule_desc = rule_desc.format(**{**DEFAULT_BUY_RULES, **brules})
-        pool = cand.get(ctype) or []
-        # 展示排序（P1-7 D）：五维加权评分优先（score 非 None），证据计数降序
-        # 兜底（评分缺失的旧数据/无维度股票）；两者都缺 → 维持原稳定次序
-        ranked = sorted(
-            pool,
-            key=lambda r: (-(r.get('score') if r.get('score') is not None else -1),
-                           -int(r.get('evidence_count') or 0)))
+        pool = pub['pools'][ctype]
+        # 正文候选表逐项 = 发布名单 published（§3.3：读者看到的名单与次日
+        # 评价的名单一致；截断差异见 pool['truncated']，不静默缩池）
+        published = pool['published']
+        n_eligible = pool['n_eligible']
         rows = [[r.get('code') or '—', r.get('name') or '—', r.get('label') or '—',
                  _REMARK[ctype](r),
                  ('/'.join(r.get('evidence') or []) or '—')
                  + (f"（{r['evidence_count']}证）" if r.get('evidence') else ''),
                  (f"{r['score']:.1f}" if r.get('score') is not None else '—')]
-                for r in ranked[:top_n]]
+                for r in published]
         blocks.append({'type': 'heading', 'level': 3,
-                       'text': f'{label}（{len(pool)} 只，按五维评分展示前 {min(top_n, len(pool))}，'
+                       'text': f'{label}（开放池全量 {n_eligible} 只，发布前 '
+                               f'{min(top_n, len(published))} 只，'
                                f'规则：{rule_desc}）'})
         blocks.append({'type': 'note', 'text': _r_pool_prior(agg, ctype)})  # P4-8 先验随行
         if rows:
@@ -608,6 +567,9 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
     elif cand.get('vetoed_count') == 0:
         blocks.append({'type': 'para', 'text': '一票否决出池：本报告期 0 只'})
 
+    # 题材跟踪（§3.3：未开放池的原始命中单列——注明来源，不附交易条件）
+    blocks.extend(_theme_watch_blocks(pub))
+
     blocks.append({'type': 'note',
                    'text': '候选为规则筛选的观察名单（判据初版 2026-10-05 新增，阈值 config '
                            'review.tomorrow_plan.buy_rules，待用户校准定稿）；全量底表见链 CSV '
@@ -616,4 +578,51 @@ def _buy_candidates(agg: Dict[str, Any], rules: Dict[str, Any]) -> List[Dict[str
                            '与报告同规则同序）；'
                            '「是否买入」由转天走势对决策树的验证决定——确认/否决/风控三分支缺一'
                            '不可；竞价与盘中阈值参数由个人风险偏好校准；本报告不构成投资建议'})
+    return blocks
+
+
+def _gate_note(adx_info: Dict[str, Any], market_weak: bool) -> str:
+    """ADX 闸门说明行（V4.3 A1 弱档随行——ma60/market_weak 已在 adx_info 算出，
+    此前零渲染；gate=full/half 且 market_weak 时触发源必为 MA60 简化规则）。"""
+    gate = str(adx_info.get('gate') or 'closed')
+    weak_note = ''
+    if adx_info.get('ma60') is not None:
+        if market_weak:
+            src = 'ADX 闸门 closed' if gate == 'closed' else 'MA60 简化规则'
+            weak_note = (f"；MA60 {adx_info['ma60']:.0f}"
+                         f"{'↓' if gate != 'closed' else ''} vs 收盘 "
+                         f"{adx_info.get('close', 0):.0f}"
+                         f"——弱档判定生效（R1 不开放；触发源={src}）")
+        else:
+            weak_note = (f"；MA60 {adx_info['ma60']:.0f} vs 收盘 "
+                         f"{adx_info.get('close', 0):.0f}——弱档判定未生效")
+    gate_note = (f"指数 ADX 闸门：{gate}"
+                 + (f"（{adx_info['index']} ADX {adx_info['adx']}"
+                    f"{'↑' if adx_info.get('adx_rising') else '↓'}，"
+                    f"收盘 {adx_info['close']:.0f} vs MA20 {adx_info['ma20']:.0f}）"
+                    if adx_info.get('adx') is not None
+                    else f"（{adx_info.get('reason', '数据不足')}）")) + weak_note
+    return gate_note
+
+
+def _theme_watch_blocks(pub: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """题材跟踪段（§3.3）：未开放池的原始命中单列——题材样本，注明来源，
+    不附正式候选的交易条件（2026-11-23 三只 R2 原始命中的归处）。"""
+    watch = pub.get('theme_watch') or []
+    if not watch:
+        return []
+    blocks = [{'type': 'heading', 'level': 3,
+               'text': f'题材跟踪（{len(watch)} 只，非正式候选）'}]
+    rows = [[w.get('code') or '—', w.get('name') or '—',
+             w.get('label') or '—',
+             '/'.join(str(c) for c in (w.get('concepts') or [])) or '—']
+            for w in watch]
+    blocks.append({'type': 'table',
+                   'headers': ['代码', '名称', '命中画像', '所属概念'],
+                   'rows': rows})
+    blocks.append({'type': 'note',
+                   'text': '来源：候选池未开放时的原始命中（发布批次 theme_watch）——'
+                           '题材样本仅作跟踪观察（当日涨停聚集与题材延续的检验），'
+                           '不附正式候选的买入决策树与交易条件；次日核验不计入'
+                           '正式池战绩（研究样本另用 scope）。'})
     return blocks

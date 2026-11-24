@@ -26,7 +26,12 @@ def _cs(rows, date='20260930'):
 
 
 class _StubReader:
-    """DataReader 替身：overseas_rows 按 market_code（首个查询参数）区分返回"""
+    """DataReader 替身：overseas 行按 market_code（首个查询参数）区分返回。
+
+    行格式与 scenario.read_anchor_quote 的 SQL 一致：(close, trade_date,
+    first_seen)；情景查询按 trade_date < as_of 过滤后取最新（业务日规则，
+    与真实 SQL 同语义——同日港美收盘不可用）。
+    """
 
     def __init__(self, overseas_rows=None, index_rows=None, verify_rows=None,
                  overseas_by_code=None):
@@ -39,9 +44,12 @@ class _StubReader:
         s = str(sql)
         if 'overseas_kline_day' in s:
             code = params[0] if params else None
-            if code in self.overseas_by_code:
-                return [(self.overseas_by_code[code],)]
-            return self.overseas_rows
+            as_of = params[1] if params and len(params) > 1 else None
+            rows = self.overseas_by_code.get(code, self.overseas_rows)
+            if as_of:
+                rows = [r for r in rows if str(r[1]) < str(as_of)]
+            rows = sorted(rows, key=lambda r: str(r[1]), reverse=True)
+            return [rows[0]] if rows else []
         if 'trade_index_info' in s:
             return self.index_rows
         if 'review_verification_daily' in s:
@@ -61,8 +69,8 @@ def _pred_payload(**overrides):
             'V3': {'premium_mean': 1.30, 'limit_up_count': 56},
         },
         'scenarios': {'gap_pct': 1.5,
-                      'anchors': {'恒生指数': {'close': 24613.0, 'date': '20260930'},
-                                  '纳斯达克': {'close': 26861.0, 'date': '20260930'}}},
+                      'anchors': {'恒生指数': {'close': 24613.0, 'date': '20260928'},
+                                  '纳斯达克': {'close': 26861.0, 'date': '20260928'}}},
         'candidates': {
             'R1': [{'ts_code': 'sh.600001', 'code': '600001', 'name': '甲',
                     'label': '7板/开板0次', 'evidence_count': 2}],
@@ -116,7 +124,7 @@ def test_verify_candidates_excess_and_states():
     ])
     metrics = {'premium_mean': 2.0, 'limit_up_count': 1}
     reader = _StubReader(
-        overseas_rows=[(24131.0,)],           # 恒指最新收盘（-1.96% → P1 触发）
+        overseas_rows=[(24131.0, '20260929', None)],  # 恒指新收盘（-1.96% → P1）
         index_rows=[(3810.0, 3828.0)],        # 上证 open/preclose → 低开
     )
     out = verify_predictions(_pred_payload(), '20260929', today, metrics, reader,
@@ -151,7 +159,7 @@ def test_verify_scenario_trigger_and_fulfillment():
     """情景：恒指累计 ≤ -1.5% → P1 触发；上证低开 → 低开预期成立。"""
     metrics = {'premium_mean': 2.0}
     today = _cs([('600010', 0.0, False, False, False)])
-    reader = _StubReader(overseas_rows=[(24131.0,)],   # 24131/24613-1 ≈ -1.96%
+    reader = _StubReader(overseas_rows=[(24131.0, '20260929', None)],  # -1.96%
                          index_rows=[(3810.0, 3828.0)])
     out = verify_predictions(_pred_payload(), '20260929', today, metrics, reader,
                              {'恒生指数': 'hkHSI', '纳斯达克': 'usIXIC'})
@@ -166,7 +174,9 @@ def test_verify_scenario_p2_no_fulfillment():
     metrics = {'premium_mean': 2.0}
     today = _cs([('600010', 0.0, False, False, False)])
     reader = _StubReader(
-        overseas_by_code={'hkHSI': 24600.0, 'usIXIC': 26900.0},  # ≈0% → P2
+        # 两锚均 ≈0%（业务日 0929，新于基准日 0930 冻结语义下的核验日 0930）
+        overseas_by_code={'hkHSI': [(24600.0, '20260929', None)],
+                          'usIXIC': [(26900.0, '20260929', None)]},
         index_rows=[(3828.0, 3828.0)])
     out = verify_predictions(_pred_payload(), '20260929', today, metrics, reader,
                              {'恒生指数': 'hkHSI', '纳斯达克': 'usIXIC'})

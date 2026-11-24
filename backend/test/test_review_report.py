@@ -176,18 +176,70 @@ class TestSections:
         assert '⏳ 待补：板块数据（映射表为空）' in text
 
     def test_sector_mainline_candidate(self):
+        # §3.2（2026-11-24）：五日榜为新口径（逐日等权 + 复利），高低切换
+        # 需要 industry_5d_prev（同周期昨榜）才渲染
+        def _r5(industry, ret, sessions=None, counts=None):
+            sessions = sessions or ['D1', 'D2', 'D3', 'D4', 'D5']
+            counts = counts or [40] * 5
+            return {'industry': industry, 'return_5d_pct': ret,
+                    'daily': [{'date': d, 'ret_pct': ret / 5, 'n': c}
+                              for d, c in zip(sessions, counts)],
+                    'daily_counts': counts, 'unique_stocks': counts[0],
+                    'stock_days': sum(counts), 'days_valid': 5,
+                    'is_concept': False}
         agg = {'available': True, 'data': {
             'industry_today': [{'industry': '半导体', 'mean_change': 3.2, 'stocks': 80},
                                {'industry': '证券', 'mean_change': 2.1, 'stocks': 40}],
-            'industry_5d': [{'industry': '半导体', 'mean_change': 8.1, 'stocks': 80},
-                            {'industry': '白酒', 'mean_change': 4.0, 'stocks': 20}],
+            'industry_5d': [_r5('半导体', 8.1, counts=[80]),
+                            _r5('白酒', 4.0, counts=[20])],
+            'industry_5d_prev': [_r5('半导体', 7.9, counts=[80])],
             'limit_up_clusters': [{'concept': '半导体', 'count': 12, 'share': 0.15},
                                   {'concept': '光模块', 'count': 9, 'share': 0.3}],
+            # §4.2（2026-11-24）：主线候选改代码交集（聚合层 theme_links 产物）
+            'theme_links': {
+                'industries': ['半导体', '白酒'],
+                'concepts': ['半导体', '光模块'],
+                'pairs': [{'industry': '半导体', 'concept': '半导体',
+                           'n_intersection': 12, 'n_intersection_limit_up': 8,
+                           'industry_valid_n': 80, 'concept_valid_n': 60,
+                           'shared_leaders': ['北方华创']}],
+                'themes': [{'concept': '半导体', 'members_n': 60,
+                            'tradable_n': 58, 'unknown_n': 2, 'limit_up_n': 12,
+                            'limit_rate': 12 / 58, 'new_first_board_n': 9,
+                            'prev_up_frozen_n': 3, 'promoted': 2,
+                            'prev_up_valid_n': 3, 'prev_up_missing_n': 0,
+                            'prev_up_invalid_n': 0, 'prev_up_median': 4.2}],
+                'union': {'n_sum': 13, 'n_union': 12,
+                          'shared': [{'ts_code': 'sz.002315', 'name': '焦点科技',
+                                      'concepts': ['半导体', '光模块']}]},
+                'mapping_coverage': {'limit_up_total': 30, 'with_industry': 28,
+                                      'with_concept': 27},
+            },
         }}
         text = blocks_to_markdown(sector_mainline.build(agg))
         assert '行业涨跌榜（今日，等权）' in text
-        assert '半导体' in text and '高低切换观察' in text
-        assert '主线候选' in text and '半导体（5 日榜前列 ∧ 涨停聚集前列）' in text
+        assert '半导体' in text and '高低切换观察（同周期今昨比较）' in text
+        # 白酒：今日 5 日榜前 10 且昨日同周期榜未列 → 新进
+        assert '白酒' in text and '新进入 5 日榜前 10' in text
+        # 证券：仅日榜前 10 → 跨周期排名差单列（不混入新进前十）
+        assert '今日与五日排名差（跨周期）' in text and '证券' in text
+        # §4.2：主线候选 = 代码交集表（替代旧名称包含匹配）
+        assert '主线候选（行业×题材代码交集）' in text
+        assert '北方华创' in text and '| 12 | 8 |' in text
+        assert '题材承接' in text and '涨停占比' in text
+        assert '跨题材涨停合计 13 家次，按代码并集去重为 12 只' in text
+        assert '焦点科技（半导体、光模块）' in text
+
+    def test_sector_mainline_no_theme_links_fallback(self):
+        """§4.2 渲染降级：theme_links 缺失（旧缓存）→ 主线候选空态，不报错。"""
+        agg = {'available': True, 'data': {
+            'industry_5d': [{'industry': '银行', 'return_5d_pct': 1.0,
+                             'daily': [], 'daily_counts': [], 'unique_stocks': 10,
+                             'stock_days': 50, 'days_valid': 5, 'is_concept': False}],
+            'limit_up_clusters': [{'concept': '半导体', 'count': 5, 'share': 0.1}],
+        }}
+        text = blocks_to_markdown(sector_mainline.build(agg))
+        assert '主线候选' in text and '主线暂不清晰' in text
 
     def test_fundamentals_partial_missing(self):
         agg = {'available': True, 'data': {'disclosure': {
@@ -240,7 +292,7 @@ class TestGeneratorBlocks:
         assert '每日复盘报告（锚定日 20260929）' in text
         assert '三、板块主线' in text and '⏳ 待补：板块数据' in text
         assert '五、业绩估值' in text and '待补' in text
-        assert '✓ 交叉校验：重算涨停家数 62 与链 CSV 一致' in text
+        assert '✓ 内部一致性（涨停重算）：重算涨停家数 62 与链 CSV 一致' in text
         assert '免责声明' in text
 
     def test_byte_stable_for_same_agg(self):
