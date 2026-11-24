@@ -68,6 +68,14 @@ sync:
   kline_day_raw_fallback:
     enabled: true                          # 总开关（除权校验始终强制执行，不受此开关影响）
     max_stocks_per_run: 1500               # 单次运行兜底股票数上限（防系统性故障时异常放大）
+    # ---- 批次2（数据采集链路耗时优化技术方案 V1.1 §4，2026-11-20）：恢复扫描拆分 ----
+    embedded_recover: auto                 # 内嵌恢复执行范围：auto=仅全市场日常增量执行（定向补股/显式区间/init 不再扫全台账，改由独立恢复作业领取）；on=总是执行（旧行为）；off=完全停用（独立作业验证后切换）
+    recover_max_stocks: 500                # 独立恢复作业（recover-kline-raw-fallback）单批股票数预算
+    recover_budget_seconds: 600            # 独立恢复作业墙钟预算（到预算停止发起新请求）
+    recover_backoff_seconds: 1800          # 未发布/拉取失败记录的退避秒（到期可重领）
+  # ---- 批次4（方案 V1.1 §3.2）：日K行情可用性预检（真实 qfq tail 代表标的，只留痕不阻断）----
+  kline_day_preflight:
+    representatives: sh600519,sz000001     # 沪/深代表标的（北交所自动从本次股票清单取一只）
   # ---- 数据采集链路风险修复（方案 V1.0，2026-11-18）----
   tdx_strict_mode: true                    # F8 strict 总开关：中间件连接/业务失败在行情主路径抛 TdxApiUnavailableError（false=退回旧行为返回空）
   kline_day_replace_min_ratio: 0.9         # F3 整股替换完整性：新行数 < 旧行数×比值时拒绝替换（0=关闭校验）
@@ -202,6 +210,12 @@ review_sync:
   # 通用（http_collector_base）
   default_timeout: [5, 30]        # 连接5s/读30s
   blocked_cooldown_seconds: 1800  # 风控急停冷却（20261117 600→1800：交易所 403 封禁为小时级，600s 重试必失败且多暴露一次；单源冷却占用一个 worker 槽，其余源不受阻）
+  # ---- 批次3（方案 V1.1 §5.1，2026-11-20）：补采接管冷却——主流程不再原地 sleep ----
+  pending_handoff_enabled: true   # true=风控急停登记持久化待补（sync_collection_retry）后立即释放工作线程，由 sync-review-pending 按到期领取；false=回退旧行为（冷却 sleep 后重试一次，§6 回滚开关）
+  pending_lag_retry_seconds: 300  # "待补（数据日滞后）"类缺口的补采重试间隔秒（急停/失败类用 blocked_cooldown_seconds）
+  # ---- 限流优化第一批（第三方数据采集限流与补采优化方案 20261120 §2/§3）----
+  domain_gate_enabled: false      # 请求级准入域门（DB 共享冷却/节拍/时隙）：缺省 false=仅本地节拍（代码先行、配置灰度，§5 发布顺序）；true 后按实际外发主机共享冷却（szse/sse/cninfo_query/cninfo_static/sina_vip/ths_basic/csindex 等），旧 exchange 域冷却记录在过期前仍被识别
+  sina_recheck_budget: 12         # 新浪板块整轮复核预算（数量不足/异常缩减重抓共享，防软限流下空页循环放大请求）
   retry_attempts: 3               # 网络类异常重试次数（风控信号不重试）
   # ---- 数据采集链路风险修复（方案 V1.0，2026-11-18）----
   freshness_check_enabled: true   # F1 数据新鲜度巡检（编排末尾自动跑；独立 CLI sync-freshness-check）

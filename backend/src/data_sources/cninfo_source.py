@@ -24,10 +24,13 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
 from ..utils.retry import run_with_retry
+from .domain_gate import build_endpoint_tag, get_gate, parse_retry_after
+from .errors import KIND_BLOCKED_PAGE, KIND_FORBIDDEN, KIND_RATE_LIMITED
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,20 @@ _FS_FORBIDDEN = re.compile(r'[\\/:*?"<>|\r\n]')
 
 
 class CninfoBlockedError(RuntimeError):
-    """巨潮风控触发（返回非 JSON/403/429/限流提示）：退避冷却后可重试"""
+    """巨潮风控触发（返回非 JSON/403/429/限流提示）：退避冷却后可重试
+
+    结构化字段（限流方案 20261120 §1）：kind/host/retry_after 随异常保留，
+    供管理器即时登记主机级域冷却与编排器结构化记账。
+    """
+
+    def __init__(self, message: str, *, kind: Optional[str] = None,
+                 host: Optional[str] = None, retry_after: Optional[int] = None,
+                 cooldown_seconds: Optional[int] = None):
+        super().__init__(message)
+        self.kind = kind
+        self.host = host
+        self.retry_after = retry_after
+        self.cooldown_seconds = int(cooldown_seconds) if cooldown_seconds else None
 
 
 class CninfoWindowTooLarge(RuntimeError):
@@ -73,7 +89,7 @@ class CninfoWindowTooLarge(RuntimeError):
 class CninfoSource:
     """巨潮资讯网：orgId 映射、定期报告检索、标题解析、PDF 下载（串行限速）"""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], gate: Optional[Any] = None):
         self.query_base_url = (config.get('query_base_url') or 'http://www.cninfo.com.cn').rstrip('/')
         self.static_base_url = (config.get('static_base_url') or 'http://static.cninfo.com.cn').rstrip('/')
         self.timeout = int(config.get('timeout', 30))
@@ -84,6 +100,11 @@ class CninfoSource:
         self.user_agent = config.get('user_agent') or DEFAULT_UA
         self._session = requests.Session()
         self._stock_map: Optional[Dict[str, Dict[str, str]]] = None
+        # 请求级准入域门（限流方案 §2）：巨潮查询/静态下载两主机分别记账；
+        # gate 未显式传入时用进程级单例（配置未开启时为本地 no-op）
+        self.gate = gate if gate is not None else get_gate(config)
+        self._query_host = urlparse(self.query_base_url).netloc.lower() or None
+        self._static_host = urlparse(self.static_base_url).netloc.lower() or None
 
     # ---------- 基础请求 ----------
 
@@ -100,18 +121,31 @@ class CninfoSource:
     def _attempt_query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if self.query_interval > 0:
             time.sleep(self.query_interval)
-        resp = self._session.post(f'{self.query_base_url}{QUERY_PATH}',
-                                  data=payload, headers=self._headers(), timeout=self.timeout)
+        url = f'{self.query_base_url}{QUERY_PATH}'
+        endpoint = build_endpoint_tag(url, data=payload)
+        # 请求级准入：冷却/端点暂停中直接拦截（DomainCooldownError，请求不外发）
+        self.gate.acquire(url, endpoint=endpoint)
+        resp = self._session.post(url, data=payload, headers=self._headers(),
+                                  timeout=self.timeout)
         if resp.status_code in (403, 429):
-            raise CninfoBlockedError(f'HTTP {resp.status_code}，疑似触发风控')
+            retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+            kind = KIND_RATE_LIMITED if resp.status_code == 429 else KIND_FORBIDDEN
+            self.gate.report(url, endpoint=endpoint, kind=kind,
+                             retry_after=retry_after, ok=False)
+            raise CninfoBlockedError(f'HTTP {resp.status_code}，疑似触发风控',
+                                     kind=kind, host=self._query_host,
+                                     retry_after=retry_after)
         resp.raise_for_status()
         try:
             return resp.json()
         except ValueError as e:
-            raise CninfoBlockedError('检索返回非 JSON，疑似触发风控/验证码') from e
+            self.gate.report(url, endpoint=endpoint, kind=KIND_BLOCKED_PAGE, ok=False)
+            raise CninfoBlockedError('检索返回非 JSON，疑似触发风控/验证码',
+                                     kind=KIND_BLOCKED_PAGE, host=self._query_host) from e
 
     def _post_query(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """检索请求：3 次重试，指数退避；封禁异常不吞，交给上层决策"""
+        """检索请求：网络类异常 3 次退避重试；明确拒绝（403/429/非 JSON）
+        不重试——裸重试会放大封禁（限流方案 §1，2026-10-26 公告 403 先例）"""
         def _on_error(attempt: int, e: BaseException) -> None:
             logger.warning(f'巨潮检索第 {attempt} 次失败: {e}')
             time.sleep(2 ** attempt)
@@ -119,7 +153,7 @@ class CninfoSource:
         return run_with_retry(
             lambda: self._attempt_query(payload),
             attempts=3, backoff=lambda a: 0,  # 退避在 on_error 中做，便于记录日志
-            retry_on=(requests.RequestException, CninfoBlockedError),
+            retry_on=(requests.RequestException,),
             on_error=_on_error,
         )
 
@@ -131,8 +165,15 @@ class CninfoSource:
             return self._stock_map
         if self.query_interval > 0:
             time.sleep(self.query_interval)
-        resp = self._session.get(f'{self.query_base_url}{STOCK_MAP_PATH}',
+        map_url = f'{self.query_base_url}{STOCK_MAP_PATH}'
+        self.gate.acquire(map_url, endpoint='szse_stock.json')
+        resp = self._session.get(map_url,
                                  headers={'User-Agent': self.user_agent}, timeout=60)
+        if resp.status_code in (403, 429):
+            kind = KIND_RATE_LIMITED if resp.status_code == 429 else KIND_FORBIDDEN
+            self.gate.report(map_url, endpoint='szse_stock.json', kind=kind, ok=False)
+            raise CninfoBlockedError(f'映射读取 HTTP {resp.status_code}，疑似触发风控',
+                                     kind=kind, host=self._query_host)
         resp.raise_for_status()
         stock_list = resp.json().get('stockList', [])
         stock_map: Dict[str, Dict[str, str]] = {}
@@ -367,6 +408,9 @@ class CninfoSource:
         url = f'{self.static_base_url}/{adjunct_url.lstrip("/")}'
         if self.download_interval > 0:
             time.sleep(self.download_interval)
+        endpoint = build_endpoint_tag(url)
+        # 静态下载主机独立记账（限流方案 §2：查询与静态主机分别准入）
+        self.gate.acquire(url, endpoint=endpoint)
         part_path = target_path.with_suffix(target_path.suffix + '.part')
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +419,13 @@ class CninfoSource:
                 headers={'User-Agent': self.user_agent,
                          'Referer': f'{self.query_base_url}/'})
             if resp.status_code in (403, 429):
-                raise CninfoBlockedError(f'HTTP {resp.status_code}，疑似触发风控')
+                retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+                kind = KIND_RATE_LIMITED if resp.status_code == 429 else KIND_FORBIDDEN
+                self.gate.report(url, endpoint=endpoint, kind=kind,
+                                 retry_after=retry_after, ok=False)
+                raise CninfoBlockedError(f'HTTP {resp.status_code}，疑似触发风控',
+                                         kind=kind, host=self._static_host,
+                                         retry_after=retry_after)
             resp.raise_for_status()
             expected = resp.headers.get('Content-Length')
             size = 0
@@ -391,13 +441,22 @@ class CninfoSource:
             if expected and int(expected) != size:
                 raise ValueError(f'Content-Length 不一致: 声明 {expected}，实收 {size}')
             part_path.replace(target_path)
+            self.gate.report(url, endpoint=endpoint, ok=True)
             logger.info(f'下载完成: {target_path.name}（{size} 字节）')
             return {'status': 'downloaded', 'size': size, 'error': None}
-        except (requests.RequestException, CninfoBlockedError, ValueError, OSError) as e:
+        except CninfoBlockedError:
+            # 明确拒绝向上抛：停止同主机后续附件与末轮自动重试（限流方案 §1/§3 P0）
             try:
                 part_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            raise
+        except (requests.RequestException, ValueError, OSError) as e:
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.gate.report(url, endpoint=endpoint, ok=True)
             logger.warning(f'下载失败 {url}: {e}')
             return {'status': 'failed', 'size': 0, 'error': str(e)}
 

@@ -26,8 +26,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.config_manager import ConfigManager
 from ..data_sources.cninfo_source import CninfoBlockedError, CninfoSource
+from ..data_sources.domain_gate import get_gate
+from ..data_sources.errors import DomainCooldownError
 from ..database.connection import DatabaseConnection
-from .review_common import clean_stock_name, code6_to_ts_code, tmp_dir, write_review_report
+from .review_common import (clean_stock_name, code6_to_ts_code,
+                            domain_cooldown_early_exit, mark_blocked,
+                            register_source_domain_cooldown, tmp_dir,
+                            write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +93,7 @@ class UnlockManager:
         self.default_days_back = int(section.get('days_back', 3))
         cninfo_cfg = dict(self.config.get('cninfo', {}) or {})
         cninfo_cfg.setdefault('query_interval', review.get('cninfo_interval', 0.5))
-        self.source = CninfoSource(cninfo_cfg)
+        self.source = CninfoSource(cninfo_cfg, gate=get_gate(self.config))
         self.pdf_dir = tmp_dir() / 'unlock_pdf'
 
     # ---------- 主流程 ----------
@@ -118,6 +123,12 @@ class UnlockManager:
         if not self.enabled:
             result['errors'].append('配置停用（review_sync.unlock.enabled=false）')
             result['skipped_disabled'] = True
+            result['duration'] = (datetime.now() - started).total_seconds()
+            result['report_path'] = self._write_report(result)
+            return result
+        # 域冷却继承预检（限流方案 §2）：冷却中本轮不外发
+        if domain_cooldown_early_exit(result, getattr(self.source, 'gate', None),
+                                      self.source.query_base_url, '巨潮解禁'):
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = self._write_report(result)
             return result
@@ -206,9 +217,10 @@ class UnlockManager:
                 # upsert 幂等，重跑/重叠窗口安全）
                 self.db.set_cursor('unlock', 'last_success_date', end.isoformat())
             result['success'] = True
-        except CninfoBlockedError as e:
-            result['blocked'] = True
-            result['errors'].append(f'巨潮风控急停（游标未推进，重跑自动补）: {e}')
+        except (CninfoBlockedError, DomainCooldownError) as e:
+            # 限流方案 §1/§2：结构化记账 + 即时登记域冷却（不等编排汇总）
+            mark_blocked(result, e, f'巨潮风控急停（游标未推进，重跑自动补）: {e}')
+            register_source_domain_cooldown(self.db, e, 'www.cninfo.com.cn')
         except Exception as e:
             result['errors'].append(str(e))
             logger.exception(f'解禁日历采集失败: {e}')

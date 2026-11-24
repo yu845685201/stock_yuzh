@@ -16,6 +16,7 @@ R-06 拆分后本文件为瘦外观（facade）：DatabaseConnection 由各 mixi
 - dao_anal.py          立体K线 DAO（AnalDaoMixin）
 - dao_review_sync.py   每日复盘数据采集 DAO（ReviewDaoMixin）
 - dao_collection_lineage.py  采集闭环台账 DAO（CollectionLineageDaoMixin）
+- dao_collection_retry.py    补采待办/域冷却 DAO（CollectionRetryDaoMixin）
 - dao_review_publication.py  发布批次 DAO（ReviewPublicationDaoMixin）
 """
 
@@ -30,6 +31,7 @@ from .dao_kline_day import KlineDayDaoMixin
 from .dao_anal import AnalDaoMixin
 from .dao_review_sync import ReviewDaoMixin
 from .dao_collection_lineage import CollectionLineageDaoMixin
+from .dao_collection_retry import CollectionRetryDaoMixin
 from .dao_review_publication import ReviewPublicationDaoMixin
 
 
@@ -44,6 +46,7 @@ class DatabaseConnection(
     AnalDaoMixin,
     ReviewDaoMixin,
     CollectionLineageDaoMixin,
+    CollectionRetryDaoMixin,
     ReviewPublicationDaoMixin,
 ):
     """数据库连接管理类 - 向后兼容，支持连接池优化"""

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from ..data_sources.http_collector_base import HttpCollectorBase, ReviewBlockedError
 from ..database.connection import DatabaseConnection
 from ..config.config_manager import ConfigManager
-from ..sync.review_common import write_review_report
+from ..sync.review_common import mark_blocked, write_review_report
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,8 @@ class EtfScaleManager:
         }
         result: Dict[str, Any] = {'success': True, 'stats': stats, 'errors': stats['errors']}
         try:
-            # 上交所逐日回补/增量
+            # 上交所逐日回补/增量（限流方案 §1：明确被拒即停止后续请求——
+            # 2026-11-19 实测曾逐日吞风控、以 1s 间隔继续打满剩余日期）
             day = start
             while day <= end:
                 ymd = day.strftime('%Y%m%d')
@@ -176,18 +177,23 @@ class EtfScaleManager:
                         stats['sse_days'] += 1
                         stats['sse_rows'] += len(rows)
                 except ReviewBlockedError as e:
-                    stats['errors'].append(f'sse {ymd} 风控: {e}')
+                    mark_blocked(result, e, f'官网风控急停（sse {ymd} 起 {stats["sse_days"]} 日'
+                                            f'已入库，余下区间待补）: {e}')
+                    break
                 except Exception as e:
                     stats['errors'].append(f'sse {ymd}: {e}')
                 day += timedelta(days=1)
-            # 深交所最新快照（仅当日；历史靠日常增量积累）
-            try:
-                szse_rows = self.fetch_szse(end.strftime('%Y%m%d'))
-                if szse_rows:
-                    self.db.upsert_etf_scale(szse_rows)
-                stats['szse_rows'] = len(szse_rows)
-            except Exception as e:
-                stats['errors'].append(f'szse: {e}')
+            if not result.get('blocked'):
+                # 深交所最新快照（仅当日；历史靠日常增量积累）
+                try:
+                    szse_rows = self.fetch_szse(end.strftime('%Y%m%d'))
+                    if szse_rows:
+                        self.db.upsert_etf_scale(szse_rows)
+                    stats['szse_rows'] = len(szse_rows)
+                except ReviewBlockedError as e:
+                    mark_blocked(result, e, f'官网风控急停（szse 快照，已入库数据保留）: {e}')
+                except Exception as e:
+                    stats['errors'].append(f'szse: {e}')
             # F2（方案 V1.0 §F2）：自报数据日（etf_scale_daily 当日 max），供编排层数据日校验
             try:
                 r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM etf_scale_daily')
@@ -195,10 +201,11 @@ class EtfScaleManager:
             except Exception:
                 stats['data_date_max'] = None
         except ReviewBlockedError as e:
-            result['success'] = False
-            result['errors'].append(f'风控急停: {e}')
+            mark_blocked(result, e, f'风控急停: {e}')
         finally:
             stats['duration'] = round((datetime.now() - started).total_seconds(), 1)
+            if result.get('blocked'):
+                result['success'] = False  # 急停轮不视为成功（已入库分区保留，余下待补）
             if write_report:
                 lines = [
                     f"- 区间：{stats['start']} ~ {stats['end']}；上交所 {stats['sse_days']} 日"

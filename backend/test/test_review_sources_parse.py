@@ -306,7 +306,7 @@ def test_szse_lhb_row_aggregation_multi_reason(monkeypatch):
         })
     db = FakeLhbDB()
     m = _make_lhb_manager(source, db)
-    stocks, details = m._collect_szse('20260930')
+    stocks, details, seat_gaps = m._collect_szse('20260930')
 
     assert len(stocks) == 2
     by_reason = {s['reason']: s for s in stocks}

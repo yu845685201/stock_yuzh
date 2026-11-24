@@ -10,6 +10,9 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import psycopg2
+
 from ..config import ConfigManager
 from ..data_sources import TdxApiSource
 from ..database import DatabaseConnection
@@ -313,6 +316,26 @@ class SyncManager:
                     result['success'] = True
                     return result
 
+            run_mode_name = ('init' if init_mode
+                             else ('codes' if ts_codes
+                                   else ('explicit_range' if is_explicit_range else 'daily')))
+            # 批次1（方案 V1.1 §3.1）：数据库写入模式下保存本次目标范围清单
+            # （按交易日、市场分组），供缺口对账与进程中断后重新对账
+            scope_path = None
+            if save_to_db:
+                try:
+                    scope_path = self._save_kline_day_scope_manifest(
+                        run_mode_name, trade_dates, stock_ts_codes)
+                except Exception as e:
+                    self.logger.warning(f"目标范围清单保存失败（不影响采集）: {e}")
+
+            # 批次4（方案 V1.1 §3.2）：日 K 行情可用性预检——真实 qfq tail 请求沪/深/北
+            # 代表标的，校验日期与返回结构；与 /api/health 存活检查分层（后者管可达性）。
+            # 尚未到发布时间、响应畸形、日期滞后分别留痕，不阻断主体（主体按单股口径处理）。
+            if not init_mode and save_to_db:
+                preflight = self._preflight_kline_day(stocks, trade_dates)
+                result['preflight'] = preflight
+
             fundamentals_map = self._build_fundamentals_map(
                 init_mode=init_mode,
                 ts_codes=stock_ts_codes,
@@ -384,11 +407,18 @@ class SyncManager:
                 stock_batch_size = 1000
             total_batches = (total_stocks + stock_batch_size - 1) // stock_batch_size
 
+            # 批次1（方案 V1.1 §3.1）：取消/未提交股票留痕（缺口清单分项）
+            cancelled_stocks: List[str] = []
+            not_submitted_stocks: List[str] = []
+
             for batch_no, batch_start in enumerate(range(0, total_stocks, stock_batch_size), start=1):
                 if ctx.circuit_tripped:
-                    # F5 整批熔断：上一批已触发，剩余批次不再提交
+                    # F5 整批熔断：上一批已触发，剩余批次不再提交——整批记"未提交"
+                    not_submitted_stocks.extend(
+                        s.get('ts_code') for s in stocks[batch_start:batch_start + stock_batch_size]
+                        if s.get('ts_code'))
                     self.logger.error(f"熔断生效，跳过批次 {batch_no}/{total_batches}")
-                    break
+                    continue
                 stock_batch = stocks[batch_start:batch_start + stock_batch_size]
                 batch_end = batch_start + len(stock_batch)
                 self.logger.info(
@@ -396,33 +426,60 @@ class SyncManager:
                 )
 
                 if max_workers and max_workers > 1 and len(stock_batch) > 1:
+                    from concurrent.futures import CancelledError
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = [
-                            executor.submit(
+                        # (future, stock) 对：取消/收齐时能对应回 ts_code
+                        future_pairs = [
+                            (executor.submit(
                                 safe_process_one_stock, s, batch_start + i + 1, ctx=ctx, deps=deps
-                            )
+                            ), s)
                             for i, s in enumerate(stock_batch)
                         ]
+                        futures = [f for f, _ in future_pairs]
                         batch_aborted = False
+                        merged_ids: set = set()
                         for future in as_completed(futures):
                             res = future.result()
+                            merged_ids.add(id(future))
                             merge_stock_result(res, ctx)
                             if res.get('circuit_tripped'):
-                                # F5：本批内触发熔断——取消未开始的 future 并中止后续批次
+                                # F5：本批内触发熔断——取消尚未开始的任务，中止后续批次；
+                                # 已在途结果必须收齐（§3.1：收齐所有已在途结果及其除权触发记录）
                                 batch_aborted = True
-                                for f in futures:
-                                    f.cancel()
+                                for f, s in future_pairs:
+                                    if f.cancel():
+                                        cancelled_stocks.append(s.get('ts_code'))
                                 break
                         if batch_aborted:
+                            # 收齐已在途结果：cancel 成功的抛 CancelledError 跳过；
+                            # 已收集的（merged_ids）不重复 merge；在途的阻塞至完成
+                            for f, s in future_pairs:
+                                if id(f) in merged_ids:
+                                    continue
+                                try:
+                                    res = f.result()
+                                    merged_ids.add(id(f))
+                                    merge_stock_result(res, ctx)
+                                except CancelledError:
+                                    pass  # 已在 cancelled_stocks 留痕
+                                except Exception as e:
+                                    self.logger.warning(f"收齐在途结果异常: {s.get('ts_code')} {e}")
                             self.logger.error("熔断触发，中止当前批次剩余股票与后续批次")
                             break
                 else:
+                    aborted_idx = None
                     for i, stock in enumerate(stock_batch):
                         res = safe_process_one_stock(stock, batch_start + i + 1, ctx=ctx, deps=deps)
                         merge_stock_result(res, ctx)
                         if res.get('circuit_tripped'):
                             self.logger.error("熔断触发，中止剩余股票与后续批次")
+                            aborted_idx = i
                             break
+                    if aborted_idx is not None:
+                        # 本批内熔断点之后的股票记"取消"，其余批次循环顶部统一记"未提交"
+                        cancelled_stocks.extend(
+                            s.get('ts_code') for s in stock_batch[aborted_idx + 1:]
+                            if s.get('ts_code'))
 
                 if ctx.circuit_tripped:
                     break
@@ -454,11 +511,33 @@ class SyncManager:
                 except Exception as e:
                     self.logger.warning(f"除权触发清单落盘失败（不影响日K同步）: {e}")
 
-            # raw 兜底恢复阶段（方案 V1.0 §3.4）：台账 open 记录重拉 qfq 覆盖销账
-            try:
-                self._recover_raw_fallback(trade_dates, result)
-            except Exception as e:
-                self.logger.warning(f"raw 兜底恢复阶段异常（不影响日K同步）: {e}")
+            # 批次1（方案 V1.1 §3.1）：缺口清单——失败/取消/未提交/目标日缺行分项，
+            # 与目标范围清单对账后落盘；报告中展示应到、实到、豁免与仍缺
+            if save_to_db:
+                try:
+                    gap_summary = self._build_kline_day_gap_ledger(
+                        run_mode_name, trade_dates, stock_ts_codes, ctx,
+                        cancelled_stocks, not_submitted_stocks)
+                    result['gap_summary'] = gap_summary
+                except Exception as e:
+                    self.logger.warning(f"缺口清单构建失败（不影响日K同步）: {e}")
+
+            # raw 兜底恢复阶段（方案 V1.0 §3.4；批次2 拆分，方案 V1.1 §4）：
+            # embedded_recover='auto'（默认）仅全市场日常增量执行；定向补股（--codes）、
+            # 显式区间与 init 不再扫全台账（当晚 4 轮重复扫描的痛点），改由独立恢复
+            # 作业 recover-kline-raw-fallback 按预算领取；'off' 完全停用内嵌恢复。
+            embedded_mode = str(self.config_manager.get(
+                'sync.kline_day_raw_fallback.embedded_recover', 'auto'))
+            should_embed_recover = (
+                embedded_mode == 'on'
+                or (embedded_mode == 'auto' and run_mode_name == 'daily'))
+            recover_start_ts = time.time()
+            if should_embed_recover:
+                try:
+                    self._recover_raw_fallback(trade_dates, result)
+                except Exception as e:
+                    self.logger.warning(f"raw 兜底恢复阶段异常（不影响日K同步）: {e}")
+            result['recover_skipped'] = not should_embed_recover
         except Exception as e:
             result['errors'].append(str(e))
             print(f"同步日K线失败: {e}")
@@ -483,6 +562,9 @@ class SyncManager:
         result['fallback_written'] = ctx.fallback_written
         result['fallback_skipped_exrights'] = ctx.fallback_skipped_exrights
         result['fallback_recovered'] = result.get('fallback_recovered', 0)
+        # 批次1（方案 V1.1 §3.1）：失败分类计数与观察模式组统计透出
+        result['failure_counts'] = dict(ctx.failure_counts)
+        result['group_stats'] = {k: dict(v) for k, v in ctx.group_stats.items()}
         result['report_path'] = self._write_kline_day_report(result, ctx.anomalies, timing)
 
         return result
@@ -658,8 +740,12 @@ class SyncManager:
             for item in qfq_list or []:
                 if isinstance(item, dict):
                     d = self._normalize_date_str(item.get('Time') or item.get('time'))
-                    if d:
-                        qmap[d] = item
+                    if not d:
+                        continue
+                    if target and d > target:
+                        # 未收盘交易日（盘中实时 bar）不得作为恢复依据（同独立恢复作业）
+                        continue
+                    qmap[d] = item
             for d in dates:
                 item = qmap.get(d)
                 if not item:
@@ -688,6 +774,378 @@ class SyncManager:
             )
         result['fallback_recovered'] = len(recovered_keys)
         return len(recovered_keys)
+
+    # ---------- 批次1（数据采集链路耗时优化技术方案 V1.1 §3.1）：范围/缺口清单与预检 ----------
+
+    def _save_kline_day_scope_manifest(self, run_mode_name: str,
+                                       trade_dates: Optional[List[str]],
+                                       stock_ts_codes: List[str]) -> Optional[str]:
+        """保存本次目标范围清单（按市场分组；tmp/kline_day_scope_YYYYMMDD.json）。
+
+        数据库写入模式下调用（§3.1：为本次目标范围保存按交易日、市场分组的代码清单），
+        供缺口对账与进程中断后按原范围重新对账。init 模式无单一目标日，文件名用当日。
+        """
+        import json
+        from .review_common import save_manifest, tmp_dir
+
+        codes_by_market: Dict[str, List[str]] = {}
+        for c in stock_ts_codes:
+            m = c.split('.')[0].lower() if '.' in c else 'unknown'
+            codes_by_market.setdefault(m, []).append(c)
+        target_dates = trade_dates or []
+        fname_date = max(target_dates) if target_dates else date.today().strftime('%Y%m%d')
+        payload = {
+            'run_mode': run_mode_name,
+            'target_dates': target_dates,
+            'codes_total': len(stock_ts_codes),
+            'codes_by_market': codes_by_market,
+            'updated_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        path = tmp_dir() / f'kline_day_scope_{fname_date}.json'
+        save_manifest(path, payload)
+        self.logger.info(
+            f"目标范围清单已保存: {len(stock_ts_codes)} 只 "
+            f"（{'/'.join(f'{k}:{len(v)}' for k, v in codes_by_market.items())}，{path.name}）")
+        return str(path)
+
+    def _build_kline_day_gap_ledger(self, run_mode_name: str,
+                                    trade_dates: Optional[List[str]],
+                                    scope_codes: List[str],
+                                    ctx: KlineDaySharedState,
+                                    cancelled_stocks: List[str],
+                                    not_submitted_stocks: List[str]) -> Dict[str, Any]:
+        """构建缺口清单并落盘（§3.1：失败、取消、未提交、目标日缺行分项）。
+
+        - failed：已提交但失败（分类明细见 ctx.stock_failures / failure_counts）
+        - cancelled：熔断取消（已提交给线程池但未开始）
+        - not_submitted：熔断后未提交的批次
+        - missing_on_target：目标日库内缺行（scope - 已写行），仅增量/显式区间模式；
+          init 模式无单一目标日，跳过该分项
+        豁免（停牌等有证据豁免）暂无证据源，报告以注释口径说明；孤立缺行由分析链
+        "连续缺行分流"承接（工作记忆 2026-09-24 口径）。
+        """
+        import json
+        from .review_common import save_manifest, tmp_dir
+
+        scope_set = set(scope_codes)
+        failed_codes = [f.get('ts_code') for f in ctx.stock_failures if f.get('ts_code')]
+        target_dates = trade_dates or []
+        missing_on_target: List[str] = []
+        present_codes: set = set()
+        if target_dates and run_mode_name in ('daily', 'explicit_range'):
+            # 目标日已写行（一次查询全部目标日期；缺行 = scope 交集补集）
+            for td in target_dates:
+                rows = self.db_conn.execute_query(
+                    "SELECT ts_code FROM his_kline_day WHERE trade_date = %s", (td,))
+                present_codes.update(r.get('ts_code') for r in rows if r.get('ts_code'))
+            missing_on_target = sorted(scope_set - present_codes
+                                       - set(c for c in cancelled_stocks if c)
+                                       - set(c for c in not_submitted_stocks if c))
+        fname_date = max(target_dates) if target_dates else date.today().strftime('%Y%m%d')
+        payload = {
+            'run_mode': run_mode_name,
+            'target_dates': target_dates,
+            'expected': len(scope_codes),
+            'submitted': len(ctx.submitted_stocks),
+            'failed': failed_codes,
+            'failed_counts': dict(ctx.failure_counts),
+            'failed_details': ctx.stock_failures,
+            'cancelled': sorted(set(c for c in cancelled_stocks if c)),
+            'not_submitted': sorted(set(c for c in not_submitted_stocks if c)),
+            'missing_on_target': missing_on_target,
+            'exempted_note': '停牌等有证据豁免暂无证据源；孤立单日缺行由分析链缺口分流承接',
+            'generated_at': datetime.now().isoformat(timespec='seconds'),
+        }
+        path = tmp_dir() / f'kline_day_gap_{fname_date}.json'
+        save_manifest(path, payload)
+        self.logger.info(
+            f"缺口清单已落盘: 失败 {len(failed_codes)} / 取消 {len(payload['cancelled'])} / "
+            f"未提交 {len(payload['not_submitted'])} / 目标日缺行 {len(missing_on_target)}（{path.name}）")
+        return {**{k: v for k, v in payload.items() if k != 'failed_details'},
+                'gap_path': str(path)}
+
+    def _preflight_kline_day(self, stocks: List[Dict[str, Any]],
+                             trade_dates: Optional[List[str]]) -> Dict[str, Any]:
+        """日 K 行情可用性预检（§3.2：分开检查服务可达性与行情可用性）。
+
+        - 可达性已由编排器 /api/health 预检覆盖；本预检用真实 qfq tail 请求
+        - 代表标的：沪/深固定配置（默认 sh600519/sz000001），北交所从本次股票清单取一只
+        - 校验：返回结构（非空 list、行含价格字段）、最新 bar 日期 ≥ 目标日（THS 未发布
+          时允许滞后一个交易日并标注 not_due）
+        - 预检与主体共享请求/超时预算（同一 TdxApiSource 实例）；结果只留痕不阻断
+        """
+        reps_cfg = str(self.config_manager.get(
+            'sync.kline_day_preflight.representatives', 'sh600519,sz000001'))
+        reps = [c.strip() for c in reps_cfg.split(',') if c.strip()]
+        if not any(c.lower().startswith('bj') for c in reps):
+            bj = next((s.get('ts_code') for s in stocks
+                       if (s.get('ts_code') or '').startswith('bj.')), None)
+            if bj:
+                reps.append(bj.replace('.', '').lower())
+        target = max(trade_dates) if trade_dates else None
+        preflight: Dict[str, Any] = {'representatives': {}, 'ok': True}
+        for rep in reps:
+            item: Dict[str, Any] = {'code': rep}
+            try:
+                rows = self.tdx_api_source.get_kline_qfq_tail(rep, 3)
+                if not rows or not isinstance(rows, list):
+                    item.update({'ok': False, 'note': 'empty_or_malformed'})
+                else:
+                    last = rows[-1] if isinstance(rows[-1], dict) else {}
+                    latest_td = self._normalize_date_str(last.get('Time') or last.get('time'))
+                    has_price = self._to_float(last.get('Close')) is not None
+                    item.update({'ok': bool(has_price), 'latest_date': latest_td,
+                                 'rows': len(rows)})
+                    if target and latest_td:
+                        if latest_td == target:
+                            item['note'] = 'ok'
+                        elif latest_td and latest_td < target:
+                            item.update({'ok': True, 'note': 'not_due',
+                                         'note_detail': f'最新 {latest_td} < 目标 {target}（THS 未发布或标的停牌）'})
+                if rep.lower().startswith('bj') and item.get('note') == 'not_due':
+                    # 北交所代表标的允许无当日数据（成交清淡/发布滞后），降级为留痕
+                    item['ok'] = True
+            except Exception as e:
+                item.update({'ok': False, 'note': 'request_failed',
+                             'error': f'{type(e).__name__}: {e}'})
+            if not item.get('ok'):
+                preflight['ok'] = False
+            preflight['representatives'][rep] = item
+        bad = [c for c, v in preflight['representatives'].items() if not v.get('ok')]
+        if bad:
+            self.logger.warning(f"日K行情预检异常（不阻断主体，单股按缺口处理）: {bad}")
+        else:
+            self.logger.info("日K行情预检通过（qfq tail 代表标的返回结构与日期正常）")
+        return preflight
+
+    # ---------- 批次2（数据采集链路耗时优化技术方案 V1.1 §4）：独立 raw 兜底恢复作业 ----------
+
+    def recover_raw_fallback_job(self, max_stocks: Optional[int] = None,
+                                 budget_seconds: Optional[int] = None,
+                                 backoff_seconds: Optional[int] = None,
+                                 max_attempts: Optional[int] = None) -> Dict[str, Any]:
+        """独立 raw 兜底恢复作业（方案 §4：把重复的全台账恢复移出采集主流程）。
+
+        - 入口：CLI recover-kline-raw-fallback；主作业完成后的调度与人工续跑共用
+        - 互斥：PostgreSQL 会话级 advisory lock，专用直连持锁、结束释放
+        - 预算：每批限制股票数与墙钟，达到预算后停止发起新请求（已在途项收尾）
+        - 领取：已到期、最久未尝试优先；同一股票日期合并为一次 qfq 请求
+        - 销账：短事务原子复核（台账 open + 行 source 条件写入），未发布单独退避
+        Returns:
+            {'success', 'exit_reason', 'recovered_price', 'recovered_ledger_only',
+             'deferred', 'row_missing', 'stocks_processed', 'backlog_start',
+             'backlog_end', 'budget', 'report_path'}
+        """
+        job: Dict[str, Any] = {
+            'success': False, 'exit_reason': '', 'recovered_price': 0,
+            'recovered_ledger_only': 0, 'deferred': 0, 'row_missing': 0,
+            'stocks_processed': 0, 'report_path': None,
+        }
+        max_stocks = int(max_stocks or self.config_manager.get(
+            'sync.kline_day_raw_fallback.recover_max_stocks', 500) or 500)
+        budget_seconds = int(budget_seconds or self.config_manager.get(
+            'sync.kline_day_raw_fallback.recover_budget_seconds', 600) or 600)
+        backoff_seconds = int(backoff_seconds or self.config_manager.get(
+            'sync.kline_day_raw_fallback.recover_backoff_seconds', 1800) or 1800)
+        job['budget'] = {'max_stocks': max_stocks, 'budget_seconds': budget_seconds,
+                         'backoff_seconds': backoff_seconds}
+
+        started_ts = time.time()
+        lock_conn = None
+        locked = False
+        try:
+            self.db_conn.ensure_raw_fallback_table()
+            # 会话级 advisory lock：专用直连（不走池），固定连接持锁、结束释放（§4）
+            lock_conn = psycopg2.connect(**self.db_conn.db_config)
+            lock_conn.autocommit = True
+            with lock_conn.cursor() as lc:
+                lc.execute("SELECT pg_try_advisory_lock(hashtext(%s))",
+                           ('kline_day_raw_fallback_recovery',))
+                locked = bool(lc.fetchone()[0])
+            if not locked:
+                job['exit_reason'] = 'locked'
+                self.logger.warning("已有 raw 兜底恢复作业在运行（advisory lock 占用），本次退出")
+                return job
+
+            backlog_start = self.db_conn.raw_fallback_backlog_stats()
+            job['backlog_start'] = backlog_start
+            self.logger.info(
+                f"raw 兜底恢复作业开始: 打开 {backlog_start['open_n']} 条"
+                f"（退避中 {backlog_start['deferred_n']}，最老兜底时刻 {backlog_start['oldest_fallback_at']}），"
+                f"预算 {max_stocks} 股 / {budget_seconds}s")
+
+            defer_pairs: List[tuple] = []
+            seen_stocks: set = set()
+            exit_reason = 'no_due'
+            while len(seen_stocks) < max_stocks:
+                if time.time() - started_ts > budget_seconds:
+                    exit_reason = 'budget_time'
+                    break
+                claim_limit = max(1, min(200, max_stocks - len(seen_stocks)))
+                claimed = self.db_conn.claim_raw_fallback_batch(
+                    limit=claim_limit, max_attempts=max_attempts)
+                if not claimed:
+                    exit_reason = 'no_due'
+                    break
+                # 同一股票的日期合并为一次 qfq 请求（§4 公平性）
+                by_stock: Dict[str, List[Dict[str, Any]]] = {}
+                for r in claimed:
+                    by_stock.setdefault(r['ts_code'], []).append(r)
+                budget_hit = False
+                for ts_code, rows in by_stock.items():
+                    if len(seen_stocks) >= max_stocks or time.time() - started_ts > budget_seconds:
+                        exit_reason = ('budget_stocks' if len(seen_stocks) >= max_stocks
+                                       else 'budget_time')
+                        budget_hit = True
+                        break
+                    dates = [r['trade_date'] for r in rows]
+                    seen_stocks.add(ts_code)
+                    api_code = ts_code.replace('.', '').upper()
+                    oldest = min(dates)
+                    target = self._latest_closed_trade_date().replace('-', '')
+                    try:
+                        span_rows = self._get_trade_dates(oldest, target)
+                        tail_limit = max(len(span_rows) + 3, 5)
+                    except Exception:
+                        tail_limit = 30
+                    try:
+                        qfq_list = self.tdx_api_source.get_kline_qfq_tail(api_code, tail_limit)
+                    except Exception as e:
+                        # 拉取失败 → 整股退避（网络失败/事务失败后余项仍能重领）
+                        defer_pairs.extend((ts_code, d) for d in dates)
+                        self.logger.warning(f"raw 兜底恢复 qfq 拉取失败（退避 {backoff_seconds}s）: "
+                                            f"{ts_code} {dates} {e}")
+                        continue
+                    qmap: Dict[str, Dict[str, Any]] = {}
+                    for item in qfq_list or []:
+                        if isinstance(item, dict):
+                            d = self._normalize_date_str(item.get('Time') or item.get('time'))
+                            if not d:
+                                continue
+                            if target and d > target:
+                                # 未收盘交易日（含盘中实时 bar）：THS 盘中会返回当日实时
+                                # qfq bar，不得作为"已发布"依据——盘中价覆盖兜底行会把
+                                # 半根K线固化为收盘价（2026-11-20 实战案例 26 行）。
+                                continue
+                            qmap[d] = item
+                    for d in dates:
+                        item = qmap.get(d)
+                        if not item:
+                            # 源可达但目标日期尚未发布 → 单独退避
+                            defer_pairs.append((ts_code, d))
+                            job['deferred'] += 1
+                            continue
+                        close_v = self._scale_price(self._to_float(item.get('Close')))
+                        if not close_v:
+                            defer_pairs.append((ts_code, d))
+                            job['deferred'] += 1
+                            continue
+                        open_v = self._scale_price(self._to_float(item.get('Open')))
+                        high_v = self._scale_price(self._to_float(item.get('High')))
+                        low_v = self._scale_price(self._to_float(item.get('Low')))
+                        preclose_v = self._scale_price(self._to_float(item.get('Last')))
+                        change_rate_v = None
+                        if preclose_v and preclose_v != 0:
+                            change_rate_v = (close_v - preclose_v) / preclose_v * 100
+                        try:
+                            outcome = self.db_conn.recover_raw_fallback_row_atomic(
+                                ts_code, d, open_v, high_v, low_v, close_v,
+                                preclose_v, change_rate_v)
+                        except Exception as e:
+                            defer_pairs.append((ts_code, d))
+                            self.logger.warning(f"raw 兜底原子恢复事务失败（退避）: "
+                                                f"{ts_code}@{d} {e}")
+                            continue
+                        if outcome == 'RECOVERED_PRICE':
+                            job['recovered_price'] += 1
+                        elif outcome == 'RECOVERED_LEDGER_ONLY':
+                            job['recovered_ledger_only'] += 1
+                        elif outcome == 'ROW_MISSING':
+                            job['row_missing'] += 1
+                            self.logger.warning(
+                                f"raw 兜底恢复异常: {ts_code}@{d} 行情行缺失"
+                                f"（台账保留打开，请人工核查）")
+                        elif outcome == 'ALREADY_CLOSED':
+                            pass  # 另一写者已销账，跳过
+                    job['stocks_processed'] += 1
+                # 每批处理完立即登记退避——下一批 claim 不再重复领取已处理记录
+                # （2026-11-20 实战教训：defer 延迟到循环外时，已处理记录的
+                #  next_retry_at 尚未写回，会被 claim 反复领取造成成倍无效劳动）
+                if defer_pairs:
+                    try:
+                        self.db_conn.defer_raw_fallback_rows(
+                            defer_pairs, backoff_seconds, last_error='not_published_or_failed')
+                    except Exception as e:
+                        # 退避登记失败只告警——记录仍可重领（幂等安全），不影响已恢复项
+                        self.logger.warning(f"退避登记失败（不影响已恢复项）: {e}")
+                    defer_pairs = []
+                if budget_hit:
+                    break  # 预算耗尽：停止发起新请求（本批已在途项已收尾）
+
+            backlog_end = self.db_conn.raw_fallback_backlog_stats()
+            job['backlog_end'] = backlog_end
+            # 预算满自然退出（非 break）时修正退出原因
+            if exit_reason == 'no_due' and len(seen_stocks) >= max_stocks:
+                exit_reason = 'budget_stocks'
+            job['exit_reason'] = exit_reason
+            job['success'] = True
+            job['elapsed'] = round(time.time() - started_ts, 1)
+            self.logger.info(
+                f"raw 兜底恢复作业完成: 处理 {job['stocks_processed']} 股，"
+                f"价格覆盖 {job['recovered_price']} / 仅销账 {job['recovered_ledger_only']} / "
+                f"退避 {job['deferred']} / 行缺失 {job['row_missing']}；"
+                f"期末打开 {backlog_end['open_n']} 条（退出原因 {exit_reason}，{job['elapsed']}s）")
+        except Exception as e:
+            job['exit_reason'] = 'error'
+            job['error'] = str(e)
+            self.logger.exception(f"raw 兜底恢复作业异常: {e}")
+        finally:
+            if lock_conn is not None:
+                try:
+                    if locked:
+                        with lock_conn.cursor() as lc:
+                            lc.execute("SELECT pg_advisory_unlock(hashtext(%s))",
+                                       ('kline_day_raw_fallback_recovery',))
+                except Exception:
+                    pass
+                lock_conn.close()
+
+        # 积压报告（§2 指标：期初积压、销账、期末积压、最老账龄）
+        try:
+            job['report_path'] = self._write_recover_report(job)
+        except Exception as e:
+            self.logger.warning(f"恢复作业报告写入失败: {e}")
+        return job
+
+    def _write_recover_report(self, job: Dict[str, Any]) -> Optional[str]:
+        """独立恢复作业积压报告（§4：报告列出预算值、实际耗时和退出原因）"""
+        bs = job.get('backlog_start') or {}
+        be = job.get('backlog_end') or {}
+        budget = job.get('budget') or {}
+        cleared = job['recovered_price'] + job['recovered_ledger_only']
+        lines = [
+            "# raw 兜底恢复作业报告（独立恢复作业，方案 V1.1 §4）",
+            "",
+            "## 积压账目（期初打开数 + 新增 − 实际结清 = 期末打开数）",
+            f"- 期初打开: {bs.get('open_n', 0)} 条（其中退避中 {bs.get('deferred_n', 0)}，"
+            f"最老兜底时刻 {bs.get('oldest_fallback_at') or '-'}）",
+            f"- 实际结清: {cleared} 条（价格覆盖 {job['recovered_price']}，"
+            f"仅销账 {job['recovered_ledger_only']}——对应行已由正常同步写回 qfq）",
+            f"- 本轮退避: {job['deferred']} 条（源可达但目标日未发布/拉取失败，"
+            f"{budget.get('backoff_seconds')}s 后可重领）",
+            f"- 行缺失异常: {job['row_missing']} 条（台账保留打开，需人工核查）",
+            f"- 期末打开: {be.get('open_n', 0)} 条（最老兜底时刻 {be.get('oldest_fallback_at') or '-'}）",
+            "",
+            "## 预算与退出",
+            f"- 预算: {budget.get('max_stocks')} 股 / {budget.get('budget_seconds')}s，"
+            f"实际处理 {job.get('stocks_processed', 0)} 股，耗时 {job.get('elapsed', 0)}s",
+            f"- 退出原因: {job.get('exit_reason')}",
+            f"- 成功: {'是' if job.get('success') else '否'}"
+            + (f"（{job.get('error')}）" if job.get('error') else ''),
+            "",
+        ]
+        return write_markdown_report(lines, 'kline_raw_fallback_recover_report',
+                                     log_label='raw兜底恢复作业报告')
 
     def _latest_closed_trade_date(self) -> str:
         """增量目标日：交易日历中 ≤ 今天的最近交易日；若为"今天"且未收盘（15:30 前）再退一日。
@@ -1298,7 +1756,8 @@ class SyncManager:
             "## raw 兜底（V1.0）",
             f"- 兜底写入: {result.get('fallback_written', 0)} 行（source=TDXAPI_RAWFB，台账追踪）",
             f"- 除权跳过: {result.get('fallback_skipped_exrights', 0)} 行（等 THS 恢复后正常入库）",
-            f"- 恢复销账: {result.get('fallback_recovered', 0)} 条（qfq 覆盖，source 回归 TDXAPI）",
+            f"- 恢复销账: {result.get('fallback_recovered', 0)} 条（qfq 覆盖，source 回归 TDXAPI）"
+            + ("（本轮跳过内嵌恢复，由独立恢复作业领取）" if result.get('recover_skipped') else ""),
             "",
             "## 性能信息",
             f"- tdx-api累计耗时: {timing.get('api_time', 0)} 秒",
@@ -1312,6 +1771,70 @@ class SyncManager:
             f"- 股票批次大小: {timing.get('stock_batch_size', 1000)}",
             ""
         ]
+
+        # 批次1（方案 V1.1 §3.1）：失败分类与缺口对账
+        failure_counts = result.get('failure_counts') or {}
+        if any(failure_counts.values()):
+            lines.append("## 单股失败分类（批次1）")
+            lines.append("")
+            lines.append(f"- 业务错误(biz): {failure_counts.get('biz', 0)} 次"
+                         "（中间件可达但查询失败，如 THS 慢性业务错误）")
+            lines.append(f"- 连接重试耗尽(conn): {failure_counts.get('conn', 0)} 次")
+            lines.append(f"- 其他(other): {failure_counts.get('other', 0)} 次"
+                         "（pipeline 内部异常；非零即代码回归信号）")
+            lines.append("")
+
+        gap = result.get('gap_summary')
+        if gap:
+            lines.append("## 缺口对账（批次1，应到/实到/豁免/仍缺）")
+            lines.append("")
+            lines.append(f"- 应到: {gap.get('expected')} 只（范围清单 {gap.get('run_mode')} 模式，"
+                         f"目标日 {','.join(gap.get('target_dates') or []) or '-'}）")
+            lines.append(f"- 已提交处理: {gap.get('submitted')} 只")
+            lines.append(f"- 失败: {len(gap.get('failed') or [])}"
+                         f"（biz {gap.get('failed_counts', {}).get('biz', 0)} / "
+                         f"conn {gap.get('failed_counts', {}).get('conn', 0)} / "
+                         f"other {gap.get('failed_counts', {}).get('other', 0)}）")
+            lines.append(f"- 取消: {len(gap.get('cancelled') or [])} 只（熔断取消未开始）")
+            lines.append(f"- 未提交: {len(gap.get('not_submitted') or [])} 只（熔断后未提交批次）")
+            lines.append(f"- 目标日缺行: {len(gap.get('missing_on_target') or [])} 只"
+                         "（应到代码库内无该日行情行）")
+            lines.append(f"- 豁免: {gap.get('exempted_note')}")
+            if gap.get('gap_path'):
+                lines.append(f"- 缺口清单: {gap['gap_path']}")
+            lines.append("")
+
+        # 批次4（方案 V1.1 §3.2）：预检与分组熔断观察模式
+        preflight = result.get('preflight')
+        if preflight:
+            lines.append("## 行情可用性预检（批次4）")
+            lines.append("")
+            for rep, v in (preflight.get('representatives') or {}).items():
+                note = v.get('note') or ('ok' if v.get('ok') else 'fail')
+                detail = f"，{v.get('note_detail')}" if v.get('note_detail') else ''
+                lines.append(f"- {rep}: {'✓' if v.get('ok') else '✗'} {note}"
+                             f"（最新 {v.get('latest_date') or '-'}，{v.get('rows', 0)} 根{detail}）")
+            lines.append("")
+        group_stats = result.get('group_stats') or {}
+        watch_groups = {}
+        for k, v in group_stats.items():
+            ok_n = v.get('ok', 0)
+            fail_n = v.get('biz', 0) + v.get('conn', 0) + v.get('other', 0)
+            total_req = ok_n + fail_n
+            if fail_n > 0 and total_req > 0 and fail_n >= total_req // 2:
+                watch_groups[k] = (v, fail_n, total_req)
+        if watch_groups:
+            lines.append("## 分组熔断观察模式（批次4，仅记录不暂停）")
+            lines.append("")
+            lines.append("| 接口|市场 | 成功 | biz | conn | other | 失败比例 |")
+            lines.append("|---|---|---|---|---|---|")
+            for k, (v, fail_n, total_req) in sorted(watch_groups.items()):
+                lines.append(f"| {k} | {v.get('ok', 0)} | {v.get('biz', 0)} | {v.get('conn', 0)} | "
+                             f"{v.get('other', 0)} | {fail_n / total_req:.0%} |")
+            lines.append("")
+            lines.append("> 观察模式：上表为'本应暂停的分组'候选，经多个交易日回放校准"
+                         "最小样本/窗口/比例后再启用自动暂停（§3.2）。")
+            lines.append("")
 
         if anomalies:
             lines.extend([

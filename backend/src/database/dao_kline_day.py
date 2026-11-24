@@ -221,18 +221,42 @@ class KlineDayDaoMixin:
         fallback_at timestamptz DEFAULT now(),
         recovered_at timestamptz,
         recover_source varchar(24),
+        -- 批次2（数据采集链路耗时优化技术方案 V1.1 §4）：可空的上次尝试时刻与下次
+        -- 可尝试时刻——旧的打开记录两列均为 NULL，首次运行即可领取；领取按
+        -- "已到期、最久未尝试优先"；源可达但目标日未发布的记录单独退避
+        last_attempt_at timestamptz,
+        next_retry_at timestamptz,
+        attempts integer NOT NULL DEFAULT 0,
+        last_error text,
         CONSTRAINT kline_day_raw_fallback_pk UNIQUE (ts_code, trade_date)
     )
     """
 
+    # 存量库补列（批次2 迁移；幂等，ensure 时执行）
+    RAW_FALLBACK_MIGRATE_DDL = [
+        "ALTER TABLE kline_day_raw_fallback ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz",
+        "ALTER TABLE kline_day_raw_fallback ADD COLUMN IF NOT EXISTS next_retry_at timestamptz",
+        "ALTER TABLE kline_day_raw_fallback ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0",
+        "ALTER TABLE kline_day_raw_fallback ADD COLUMN IF NOT EXISTS last_error text",
+        "CREATE INDEX IF NOT EXISTS idx_rawfb_claim ON kline_day_raw_fallback "
+        "(status, COALESCE(next_retry_at, '1970-01-01'::timestamptz))",
+    ]
+
     def ensure_raw_fallback_table(self) -> None:
-        """幂等创建 raw 兜底台账表（每次 sync_kline_day 启动时调用，CREATE IF NOT EXISTS）"""
+        """幂等创建 raw 兜底台账表 + 存量补列（每次 sync_kline_day 启动时调用）"""
         self.execute_update(self.RAW_FALLBACK_TABLE_DDL)
+        for ddl in self.RAW_FALLBACK_MIGRATE_DDL:
+            self.execute_update(ddl)
 
     def upsert_raw_fallback_records(self, records: List[Dict[str, Any]]) -> int:
         """
         批量写兜底台账（幂等）。status: 'fallback'（已兜底待恢复）| 'skip_exrights'（除权校验未过跳过）。
         已 recovered 的记录再次兜底时重置回未恢复状态（状态机允许回卷）。
+
+        批次2（方案 V1.1 §4）：幂等重写同一条兜底期间保持其首次兜底时间——仅当旧记录
+        已 recovered（回卷）时刷新 fallback_at，仍为 fallback 的保留首次兜底时间
+        （前复权恢复延迟按"从 raw 兜底入库到 qfq 转正"口径统计）；重写时重置
+        next_retry_at=NULL（立即可领，调度状态不阻塞新写入）。
         """
         if not records:
             return 0
@@ -245,9 +269,14 @@ class KlineDayDaoMixin:
             reason = EXCLUDED.reason,
             q_factor = EXCLUDED.q_factor,
             raw_close = EXCLUDED.raw_close,
-            fallback_at = NOW(),
+            fallback_at = CASE
+                WHEN kline_day_raw_fallback.status = 'fallback'
+                    THEN kline_day_raw_fallback.fallback_at   -- 保留首次兜底时间
+                ELSE NOW() END,                               -- recovered 回卷 → 新一次兜底
             recovered_at = NULL,
-            recover_source = NULL
+            recover_source = NULL,
+            next_retry_at = NULL,
+            last_error = NULL
         """
         params_list = [
             (
@@ -264,6 +293,150 @@ class KlineDayDaoMixin:
             "SELECT ts_code, trade_date FROM kline_day_raw_fallback "
             "WHERE status = 'fallback' ORDER BY trade_date, ts_code"
         )
+
+    # ---------- 批次2（方案 V1.1 §4）：独立恢复作业的领取/原子销账/退避 ----------
+
+    def claim_raw_fallback_batch(self, limit: int = 200,
+                                 max_attempts: Optional[int] = None) -> List[Dict[str, Any]]:
+        """领取一批已到期的打开台账（短事务，方案 §4"外部请求期间不开长事务"）。
+
+        领取规则：已到期（next_retry_at IS NULL 或 <= NOW()）、最久未尝试优先
+        （COALESCE(last_attempt_at, fallback_at) 升序）；同一股票的日期在调用方合并为
+        一次 qfq 请求。领取即更新 last_attempt_at/attempts（幂等安全：进程崩溃后
+        余项仍能重领）。FOR UPDATE SKIP LOCKED 保证多消费者不重复领取。
+
+        ⚠️ 领取语句含数据修改 CTE（UPDATE + RETURNING），必须走自提交短事务——
+        2026-11-20 实战教训：误用不提交的 execute_query 导致领取痕迹（attempts/
+        last_attempt_at）被回滚，已处理记录被反复领取 ~7 倍，预算大半耗在重复劳动。
+
+        Returns:
+            [{'ts_code', 'trade_date', 'attempts'}]
+        """
+        where_extra = ''
+        params: tuple = (limit,)
+        if max_attempts is not None:
+            where_extra = 'AND attempts < %s'
+            params = (max_attempts, limit)
+        sql = f"""
+        WITH picked AS (
+            SELECT id FROM kline_day_raw_fallback
+            WHERE status = 'fallback'
+              AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+              {where_extra}
+            ORDER BY COALESCE(last_attempt_at, fallback_at) ASC, trade_date ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE kline_day_raw_fallback f
+        SET last_attempt_at = NOW(), attempts = f.attempts + 1
+        FROM picked
+        WHERE f.id = picked.id
+        RETURNING f.ts_code, f.trade_date, f.attempts, f.last_error
+        """
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(sql, params)
+                rows = [dict(r) for r in cursor.fetchall()]
+            conn.commit()  # 领取痕迹必须落库（幂等重领与重复领取防线的基准）
+        return rows
+
+    def recover_raw_fallback_row_atomic(
+        self, ts_code: str, trade_date: str,
+        open_v: Optional[float], high_v: Optional[float], low_v: Optional[float],
+        close_v: Optional[float], preclose_v: Optional[float],
+        change_rate_v: Optional[float], recover_source: str = 'recovery_job'
+    ) -> str:
+        """单业务键原子恢复（方案 §4"并发与事务"：短事务内锁定并复核台账仍打开、
+        行情行仍是 TDXAPI_RAWFB，然后更新价格、来源和销账状态并提交）。
+
+        - 行已回归 TDXAPI（正常增量覆盖）→ 不写价格，仅处置对应台账（销账）
+        - 行仍是 TDXAPI_RAWFB → 条件覆盖价格 + 销账（拒绝较早获取的 raw 回写覆盖
+          已验收 qfq：WHERE source='TDXAPI_RAWFB' 条件写入）
+        - 行不存在（异常）→ 台账保留打开，返回 ROW_MISSING
+
+        Returns:
+            'RECOVERED_PRICE' | 'RECOVERED_LEDGER_ONLY' | 'ROW_MISSING' | 'ALREADY_CLOSED'
+        """
+        outcome = 'ROW_MISSING'
+        with self.get_connection() as conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT id FROM kline_day_raw_fallback "
+                        "WHERE ts_code = %s AND trade_date = %s AND status = 'fallback' "
+                        "FOR UPDATE",
+                        (ts_code, trade_date))
+                    if not cursor.fetchone():
+                        outcome = 'ALREADY_CLOSED'
+                    else:
+                        cursor.execute(
+                            "SELECT source FROM his_kline_day "
+                            "WHERE ts_code = %s AND trade_date = %s",
+                            (ts_code, trade_date))
+                        row = cursor.fetchone()
+                        row_source = row[0] if row else None
+                        if row is None:
+                            outcome = 'ROW_MISSING'  # 台账保留打开，报告提示人工核查
+                        elif row_source == 'TDXAPI':
+                            # 正常路径已写回权威 qfq → 同步处置对应台账，不动价格
+                            cursor.execute(
+                                "UPDATE kline_day_raw_fallback "
+                                "SET status='recovered', recovered_at=NOW(), recover_source=%s "
+                                "WHERE ts_code=%s AND trade_date=%s AND status='fallback'",
+                                (recover_source, ts_code, trade_date))
+                            outcome = 'RECOVERED_LEDGER_ONLY'
+                        else:
+                            # 仍是兜底行 → 条件覆盖价格（拒绝覆盖已验收 qfq）
+                            cursor.execute(
+                                "UPDATE his_kline_day "
+                                "SET open=%s, high=%s, low=%s, close=%s, preclose=%s, "
+                                "    change_rate=%s, source='TDXAPI', update_time=NOW() "
+                                "WHERE ts_code=%s AND trade_date=%s "
+                                "  AND (source='TDXAPI_RAWFB' OR source IS NULL)",
+                                (open_v, high_v, low_v, close_v, preclose_v,
+                                 change_rate_v, ts_code, trade_date))
+                            price_updated = cursor.rowcount > 0
+                            cursor.execute(
+                                "UPDATE kline_day_raw_fallback "
+                                "SET status='recovered', recovered_at=NOW(), recover_source=%s "
+                                "WHERE ts_code=%s AND trade_date=%s AND status='fallback'",
+                                (recover_source, ts_code, trade_date))
+                            outcome = 'RECOVERED_PRICE' if price_updated else 'ROW_MISSING'
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return outcome
+
+    def defer_raw_fallback_rows(self, pairs: List[tuple], backoff_seconds: int,
+                                last_error: Optional[str] = None) -> int:
+        """退避未恢复记录（方案 §4"源可达但目标日期尚未发布的记录单独退避"）：
+        next_retry_at = NOW() + backoff。仍打开，到期后可重领。"""
+        if not pairs:
+            return 0
+        sql = """
+        UPDATE kline_day_raw_fallback
+        SET next_retry_at = NOW() + (%s || ' seconds')::interval, last_error = %s
+        WHERE ts_code = %s AND trade_date = %s AND status = 'fallback'
+        """
+        params_list = [(str(backoff_seconds), last_error, ts_code, trade_date)
+                       for ts_code, trade_date in pairs]
+        return self.execute_batch(sql, params_list)
+
+    def raw_fallback_backlog_stats(self) -> Dict[str, Any]:
+        """积压统计（方案 §2 指标"前复权恢复延迟"：期初/期末积压与最老账龄）"""
+        rows = self.execute_query("""
+            SELECT COUNT(*) AS open_n,
+                   MIN(fallback_at) AS oldest_fallback_at,
+                   COUNT(*) FILTER (WHERE next_retry_at IS NOT NULL AND next_retry_at > NOW()) AS deferred_n
+            FROM kline_day_raw_fallback WHERE status = 'fallback'
+        """)
+        r = rows[0] if rows else {}
+        return {
+            'open_n': int(r.get('open_n') or 0),
+            'deferred_n': int(r.get('deferred_n') or 0),
+            'oldest_fallback_at': r.get('oldest_fallback_at'),
+        }
 
     def mark_raw_fallback_recovered(self, pairs: List[tuple], recover_source: str = 'recovery_stage') -> int:
         """批量销账：status='recovered'，recovered_at=now()。仅作用于仍为 fallback 的记录。"""

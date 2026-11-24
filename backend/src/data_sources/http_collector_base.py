@@ -6,14 +6,19 @@
 设计要点：
 - 会话：模块级唯一 requests.Session()（连接复用）；headers 每请求注入，源间不串
 - 超时：default_timeout 配置 [连接5s, 读30s]，防挂死
-- 限速：每源独立 request_interval（串行 sleep），不用 ApiRateLimiter（与 cninfo 惯例一致）
+- 限速：请求级准入域门（domain_gate）统一节拍——DB 模式（review_sync.
+  domain_gate_enabled=true）按主机共享冷却/节拍/时隙；本地模式退化为源内
+  串行 sleep（与旧行为一致）。单次 headers 与默认 headers 合并，显式覆盖项优先
 - 重试：请求级 run_with_retry，指数退避 + 随机抖动 ±20%；
-        仅对网络类异常/5xx 重试；风控信号（4xx/验证码页/非 JSON）不重试，直接抛 ReviewBlockedError
-        ——裸重试是触发封禁升级的主因（baostock/cninfo 先例均已验证此模式）
-- 风控识别钩子：_check_risk_control(resp)，子类覆写识别 403/429、验证码页特征串、
-  非 JSON 响应等（对照方案 §6.1 矩阵）；基类默认把 4xx 视为风控/不可用信号
-- 急停：manager 捕获 ReviewBlockedError → 本轮该源急停（结果 blocked=True），
-  冷却 sleep 后可由编排器决定是否重试一次；进度/断点已落盘可续
+        仅对网络类异常/5xx 重试；风控信号（4xx/验证码页/非 JSON）不重试，
+        直接抛 ReviewBlockedError——裸重试是触发封禁升级的主因
+- 拒绝分类（限流优化方案 20261120 §1）：429→rate_limited（解析 Retry-After）/
+  403,401→forbidden / 400→bad_request / 拦截页·非 JSON→blocked_page；
+  kind/host/endpoint/retry_after 随异常保留到单源报告、编排和补采。
+  429 或 5xx 携带有效 Retry-After 时遵守服务端等待时间、不再重试
+- 风控识别钩子：_check_risk_control(resp)，子类覆写识别验证码页特征串等
+- 急停：manager 捕获 ReviewBlockedError → 本轮该源急停（结果 blocked=True）；
+  pending_handoff 登记持久化待补后释放线程；进度/断点已落盘可续
 - 请求前后打 debug 日志（URL、状态码、耗时、字节数），问题可追溯
 
 安全红线（沿用 cninfo_source.py 文件头，对全部新源生效）：
@@ -25,10 +30,23 @@ import logging
 import random
 import time
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from urllib.parse import urlparse
 
 import requests
 
 from ..utils.retry import run_with_retry
+from .domain_gate import (
+    build_endpoint_tag,
+    get_gate,
+    parse_retry_after,
+)
+from .errors import (
+    KIND_BAD_REQUEST,
+    KIND_BLOCKED_PAGE,
+    KIND_FORBIDDEN,
+    KIND_RATE_LIMITED,
+    ReviewBlockedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +60,29 @@ _SNIPPET_CHARS = 200
 # 模块级唯一会话（连接复用；headers 逐请求注入，源间互不影响）
 _SESSION = requests.Session()
 
+__all__ = ['HttpCollectorBase', 'ReviewBlockedError', 'DEFAULT_UA']
+
+
+def _host_of(url: str) -> Optional[str]:
+    try:
+        return urlparse(url).netloc.lower() or None
+    except Exception:
+        return None
+
+
+def _classify_4xx(resp: requests.Response) -> Tuple[str, Optional[int]]:
+    """4xx → (kind, retry_after)，对齐方案 §1 表（400 不触发全域频控统计）"""
+    status = resp.status_code
+    retry_after = None
+    if status == 429:
+        retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+        return KIND_RATE_LIMITED, retry_after
+    if status in (401, 403):
+        return KIND_FORBIDDEN, None
+    if status == 400:
+        return KIND_BAD_REQUEST, None
+    return KIND_BLOCKED_PAGE, None
+
 
 def response_snippet(resp: requests.Response, limit: int = _SNIPPET_CHARS) -> str:
     """截取响应体片段（日志/异常用），二进制安全"""
@@ -52,31 +93,19 @@ def response_snippet(resp: requests.Response, limit: int = _SNIPPET_CHARS) -> st
     return ' '.join(text.split())[:limit]
 
 
-class ReviewBlockedError(RuntimeError):
-    """风控基类异常：该源本轮急停，冷却 cooldown_seconds 后可由编排器决定是否重试一次
-
-    各源子类化（如 ThsBlockedError），子类可覆写默认冷却时长。
-    """
-
-    cooldown_seconds: int = 600
-
-    def __init__(self, message: str, cooldown_seconds: Optional[int] = None):
-        super().__init__(message)
-        if cooldown_seconds is not None:
-            self.cooldown_seconds = int(cooldown_seconds)
-
-
 class HttpCollectorBase:
-    """外网 HTTP 采集基类：限速 + 重试 + 风控识别 + debug 日志
+    """外网 HTTP 采集基类：域门准入 + 限速 + 重试 + 风控识别 + debug 日志
 
     Args:
         config: 全量配置 dict（读取 review_sync 段通用项）
         source_name: 源名（日志与急停标识）
-        interval_seconds: 请求间隔（秒，各源从 config.yaml 独立取值后传入）
+        interval_seconds: 请求间隔（秒，各源从 config.yaml 独立取值后传入；
+            域门 DB 模式下作为该源对所属域的节拍贡献）
         referer: Referer（交易所站点强校验，每源必须配置正确）
         ajax: True 时追加 X-Requested-With: XMLHttpRequest（仅 AJAX 类接口）
         headers_override: 追加/覆盖 headers（Cookie 默认不带；THS hexin-v 一律不做——红线）
         blocked_error_class: 该源风控异常类（须为 ReviewBlockedError 子类）
+        gate: 请求级准入域门（缺省进程级单例；单测可注入假门）
     """
 
     blocked_error_class: Type[ReviewBlockedError] = ReviewBlockedError
@@ -87,7 +116,8 @@ class HttpCollectorBase:
                  ajax: bool = False,
                  headers_override: Optional[Dict[str, str]] = None,
                  blocked_error_class: Optional[Type[ReviewBlockedError]] = None,
-                 verify: Optional[str] = None):
+                 verify: Optional[str] = None,
+                 gate: Optional[Any] = None):
         review = (config or {}).get('review_sync', {}) or {}
         self.source_name = source_name
         self.request_interval = float(interval_seconds)
@@ -103,6 +133,7 @@ class HttpCollectorBase:
         self.verify = verify
         if blocked_error_class is not None:
             self.blocked_error_class = blocked_error_class
+        self.gate = gate if gate is not None else get_gate(config)
 
         headers = {
             'User-Agent': self.user_agent,
@@ -158,32 +189,71 @@ class HttpCollectorBase:
     def _attempt(self, method: str, url: str, *, params: Optional[Dict[str, Any]],
                  data: Optional[Dict[str, Any]], headers: Optional[Dict[str, str]],
                  expect_json: bool, allow_status: Tuple[int, ...]) -> Any:
-        if self.request_interval > 0:
-            time.sleep(self.request_interval)
+        # 请求级准入：冷却判断 + 共享节拍（冷却中抛 DomainCooldownError，请求不外发）
+        endpoint = build_endpoint_tag(url, params, data)
+        self.gate.acquire(url, min_interval=self.request_interval, endpoint=endpoint)
         started = time.time()
-        resp = _SESSION.request(method, url, params=params, data=data,
-                                headers=headers or self.headers,
-                                timeout=self.request_timeout, proxies=self._proxies,
-                                verify=self.verify)
+        # 单次自定义 headers 与默认 headers 合并，显式覆盖项优先
+        # （修复：仅传 Referer 的调用丢失采集器 UA/Accept 的既有缺陷）
+        merged_headers = {**self.headers, **(headers or {})}
+        try:
+            resp = _SESSION.request(method, url, params=params, data=data,
+                                    headers=merged_headers,
+                                    timeout=self.request_timeout, proxies=self._proxies,
+                                    verify=self.verify)
+        except requests.RequestException:
+            # 网络类失败：释放时隙，交由重试预算退避
+            self.gate.report(url, endpoint=endpoint, ok=True)
+            raise
         elapsed_ms = (time.time() - started) * 1000
         logger.debug(f'[{self.source_name}] {method} {url} -> {resp.status_code} '
                      f'({elapsed_ms:.0f}ms, {len(resp.content)}B)')
 
+        host = _host_of(url)
         if resp.status_code >= 500:
+            retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+            if retry_after is not None:
+                # 服务端明确要求等待：遵守等待时间，不再重试（方案 §1 网络类行）
+                self.gate.report(url, endpoint=endpoint, kind=KIND_RATE_LIMITED,
+                                 retry_after=retry_after, ok=False)
+                raise self._make_blocked(
+                    f'HTTP {resp.status_code}（服务端要求等待 {retry_after}s）',
+                    cooldown_seconds=max(self.blocked_cooldown_seconds, retry_after),
+                    kind=KIND_RATE_LIMITED, host=host, endpoint=endpoint,
+                    retry_after=retry_after)
             # 服务端/网关类异常：网络类失败，允许重试
+            self.gate.report(url, endpoint=endpoint, ok=True)
             resp.raise_for_status()
         if resp.status_code >= 400:
-            # 风控信号（4xx）：不重试，直接急停（子类 _check_risk_control 可更精细识别）
             if resp.status_code in allow_status:
+                # 已约定的未发布/缺文件等 404 语义：正常业务路径，非拒绝
+                self.gate.report(url, endpoint=endpoint, ok=True)
                 return resp
-            raise self._make_blocked(f'HTTP {resp.status_code}')
-        self._check_risk_control(resp)
+            kind, retry_after = _classify_4xx(resp)
+            cooldown = self.blocked_cooldown_seconds
+            if kind == KIND_RATE_LIMITED and retry_after:
+                cooldown = max(cooldown, retry_after)
+            self.gate.report(url, endpoint=endpoint, kind=kind,
+                             retry_after=retry_after, ok=False)
+            raise self._make_blocked(f'HTTP {resp.status_code}', cooldown_seconds=cooldown,
+                                     kind=kind, host=host, endpoint=endpoint,
+                                     retry_after=retry_after)
+        try:
+            self._check_risk_control(resp)
+        except ReviewBlockedError:
+            self.gate.report(url, endpoint=endpoint, kind=KIND_BLOCKED_PAGE, ok=False)
+            raise
         if expect_json:
             try:
-                return resp.json()
+                payload = resp.json()
             except ValueError as e:
+                self.gate.report(url, endpoint=endpoint, kind=KIND_BLOCKED_PAGE, ok=False)
                 raise self._make_blocked(
-                    f'返回非 JSON（疑似风控/验证码/改版）: {response_snippet(resp)}') from e
+                    f'返回非 JSON（疑似风控/验证码/改版）: {response_snippet(resp)}',
+                    kind=KIND_BLOCKED_PAGE, host=host, endpoint=endpoint) from e
+            self.gate.report(url, endpoint=endpoint, ok=True)
+            return payload
+        self.gate.report(url, endpoint=endpoint, ok=True)
         return resp
 
     def _request(self, method: str, url: str, *, params: Optional[Dict[str, Any]] = None,
@@ -211,6 +281,11 @@ class HttpCollectorBase:
         return None
 
     def _make_blocked(self, message: str,
-                      cooldown_seconds: Optional[int] = None) -> ReviewBlockedError:
-        return self.blocked_error_class(f'[{self.source_name}] {message}',
-                                        cooldown_seconds or self.blocked_cooldown_seconds)
+                      cooldown_seconds: Optional[int] = None, *,
+                      kind: Optional[str] = None, host: Optional[str] = None,
+                      endpoint: Optional[str] = None,
+                      retry_after: Optional[int] = None) -> ReviewBlockedError:
+        return self.blocked_error_class(
+            f'[{self.source_name}] {message}',
+            cooldown_seconds or self.blocked_cooldown_seconds,
+            kind=kind, host=host, endpoint=endpoint, retry_after=retry_after)

@@ -46,6 +46,18 @@ class KlineDaySharedState:
     detection_details: List[Dict[str, Any]] = field(default_factory=list)
     source_missing: Dict[str, int] = field(default_factory=lambda: {'qfq_empty': 0, 'raw_empty': 0})
     anomalies: List[Dict[str, Any]] = field(default_factory=list)
+    # ---- 批次1（数据采集链路耗时优化技术方案 V1.1 §3.1）：单股失败分类 ----
+    # 失败明细（ts_code/请求阶段/错误类别/原始错误摘要），上限保护防异常日放大
+    stock_failures: List[Dict[str, Any]] = field(default_factory=list)
+    # 失败分类计数：'biz'=业务错误（中间件可达但查询失败）、'conn'=连接重试耗尽、
+    # 'other'=其余异常（NameError 类历史 bug 兜底，修复后应恒为 0）
+    failure_counts: Dict[str, int] = field(default_factory=lambda: {'biz': 0, 'conn': 0, 'other': 0})
+    # 已提交处理（含失败）的股票集合——缺口对账用：目标范围 - submitted = 取消/未提交
+    submitted_stocks: set = field(default_factory=set)
+    # ---- 批次4（§3.2）：分组熔断观察模式 ----
+    # key = f"{qfq|raw}|{sh|sz|bj}"，value = {'ok': n, 'biz': n, 'conn': n, 'other': n}
+    # 观察模式只记录不暂停：报告输出"本应暂停的分组、后续实际成功数"，用于校准阈值
+    group_stats: Dict[str, Dict[str, int]] = field(default_factory=dict)
     # 当日检出除权（qfq_rebase 命中并整股重拉）的 ts_code 清单：
     # sync 完成后由调用方落 tmp/adjust_trigger_YYYYMMDD.json，供复权因子增量同步使用（方案 4.2）
     xdxr_hit_codes: List[str] = field(default_factory=list)
@@ -92,6 +104,57 @@ class KlineDayDeps:
     circuit_breaker_threshold: int = 20
 
 
+def _bump_group(group_stats: Dict[str, Dict[str, int]], key: str, outcome: str) -> None:
+    """观察模式组统计累加（§3.2：同接口、同市场错误集中；只记录不暂停）"""
+    bucket = group_stats.setdefault(key, {'ok': 0, 'biz': 0, 'conn': 0, 'other': 0})
+    bucket[outcome] = bucket.get(outcome, 0) + 1
+
+
+def _tdx_unavailable_result(ts_code: str, e: 'TdxApiUnavailableError', stage: str,
+                            ctx: 'KlineDaySharedState', deps: 'KlineDayDeps',
+                            local_source_missing: Dict[str, int], fetch_start: float,
+                            market_seg: str) -> Dict[str, Any]:
+    """TdxApiUnavailableError 统一失败出口（批次1，方案 V1.1 §3.1）：
+
+    - 错误类别（biz/conn）分类计数 + 明细留痕（ts_code/请求阶段/类别/原始摘要）
+    - conn 类喂熔断计数（F5 语义不变）
+    - 观察模式组统计（qfq/raw × 市场）
+    返回单股失败结果（含 ts_code/error_stage/error_kind）。"""
+    err_kind = e.err_type if e.err_type in ('biz', 'conn') else 'other'
+    with ctx.circuit_lock:
+        ctx.failure_counts[err_kind] = ctx.failure_counts.get(err_kind, 0) + 1
+        if len(ctx.stock_failures) < 700:
+            ctx.stock_failures.append({
+                'ts_code': ts_code,
+                'stage': stage,
+                'kind': err_kind,
+                'error': str(e),
+            })
+        _bump_group(ctx.group_stats, f'{stage.split("_")[0]}|{market_seg}', err_kind)
+        if e.err_type == 'conn':
+            ctx.consecutive_conn_errors += 1
+            if (not ctx.circuit_tripped
+                    and ctx.consecutive_conn_errors >= deps.circuit_breaker_threshold):
+                ctx.circuit_tripped = True
+                ctx.circuit_error = (f"连续 {ctx.consecutive_conn_errors} 只连接失败，"
+                                     f"整批熔断（中间件疑似不可用）: {e}")
+    if ctx.circuit_tripped:
+        deps.logger.error(ctx.circuit_error)
+    return {
+        'ts_code': ts_code,
+        'records': 0, 'db_rows': 0,
+        'fallback_written': 0, 'fallback_skipped_exrights': 0,
+        'api_time': time.time() - fetch_start, 'csv_time': 0.0, 'db_time': 0.0,
+        'api_span': (fetch_start, time.time()),
+        'csv_span': None, 'db_span': None,
+        'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
+        'detection_details': [], 'source_missing': local_source_missing,
+        'error': f'{stage} {err_kind}: {e}',
+        'error_stage': stage, 'error_kind': err_kind,
+        'circuit_tripped': ctx.circuit_tripped,
+    }
+
+
 def process_one_stock(
     stock_item: Dict[str, Any],
     stock_index: int,
@@ -105,6 +168,12 @@ def process_one_stock(
     # API 代码用带市场前缀格式（SH600000/SZ000001）：裸 6 位代码在 tdx-api 服务端
     # 走另一路服务器解析，节后首两日数据可能不全（2026-10-24 实测 6409 vs 6411 条）
     api_code = ts_code.replace('.', '').upper() if ts_code else stock_code
+    # 批次1（方案 V1.1 §3.1）：local_source_missing 初始化移到两路 API 请求之前
+    # ——修复历史 bug：原在请求后才初始化，异常分支引用未定义变量触发 NameError，
+    # 单股真实错误被掩盖为"单股日K采集失败: name 'local_source_missing' is not defined"
+    local_source_missing = {'qfq_empty': 0, 'raw_empty': 0}
+    # 观察模式分组市场段（§3.2：同接口、同市场错误集中观察）
+    market_seg = ts_code.split('.')[0].lower() if ts_code and '.' in ts_code else 'unknown'
     if not ts_code or not stock_code:
         return {
             'records': 0,
@@ -142,41 +211,31 @@ def process_one_stock(
     if api_start_wall is None:
         api_start_wall = fetch_start
 
+    # 批次1（方案 V1.1 §3.1）：qfq/raw 两路请求分别标注请求阶段（qfq/raw、tail/full），
+    # 抛错时单股失败结果携带 ts_code/请求阶段/错误类别/原始错误摘要
+    qfq_stage = 'qfq_full' if deps.fetch_full else 'qfq_tail'
+    raw_stage = 'raw_full' if deps.fetch_full else 'raw_tail'
     try:
-        if deps.fetch_full:
-            qfq_list = deps.tdx_api_source.get_kline_qfq_full(api_code)
-            raw_list = deps.tdx_api_source.get_kline_raw_full(api_code)
-        else:
-            qfq_list = deps.tdx_api_source.get_kline_qfq_tail(api_code, deps.tail_limit)
-            raw_list = deps.tdx_api_source.get_kline_raw_tail(api_code, deps.tail_limit)
+        qfq_list = (deps.tdx_api_source.get_kline_qfq_full(api_code)
+                    if deps.fetch_full
+                    else deps.tdx_api_source.get_kline_qfq_tail(api_code, deps.tail_limit))
     except TdxApiUnavailableError as e:
-        # F8/F5（数据采集链路风险修复方案 V1.0）：中间件不可用显式计失败并喂熔断计数
-        with ctx.circuit_lock:
-            if e.err_type == 'conn':
-                ctx.consecutive_conn_errors += 1
-                if (not ctx.circuit_tripped
-                        and ctx.consecutive_conn_errors >= deps.circuit_breaker_threshold):
-                    ctx.circuit_tripped = True
-                    ctx.circuit_error = (f"连续 {ctx.consecutive_conn_errors} 只连接失败，"
-                                         f"整批熔断（中间件疑似不可用）: {e}")
-        if ctx.circuit_tripped:
-            deps.logger.error(ctx.circuit_error)
-        return {
-            'records': 0, 'db_rows': 0,
-            'fallback_written': 0, 'fallback_skipped_exrights': 0,
-            'api_time': time.time() - fetch_start, 'csv_time': 0.0, 'db_time': 0.0,
-            'api_span': (fetch_start, time.time()),
-            'csv_span': None, 'db_span': None,
-            'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
-            'detection_details': [], 'source_missing': local_source_missing,
-            'error': f'tdx-api 不可用: {e}',
-            'circuit_tripped': ctx.circuit_tripped,
-        }
+        return _tdx_unavailable_result(ts_code, e, qfq_stage, ctx, deps,
+                                       local_source_missing, fetch_start, market_seg)
+    try:
+        raw_list = (deps.tdx_api_source.get_kline_raw_full(api_code)
+                    if deps.fetch_full
+                    else deps.tdx_api_source.get_kline_raw_tail(api_code, deps.tail_limit))
+    except TdxApiUnavailableError as e:
+        return _tdx_unavailable_result(ts_code, e, raw_stage, ctx, deps,
+                                       local_source_missing, fetch_start, market_seg)
     api_end_wall = time.time()
     local_api_time += api_end_wall - fetch_start
+    with ctx.circuit_lock:
+        _bump_group(ctx.group_stats, f'qfq|{market_seg}', 'ok')
+        _bump_group(ctx.group_stats, f'raw|{market_seg}', 'ok')
     deps.log_progress('数据采集', stock_index, deps.total_stocks, stock_code, stock_name, api_end_wall - fetch_start)
 
-    local_source_missing = {'qfq_empty': 0, 'raw_empty': 0}
     if not qfq_list:
         local_source_missing['qfq_empty'] = 1
     if not raw_list:
@@ -249,6 +308,7 @@ def process_one_stock(
                 'ts_code': ts_code, 'type': 'raw_source_empty',
                 'note': 'raw 源空（F11③：raw_revision 检测本轮失效，仅报告可见）'})
         return {
+            'ts_code': ts_code,
             'records': 0,
             'db_rows': 0,
             'api_time': local_api_time,
@@ -331,6 +391,7 @@ def process_one_stock(
         db_rows = 0
 
     return {
+        'ts_code': ts_code,
         'records': len(per_stock_records),
         'db_rows': db_rows,
         'fallback_written': len(fallback_ledger),
@@ -361,17 +422,36 @@ def safe_process_one_stock(
         return process_one_stock(stock_item, stock_index, ctx=ctx, deps=deps)
     except Exception as e:
         deps.logger.exception(f"单股日K采集失败: {stock_item.get('ts_code')} {e}")
+        # 批次1（方案 V1.1 §3.1）：非 TdxApiUnavailableError 的异常归入 'other' 类别——
+        # 修复 local_source_missing 未定义 bug 后本类别应恒为 0，非零即代码回归信号
+        with ctx.circuit_lock:
+            ctx.failure_counts['other'] = ctx.failure_counts.get('other', 0) + 1
+            if len(ctx.stock_failures) < 700:
+                ctx.stock_failures.append({
+                    'ts_code': stock_item.get('ts_code'),
+                    'stage': 'pipeline',
+                    'kind': 'other',
+                    'error': f'{type(e).__name__}: {e}',
+                })
         return {
+            'ts_code': stock_item.get('ts_code'),
             'records': 0, 'db_rows': 0, 'api_time': 0.0, 'csv_time': 0.0, 'db_time': 0.0,
             'api_span': None, 'csv_span': None, 'db_span': None,
             'anomalies': [], 'detection': {'checked': 0, 'hits': 0, 'refetched': 0},
             'detection_details': [], 'source_missing': {},
-            'error': f"{stock_item.get('ts_code')}: {e}"
+            'error': f"{stock_item.get('ts_code')}: {e}",
+            'error_stage': 'pipeline', 'error_kind': 'other'
         }
 
 
 def merge_stock_result(res: Dict[str, Any], ctx: KlineDaySharedState) -> None:
     result = ctx.result
+
+    # 批次1：本股已提交处理（无论成败）——缺口对账：目标范围 - submitted = 取消/未提交
+    ts_code = res.get('ts_code')
+    if ts_code:
+        with ctx.circuit_lock:
+            ctx.submitted_stocks.add(ts_code)
 
     if res.get('error'):
         result['errors'].append(res['error'])

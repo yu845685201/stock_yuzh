@@ -777,6 +777,17 @@ class ReviewDaoMixin:
             (trade_date,))
         return int(rows[0]['n']) if rows else 0
 
+    def fetch_margin_row_counts_by_exchange(self, trade_date: str) -> Dict[str, int]:
+        """两融某日沪深分行数（限流方案 20261120 §4.2：以目标市场+日期为补采单位，
+        已完整分区跳过、单所缺失只补单所；ts_code 前缀 sh./sz. 区分交易所）"""
+        rows = self.execute_query(
+            "SELECT COUNT(*) FILTER (WHERE ts_code LIKE 'sh.%') AS sse, "
+            "COUNT(*) FILTER (WHERE ts_code LIKE 'sz.%') AS szse "
+            "FROM margin_trade_daily WHERE trade_date = %s",
+            (trade_date,))
+        r = rows[0] if rows else {}
+        return {'sse': int(r.get('sse') or 0), 'szse': int(r.get('szse') or 0)}
+
     def fetch_lhb_row_count(self, trade_date: str) -> int:
         """lhb_stock_daily 某日行数（龙虎榜回填断点续跑判定，开发项 C）"""
         rows = self.execute_query(

@@ -17,7 +17,8 @@ from ..config.config_manager import ConfigManager
 from ..data_sources.http_collector_base import ReviewBlockedError
 from ..data_sources.sse_szse_source import SzseSseSource
 from ..database.connection import DatabaseConnection
-from .review_common import code6_to_ts_code, expand_trade_days, write_review_report
+from .review_common import (code6_to_ts_code, expand_trade_days, mark_blocked,
+                            write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,17 @@ class MarginManager:
         self.lookback_days = int(review.get('margin_lookback_days', 5))
 
     def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
-                write_report: bool = True) -> Dict[str, Any]:
+                write_report: bool = True,
+                markets: Optional[set] = None) -> Dict[str, Any]:
         """拉取 trade_date（缺省 T-1）全市场两融明细。
 
         交易所发布滞后时逐日回看（默认最多 5 天），沪深独立回补到各自最近有数据日，
         报告如实标注每所数据日期（复盘两融章节标注"数据日期 T-N"）。
+
+        markets（限流方案 20261120 §4.2）：限定采集的交易所子集（{'szse'/'sse'}，
+        缺省双所）。沪深各自解析成功即各自入库——单所被拒不再丢弃已抓另一所
+        （2026-11-19 实测：深市 2,119 行已抓、沪市 400 整批入库为零）；
+        补采以"目标市场+日期"为单位，只补缺失侧。
         """
         started = datetime.now()
         if trade_date:
@@ -47,54 +54,76 @@ class MarginManager:
         else:
             target = datetime.now().date() - timedelta(days=1)
         date_str = target.strftime('%Y%m%d')
+        want_szse = markets is None or 'szse' in markets
+        want_sse = markets is None or 'sse' in markets
         stats: Dict[str, Any] = {
             'data_date': date_str, 'szse_date': None, 'sse_date': None,
             'szse_rows': 0, 'sse_rows': 0, 'rows': 0, 'missing': [],
         }
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [], 'blocked': False}
+        blocked: Dict[str, Exception] = {}
         rows: List[Dict[str, Any]] = []
         try:
             # 深交所（单位换算：亿元×1e8；融券余额万元×1e4）——发布滞后时逐日回看
-            szse_count = 0
-            for offset in range(self.lookback_days):
-                day = (target - timedelta(days=offset)).strftime('%Y%m%d')
-                batch = self._szse_rows(day)
-                if batch:
-                    rows.extend(batch)
-                    szse_count = len(batch)
-                    stats['szse_date'] = day
-                    break
-            stats['szse_rows'] = szse_count
+            if want_szse:
+                for offset in range(self.lookback_days):
+                    day = (target - timedelta(days=offset)).strftime('%Y%m%d')
+                    try:
+                        batch = self._szse_rows(day)
+                    except ReviewBlockedError as e:
+                        blocked['szse'] = e
+                        logger.warning(f'两融深市风控急停 {day}: {e}')
+                        break
+                    if batch:
+                        rows.extend(batch)
+                        stats['szse_date'] = day
+                        stats['szse_rows'] = len(batch)
+                        if not dry_run:
+                            # 单所解析成功即入库（§4.2：沪深可分别成功、分别待补）
+                            self.db.upsert_margin_trades(batch)
+                        break
 
             # 上交所（元原样；无融券余额金额列 → rqye 留空）
-            sse_count = 0
-            for offset in range(self.lookback_days):
-                day = (target - timedelta(days=offset)).strftime('%Y%m%d')
-                batch = self._sse_rows(day)
-                if batch:
-                    rows.extend(batch)
-                    sse_count = len(batch)
-                    stats['sse_date'] = day
-                    break
-            stats['sse_rows'] = sse_count
+            if want_sse:
+                for offset in range(self.lookback_days):
+                    day = (target - timedelta(days=offset)).strftime('%Y%m%d')
+                    try:
+                        batch = self._sse_rows(day)
+                    except ReviewBlockedError as e:
+                        blocked['sse'] = e
+                        logger.warning(f'两融沪市风控急停 {day}: {e}')
+                        break
+                    if batch:
+                        rows.extend(batch)
+                        stats['sse_date'] = day
+                        stats['sse_rows'] = len(batch)
+                        if not dry_run:
+                            self.db.upsert_margin_trades(batch)
+                        break
             stats['rows'] = len(rows)
 
-            # 行数下限校验（两融全市场 >3000 标的，方案 5.4）
-            if len(rows) < 3000 and len(rows) > 0:
+            # 行数下限校验（两融全市场 >3000 标的，方案 5.4；单所模式不判总量）
+            if 0 < len(rows) < 3000 and not blocked:
                 logger.warning(f'两融仅 {len(rows)} 行，低于历史日均 3000，'
                                f'疑似数据不全（仍入库，报告标注）')
                 stats['missing'].append(f'行数 {len(rows)} < 3000')
 
-            if not rows:
+            if blocked:
+                # 单/双所被拒：已入库侧保留，被拒侧待补（§4.2 部分完成如实呈现）
+                ok_parts, miss_parts = [], []
+                for m, label in (('szse', '深市'), ('sse', '沪市')):
+                    if m in blocked:
+                        miss_parts.append(f'{label}风控急停待补')
+                    elif stats.get(f'{m}_rows'):
+                        ok_parts.append(f'{label}已入库 {stats[f"{m}_rows"]} 行')
+                detail = '；'.join(ok_parts + miss_parts) or '风控急停'
+                first_err = blocked.get('szse') or blocked.get('sse')
+                mark_blocked(result, first_err,
+                             f'官网风控急停（{detail}，稍后重跑补）: {first_err}')
+            elif not rows:
                 result['errors'].append(
                     f'{date_str} 起回看 {self.lookback_days} 日沪深两融均无数据（非交易日或未发布）')
-            if not dry_run and rows:
-                self.db.upsert_margin_trades(rows)
-            result['success'] = bool(rows)
-        except ReviewBlockedError as e:
-            result['blocked'] = True
-            result['errors'].append(f'官网风控急停（本日未入库，稍后重跑补）: {e}')
-            logger.warning(f'两融风控急停 {trade_date}: {e}')
+            result['success'] = bool(rows) and not blocked
         except Exception as e:
             logger.exception(f'两融采集失败: {e}')
             result['errors'].append(str(e))
@@ -131,10 +160,18 @@ class MarginManager:
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
                                   'blocked': False, 'backfill': True}
         for d in days:
-            if not dry_run and self.db.fetch_margin_row_count(d) > 0:
-                stats['days_skipped'] += 1
-                continue
-            r = self.execute(trade_date=d, dry_run=dry_run, write_report=False)
+            # 断点续跑按交易所拆分（限流方案 §4.2：以目标市场+日期为补采单位，
+            # 已完整分区跳过；单所缺失只补单所）。X-14 语义不变：只信查库。
+            if not dry_run:
+                counts = self.db.fetch_margin_row_counts_by_exchange(d)
+                missing = {m for m in ('szse', 'sse') if not counts.get(m)}
+                if not missing:
+                    stats['days_skipped'] += 1
+                    continue
+            else:
+                missing = None
+            r = self.execute(trade_date=d, dry_run=dry_run, write_report=False,
+                             markets=missing)
             if r.get('blocked'):
                 result['blocked'] = True
                 result['errors'].append(f'风控急停于 {d}，已完成 {stats["days_done"]} 日，'

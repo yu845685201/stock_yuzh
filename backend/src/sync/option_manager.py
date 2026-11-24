@@ -29,10 +29,14 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from ..config.config_manager import ConfigManager
-from ..data_sources.sse_option_source import (SseOptionSource, parse_contract_row,
-                                              parse_risk_row, parse_stats_row)
+from ..data_sources.domain_gate import get_gate
+from ..data_sources.http_collector_base import ReviewBlockedError
+from ..data_sources.sse_option_source import (SSE_QUERY_URL, SseOptionSource,
+                                              parse_contract_row, parse_risk_row,
+                                              parse_stats_row)
 from ..database.connection import DatabaseConnection
-from .review_common import expand_trade_days, write_review_report
+from .review_common import (domain_cooldown_early_exit, expand_trade_days,
+                            mark_blocked, write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,7 @@ class OptionManager:
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_review_tables()
         self.source = SseOptionSource(self.config)
+        self.gate = get_gate(self.config)
 
     # ---------- 单日执行 ----------
 
@@ -64,7 +69,11 @@ class OptionManager:
                                  'stats_rows': 0, 'master_rows': 0,
                                  'missing': []}
         result: Dict[str, Any] = {'success': False, 'stats': stats,
-                                  'errors': []}
+                                  'errors': [], 'blocked': False}
+        # 域冷却继承预检（限流方案 §2）：冷却中本轮不外发，登记待补等到期领取
+        if domain_cooldown_early_exit(result, self.gate, SSE_QUERY_URL, '期权'):
+            result['duration'] = (datetime.now() - started).total_seconds()
+            return result
         try:
             # 合约主数据先取（风险指标行需要 underlying/strike/expiry 富化——
             # SSE 风险指标接口只给行情字段，主数据走合约主数据接口）
@@ -115,6 +124,10 @@ class OptionManager:
                 if master_rows:
                     self._upsert_master(master_rows, target)
             result['success'] = bool(risk_rows)
+        except ReviewBlockedError as e:
+            # 限流方案 §1：明确被拒按风控急停记账（期权已入交易所域覆盖范围）
+            mark_blocked(result, e, f'官网风控急停（本日未入库，稍后重跑补）: {e}')
+            logger.warning('期权风控急停 %s: %r', target, e)
         except Exception as e:
             logger.exception('期权采集失败: %r', e)
             result['errors'].append(str(e))

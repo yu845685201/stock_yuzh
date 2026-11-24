@@ -19,8 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..config.config_manager import ConfigManager
 from ..data_sources.cninfo_source import (CninfoBlockedError, CninfoSource,
                                           PERIODIC_CATEGORIES)
+from ..data_sources.domain_gate import get_gate
+from ..data_sources.errors import DomainCooldownError
 from ..database.connection import DatabaseConnection
-from .review_common import clean_stock_name, code6_to_ts_code, write_review_report
+from .review_common import (clean_stock_name, code6_to_ts_code,
+                            domain_cooldown_early_exit, mark_blocked,
+                            register_source_domain_cooldown, write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +71,7 @@ class AnnouncementManager:
         review = self.config.get('review_sync', {}) or {}
         cninfo_cfg = dict(self.config.get('cninfo', {}) or {})
         cninfo_cfg.setdefault('query_interval', review.get('cninfo_interval', 0.5))
-        self.source = CninfoSource(cninfo_cfg)
+        self.source = CninfoSource(cninfo_cfg, gate=get_gate(self.config))
         self.type_keywords: List[Tuple[str, List[str]]] = [
             (str(k), list(v)) for k, v in
             (review.get('announcement_types') or dict(DEFAULT_TYPE_KEYWORDS)).items()
@@ -95,6 +99,12 @@ class AnnouncementManager:
             'forecast_rows': 0, 'type_counts': {},
         }
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [], 'blocked': False}
+        # 域冷却继承预检（限流方案 §2）：冷却中本轮不外发
+        if domain_cooldown_early_exit(result, getattr(self.source, 'gate', None),
+                                      self.source.query_base_url, '巨潮公告'):
+            result['duration'] = (datetime.now() - started).total_seconds()
+            result['report_path'] = self._write_report(result)
+            return result
         try:
             raw = self.source.query_market_window(start.isoformat(), end.isoformat())
             stats['announcements'] = len(raw)
@@ -112,9 +122,10 @@ class AnnouncementManager:
                 self.db.upsert_performance_forecasts(forecast_rows)
                 self.db.set_cursor('announcement', 'last_success_date', end.isoformat())
             result['success'] = True
-        except CninfoBlockedError as e:
-            result['blocked'] = True
-            result['errors'].append(f'巨潮风控急停（游标未推进，重跑自动补）: {e}')
+        except (CninfoBlockedError, DomainCooldownError) as e:
+            # 限流方案 §1/§2：结构化记账 + 即时登记域冷却（不等编排汇总）
+            mark_blocked(result, e, f'巨潮风控急停（游标未推进，重跑自动补）: {e}')
+            register_source_domain_cooldown(self.db, e, 'www.cninfo.com.cn')
         except Exception as e:
             result['errors'].append(str(e))
             logger.exception(f'公告采集失败: {e}')
@@ -184,10 +195,10 @@ class AnnouncementManager:
                 stats['last_completed_window'] = win_end.isoformat()
                 stats['windows_done'] += 1
                 logger.info(f'回补窗口 {win_start}~{win_end} 完成：检索 {len(raw)} 入库 {len(ann_rows)}')
-            except CninfoBlockedError as e:
+            except (CninfoBlockedError, DomainCooldownError) as e:
                 blocked_at = (win_start, win_end)
-                result['blocked'] = True
-                result['errors'].append(f'巨潮风控急停于窗口 {win_start}~{win_end}: {e}')
+                mark_blocked(result, e, f'巨潮风控急停于窗口 {win_start}~{win_end}: {e}')
+                register_source_domain_cooldown(self.db, e, 'www.cninfo.com.cn')
                 logger.warning(f'回补急停于窗口 {win_start}~{win_end}，已完成的 {stats["windows_done"]} '
                                f'个窗口已入库，续跑从 {win_start.isoformat()} 起')
                 break

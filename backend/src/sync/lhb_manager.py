@@ -24,8 +24,9 @@ from ..config.config_manager import ConfigManager
 from ..data_sources.http_collector_base import ReviewBlockedError
 from ..data_sources.sse_szse_source import SSE_REF_TYPE_NAMES, SzseSseSource
 from ..database.connection import DatabaseConnection
+from ..database.dao_collection_retry import domain_for_source
 from .review_common import (clean_stock_name, code6_to_ts_code, expand_trade_days,
-                            write_review_report)
+                            mark_blocked, write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -49,38 +50,73 @@ class LhbManager:
         trade_date = trade_date or datetime.now().strftime('%Y%m%d')
         stats: Dict[str, Any] = {
             'trade_date': trade_date, 'szse_stocks': 0, 'sse_stocks': 0,
-            'lhb_rows': 0, 'detail_rows': 0, 'errors': [],
+            'lhb_rows': 0, 'detail_rows': 0, 'errors': [], 'seat_gaps': [],
         }
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [], 'blocked': False}
         try:
-            stock_rows, detail_rows = [], []
-            szse_stocks, szse_details = self._collect_szse(trade_date)
-            sse_stocks, sse_details = self._collect_sse(trade_date)
-            stock_rows = szse_stocks + sse_stocks
-            detail_rows = szse_details + sse_details
+            szse_blocked: Optional[ReviewBlockedError] = None
+            sse_blocked: Optional[ReviewBlockedError] = None
+            szse_stocks: List[Dict[str, Any]] = []
+            szse_details: List[Dict[str, Any]] = []
+            szse_seat_gaps: List[Dict[str, str]] = []
+            sse_stocks: List[Dict[str, Any]] = []
+            sse_details: List[Dict[str, Any]] = []
+            # 深市（限流方案 §1/§3 P0：明确被拒即停止后续席位请求并按行保存缺口）
+            try:
+                szse_stocks, szse_details, szse_seat_gaps = self._collect_szse(trade_date)
+            except ReviewBlockedError as e:
+                szse_blocked = e
+                logger.warning(f'龙虎榜深市风控急停 {trade_date}: {e}')
+            # 沪市与深市不同主机，独立尝试（§4.2 沪深可分别成功、分别待补）
+            try:
+                sse_stocks, sse_details = self._collect_sse(trade_date)
+            except ReviewBlockedError as e:
+                sse_blocked = e
+                logger.warning(f'龙虎榜沪市风控急停 {trade_date}: {e}')
             stats['szse_stocks'] = len({(r['ts_code'], r['reason']) for r in szse_stocks})
             stats['sse_stocks'] = len({(r['ts_code'], r['reason']) for r in sse_stocks})
+            stock_rows = szse_stocks + sse_stocks
+            detail_rows = szse_details + sse_details
             stats['lhb_rows'] = len(stock_rows)
             stats['detail_rows'] = len(detail_rows)
             stats['rows'] = stats['lhb_rows']  # 编排器摘要行数约定（rows/records）
 
-            if not stock_rows:
+            if not dry_run:
+                # 沪深分别入库（限流方案 §4.2）：单所被拒不再丢弃已抓另一所
+                if szse_stocks:
+                    self.db.upsert_lhb_stocks(szse_stocks)
+                if szse_details:
+                    self.db.upsert_lhb_details(szse_details)
+                if sse_stocks:
+                    # X-18 先删后插：沪市旧格式行（'披露原因代码{N}'）与新文案映射在唯一键
+                    # (trade_date, ts_code, reason) 下会并存致同股重复上榜；重抓日期先删
+                    stats['sse_legacy_deleted'] = self.db.delete_sse_lhb_legacy(trade_date)
+                    self.db.upsert_lhb_stocks(sse_stocks)
+                if sse_details:
+                    self.db.upsert_lhb_details(sse_details)
+            if not stock_rows and szse_blocked is None and sse_blocked is None:
                 result['errors'].append(f'{trade_date} 沪深龙虎榜均无数据'
                                         f'（非交易日或未到发布时间 17:30）')
-            if not dry_run:
-                # X-18 先删后插：沪市旧格式行（'披露原因代码{N}'）与新文案映射在唯一键
-                # (trade_date, ts_code, reason) 下会并存致同股重复上榜；重抓日期先删
-                if sse_stocks:
-                    stats['sse_legacy_deleted'] = self.db.delete_sse_lhb_legacy(trade_date)
-                if stock_rows:
-                    self.db.upsert_lhb_stocks(stock_rows)
-                if detail_rows:
-                    self.db.upsert_lhb_details(detail_rows)
-            result['success'] = bool(stock_rows)
-        except ReviewBlockedError as e:
-            result['blocked'] = True
-            result['errors'].append(f'官网风控急停（本日未入库，稍后重跑补）: {e}')
-            logger.warning(f'龙虎榜风控急停 {trade_date}: {e}')
+            # 席位缺口即时登记（限流方案 §3/§4.3："榜单已取，席位待补"——
+            # 补采只抓缺口行，不再被"当天有行就跳过"挡住）
+            if szse_seat_gaps:
+                stats['seat_gaps'] = szse_seat_gaps
+                if not dry_run:
+                    self._register_seat_gaps(trade_date, szse_seat_gaps)
+            elif not dry_run:
+                # 本轮席位齐全：结清该日历史席位缺口待办（幂等，仅未结任务生效）
+                self._complete_seat_gaps(trade_date)
+            if szse_blocked is not None or sse_blocked is not None:
+                parts = []
+                for m, label, e in (('szse', '深市', szse_blocked), ('sse', '沪市', sse_blocked)):
+                    if e is None:
+                        continue
+                    got = stats.get(f'{m}_stocks')
+                    parts.append(f'{label}风控急停待补' if not got
+                                 else f'{label}榜单已入库 {got} 股、余量待补')
+                    mark_blocked(result, e, f'官网风控急停（{label}）: {e}')
+            result['success'] = bool(stock_rows) \
+                and szse_blocked is None and sse_blocked is None
         except Exception as e:
             logger.exception(f'龙虎榜采集失败: {e}')
             result['errors'].append(str(e))
@@ -114,13 +150,31 @@ class LhbManager:
         stats: Dict[str, Any] = {
             'range': f'{start_date}~{end_date}', 'days_total': len(days),
             'days_done': 0, 'days_skipped': 0, 'lhb_rows': 0, 'detail_rows': 0,
-            'days_failed': [], 'last_completed_date': None,
+            'seat_gap_days_fixed': 0, 'days_failed': [], 'last_completed_date': None,
         }
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
                                   'blocked': False, 'backfill': True}
         for d in days:
             if not dry_run and self.db.fetch_lhb_row_count(d) > 0:
-                stats['days_skipped'] += 1
+                # 榜单已取：仅当存在未结席位缺口时补席位（限流方案 §4.3——
+                # 修正"当天有行就跳过"导致席位缺口永不回补的旧判断）
+                scope = self.db.scope_retry_missing_scope('lhb', d, 'seats') or {}
+                gaps = scope.get('seats') or []
+                if not gaps:
+                    stats['days_skipped'] += 1
+                    continue
+                r = self.backfill_seats(d, gaps, suppress_report=True)
+                if r.get('blocked'):
+                    result['blocked'] = True
+                    result['errors'].append(f'席位补采风控急停于 {d}，'
+                                            f'已找回 {stats["seat_gap_days_fixed"]} 日，'
+                                            f'续跑点 --start-date {d}')
+                    break
+                if r.get('success'):
+                    stats['seat_gap_days_fixed'] += 1
+                    stats['detail_rows'] += r['stats']['detail_rows']
+                else:
+                    stats['days_failed'].append({'date': d, 'errors': r['errors'][:2]})
                 continue
             r = self.execute(trade_date=d, dry_run=dry_run, write_report=False)
             if r.get('blocked'):
@@ -138,6 +192,78 @@ class LhbManager:
         result['success'] = not result['blocked'] and not stats['days_failed']
         result['duration'] = (datetime.now() - started).total_seconds()
         result['report_path'] = self._write_backfill_report(result)
+        return result
+
+    # ---------- 席位缺口（SCOPE_RETRY 子项，限流方案 20261120 §3/§4.3） ----------
+
+    def _register_seat_gaps(self, trade_date: str, gaps: List[Dict[str, str]]) -> None:
+        """席位缺口即时登记为子项补采待办（限流方案 §2：真实缺口一经确认即独立提交）"""
+        try:
+            self.db.register_retry(
+                dataset='lhb', source='lhb', target_date=trade_date, market='CN',
+                action='SCOPE_RETRY', reason='SEAT_GAP', sub_key='seats',
+                missing_scope={'seats': [
+                    {'ann_date': g.get('ann_date'), 'code': g.get('code'),
+                     'zb_dm': g.get('zb_dm'), 'ts_code': g.get('ts_code'),
+                     'reason': g.get('reason')} for g in gaps]},
+                domain=domain_for_source('lhb'),
+                last_error=f'{trade_date} 席位缺口 {len(gaps)} 行')
+        except Exception as e:
+            logger.warning(f'席位缺口登记失败（报告仍记录 {len(gaps)} 行）: {e}')
+
+    def _complete_seat_gaps(self, trade_date: str) -> None:
+        """本轮席位齐全时结清该日历史席位缺口待办（幂等，仅未结任务生效）"""
+        try:
+            self.db.complete_scope_retry('lhb', trade_date, 'seats')
+        except Exception as e:
+            logger.debug(f'席位缺口结清检查失败（忽略）: {e}')
+
+    def backfill_seats(self, trade_date: str, gaps: List[Dict[str, str]],
+                       dry_run: bool = False,
+                       suppress_report: bool = True) -> Dict[str, Any]:
+        """只补席位缺口（SCOPE_RETRY 子项补采；榜单已验收，不重抓——限流方案 §4.3）。
+
+        缺口键 =（ann_date, code, zb_dm, ts_code, reason）；全部找回时结清该日
+        席位待办；明确被拒即停（已找回部分保留入库），余下缺口留在待办。
+        """
+        started = datetime.now()
+        stats: Dict[str, Any] = {'trade_date': trade_date, 'gaps_total': len(gaps),
+                                 'recovered': 0, 'detail_rows': 0, 'still_failed': [],
+                                 'errors': []}
+        result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
+                                  'blocked': False, 'backfill': True}
+        rows: List[Dict[str, Any]] = []
+        try:
+            for g in gaps:
+                try:
+                    seats = self.source.fetch_szse_lhb_seats(
+                        g.get('ann_date') or trade_date, g.get('code') or '',
+                        g.get('zb_dm') or '')
+                except ReviewBlockedError as e:
+                    mark_blocked(result, e, f'席位补采风控急停（已找回 '
+                                            f'{stats["recovered"]}/{stats["gaps_total"]}）: {e}')
+                    break
+                except Exception as e:
+                    stats['still_failed'].append(f'{g.get("ts_code")}:{g.get("reason")}')
+                    stats['errors'].append(str(e))
+                    continue
+                rows.extend(self._parse_szse_seats(seats, trade_date,
+                                                   g.get('ts_code') or ''))
+                stats['recovered'] += 1
+            if rows and not dry_run:
+                self.db.upsert_lhb_details(rows)
+                stats['detail_rows'] = len(rows)
+            result['success'] = (not result.get('blocked') and not stats['still_failed']
+                                 and stats['recovered'] == stats['gaps_total'])
+            if result['success'] and not dry_run:
+                self.db.complete_scope_retry('lhb', trade_date, 'seats')
+        except Exception as e:
+            logger.exception(f'席位缺口补采失败 {trade_date}: {e}')
+            result['errors'].append(str(e))
+        finally:
+            result['duration'] = (datetime.now() - started).total_seconds()
+            result['report_path'] = (None if suppress_report
+                                     else self._write_backfill_report(result))
         return result
 
     def _write_backfill_report(self, result: Dict[str, Any]) -> Optional[str]:
@@ -162,16 +288,29 @@ class LhbManager:
 
     # ---------- 深交所 ----------
 
-    def _collect_szse(self, trade_date: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """深交所榜单行 + 席位明细。
+    def _collect_szse(self, trade_date: str
+                      ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]],
+                                 List[Dict[str, str]]]:
+        """深交所榜单行 + 席位明细 + 席位缺口（限流方案 20261120 §3 P0）。
 
         金额口径（X-7/V1.2）：每行 buy/sell/net 用**当次抓到的该行席位**聚合
         （买 Σ、卖 Σ、差为净；席位 3~8 个不满额属正常，T19）——按榜单行粒度，
         禁止按股票跨原因求和。席位抓取失败时金额留空（不硬造）。
+
+        席位缺口口径：明确被拒（ReviewBlockedError）→ **停止后续席位请求**，
+        当行及余下行全部记缺口；单行普通失败 → 记缺口继续。缺口按
+        （ann_date, code, zb_dm, ts_code, reason）保存，补采只抓缺口行。
         """
         stocks: List[Dict[str, Any]] = []
         details: List[Dict[str, Any]] = []
+        seat_gaps: List[Dict[str, str]] = []
+
+        def _gap(ann_date: str, code: str, zb_dm: str, ts_code: str, reason: str) -> Dict[str, str]:
+            return {'ann_date': ann_date, 'code': code, 'zb_dm': zb_dm,
+                    'ts_code': ts_code, 'reason': reason}
+
         raw = self.source.fetch_szse_lhb(trade_date)
+        seats_stopped = False
         for item in raw:
             code = str(item.get('zqdm') or '')
             if not code:
@@ -183,30 +322,21 @@ class LhbManager:
             row_details: List[Dict[str, Any]] = []
             m = _ZBDM_PATTERN.search(str(item.get('bz') or ''))
             if m:
-                try:
-                    seats = self.source.fetch_szse_lhb_seats(ann_date, code, m.group(1))
-                except Exception as e:
-                    logger.warning(f'深交所席位明细失败 {code}: {e}')
-                    seats = []
-                for seat in seats:
-                    seat_name = str(seat.get('zsmc') or '').strip()
-                    if not seat_name:
-                        continue
-                    side_label = str(seat.get('mmlb') or '').strip()
-                    if not side_label:
-                        continue
-                    # side 存官网原文（买1~卖5，含排名）：深交所"机构专用"对应多个不同
-                    # 机构席位，若归并为纯方向会被 (ts_code, seat_name, side) 唯一键去重丢行
-                    side = side_label if side_label[0] in ('买', '卖') else side_label[:1]
-                    amount = _num_yuan(seat.get('mrje') if side.startswith('买')
-                                       else seat.get('mcje'), 1.0)
-                    row_details.append({
-                        'trade_date': trade_date,
-                        'ts_code': ts_code,
-                        'seat_name': seat_name,
-                        'side': side,
-                        'amount': amount,
-                    })
+                if seats_stopped:
+                    seat_gaps.append(_gap(ann_date, code, m.group(1), ts_code, reason))
+                else:
+                    try:
+                        seats = self.source.fetch_szse_lhb_seats(ann_date, code, m.group(1))
+                    except ReviewBlockedError as e:
+                        # 明确被拒：停止后续席位请求（限流方案 §1），余下行全部记缺口
+                        logger.warning(f'深交所席位明细被拒（停止后续席位请求）{code}: {e}')
+                        seats_stopped = True
+                        seat_gaps.append(_gap(ann_date, code, m.group(1), ts_code, reason))
+                    except Exception as e:
+                        logger.warning(f'深交所席位明细失败 {code}: {e}')
+                        seat_gaps.append(_gap(ann_date, code, m.group(1), ts_code, reason))
+                    else:
+                        row_details = self._parse_szse_seats(seats, trade_date, ts_code)
                 details.extend(row_details)
             buy_amt = _sum_side(row_details, '买')
             sell_amt = _sum_side(row_details, '卖')
@@ -223,7 +353,33 @@ class LhbManager:
                 # 列表披露成交金额（亿元）——个股当日总成交额口径，与沪市 secTxAmount 同列
                 'sec_tx_amount': _num_yuan(item.get('cjje'), 1e8),
             })
-        return stocks, details
+        return stocks, details, seat_gaps
+
+    @staticmethod
+    def _parse_szse_seats(seats: List[Dict[str, Any]], trade_date: str,
+                          ts_code: str) -> List[Dict[str, Any]]:
+        """深交所席位原始行 → lhb_detail 行（与 _collect_sse 打包解析同唯一键口径）"""
+        parsed: List[Dict[str, Any]] = []
+        for seat in seats or []:
+            seat_name = str(seat.get('zsmc') or '').strip()
+            if not seat_name:
+                continue
+            side_label = str(seat.get('mmlb') or '').strip()
+            if not side_label:
+                continue
+            # side 存官网原文（买1~卖5，含排名）：深交所"机构专用"对应多个不同
+            # 机构席位，若归并为纯方向会被 (ts_code, seat_name, side) 唯一键去重丢行
+            side = side_label if side_label[0] in ('买', '卖') else side_label[:1]
+            amount = _num_yuan(seat.get('mrje') if side.startswith('买')
+                               else seat.get('mcje'), 1.0)
+            parsed.append({
+                'trade_date': trade_date,
+                'ts_code': ts_code,
+                'seat_name': seat_name,
+                'side': side,
+                'amount': amount,
+            })
+        return parsed
 
     # ---------- 上交所 ----------
 

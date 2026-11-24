@@ -1048,10 +1048,281 @@ def sync_north_flow_detail(ctx, trade_date, start_date, end_date, symbols, dry_r
         click.echo(f"  - 报告: {result['report_path']}")
 
 
+# ---------- 批次2/批次3（数据采集链路耗时优化技术方案 V1.1 §4/§5） ----------
+
+@click.command('recover-kline-raw-fallback')
+@click.option('--max-stocks', type=int, default=None,
+              help='本批股票数预算（缺省 sync.kline_day_raw_fallback.recover_max_stocks=500）')
+@click.option('--budget-seconds', type=int, default=None,
+              help='本批墙钟预算秒（缺省 600；到预算停止发起新请求，收尾已在途项）')
+@click.option('--backoff-seconds', type=int, default=None,
+              help='未发布/失败记录的退避秒（缺省 1800）')
+@click.pass_context
+def recover_kline_raw_fallback(ctx, max_stocks, budget_seconds, backoff_seconds):
+    """独立 raw 兜底恢复作业（§4）：台账按到期领取，qfq 已发布则原子销账，未发布单独退避
+
+    主作业完成后的调度与人工续跑共用；advisory lock 互斥（同一数据集仅一个恢复作业）。
+    退出码：0 完成（含"没有到期记录"）；1 失败或互斥退出。
+    """
+    from src.sync.sync_manager import SyncManager
+    sync_manager = SyncManager(ctx.obj['config_manager'])
+    click.echo("开始 raw 兜底恢复作业（独立入口，方案 V1.1 §4）...")
+    job = sync_manager.recover_raw_fallback_job(
+        max_stocks=max_stocks, budget_seconds=budget_seconds,
+        backoff_seconds=backoff_seconds)
+    if not job.get('success'):
+        click.echo(f"\n✗ 恢复作业未执行: {job.get('exit_reason')}"
+                   + (f"（{job.get('error')}）" if job.get('error') else ''))
+        sys.exit(1)
+    bs = job.get('backlog_start') or {}
+    be = job.get('backlog_end') or {}
+    cleared = job['recovered_price'] + job['recovered_ledger_only']
+    click.echo(f"\n✓ 恢复作业完成（退出原因 {job.get('exit_reason')}）:")
+    click.echo(f"  - 积压账目: 期初打开 {bs.get('open_n', 0)} → 结清 {cleared}（价格 "
+               f"{job['recovered_price']} / 仅销账 {job['recovered_ledger_only']}）→ "
+               f"期末打开 {be.get('open_n', 0)}")
+    click.echo(f"  - 退避 {job.get('deferred', 0)} 条 / 行缺失异常 {job.get('row_missing', 0)} 条")
+    click.echo(f"  - 处理 {job.get('stocks_processed', 0)} 股，耗时 {job.get('elapsed', 0)}s")
+    if job.get('report_path'):
+        click.echo(f"  - 报告: {job['report_path']}")
+    sys.exit(0)
+
+
+@click.command('sync-review-pending')
+@click.option('--max-tasks', type=int, default=5, help='本次最多领取执行的补采任务数')
+@click.option('--lease-seconds', type=int, default=900, help='租约时长秒（过期可被重领）')
+@click.option('--owner', default=None, help='领取者标识（缺省 hostname:pid）')
+@click.pass_context
+def sync_review_pending(ctx, max_tasks, lease_seconds, owner):
+    """一次性领取补采任务（§5.2）：主流程持久化待办的到期领取器，定时器与人工恢复共用
+
+    只领"已到期且域冷却已过"的任务；短事务原子领取 + 有时限租约；确认完成前校验
+    lease_token，失效响应直接丢弃。每次执行新建作业号（parent_job_id 关联原作业）。
+    退出码：0=本次应执行项均完成或没有到期任务；1=全部失败或交接失败；
+    2=参数错误；3=部分完成。另报"尚未到期、到期未领、超过重试上限"三组数量。
+    """
+    import socket
+    from datetime import datetime, timedelta, timezone
+    from src.sync.review_sync_orchestrator import (
+        ReviewSyncOrchestrator, SOURCE_LABELS, KLINE_SOURCE)
+    from src.sync.source_expectations import DATASET_REGISTRY
+    from src.database.dao_collection_retry import domain_for_source
+    from src.data_sources.domain_gate import domain_for_host
+    from src.sync.collection_contracts import (
+        PartitionStatus, entry_to_partition_result, new_id, RunContext, RunMode)
+
+    owner = owner or f'{socket.gethostname()}:{os.getpid()}'
+    try:
+        orchestrator = ReviewSyncOrchestrator(ctx.obj['config_manager'])
+        orchestrator.db.ensure_collection_retry_tables()
+    except Exception as e:
+        click.echo(f"✗ 初始化失败: {e}")
+        sys.exit(1)
+
+    stats = orchestrator.db.pending_retry_stats()
+    click.echo(f"补采待办: 尚未到期 {stats['not_due']} / 到期未领 {stats['due_waiting']} / "
+               f"执行中 {stats['leased']} / 超上限 {stats['failed_max']} / 已结清 {stats['done']}")
+
+    ok_n, fail_n = 0, 0
+    details: list = []
+    cooldown = orchestrator.cooldown_seconds
+    for _ in range(max(1, max_tasks)):
+        claimed = orchestrator.db.claim_pending_retry(owner, lease_seconds=lease_seconds, limit=1)
+        if not claimed:
+            break
+        task = claimed[0]
+        dataset = task['dataset']
+        target = task['target_date']
+        label = SOURCE_LABELS.get(dataset, dataset)
+        detail = ''
+        if dataset == KLINE_SOURCE or dataset not in orchestrator._build_runners(target):
+            # 日K伪源不走补采领取器（由 sync-kline-day / sync-review-all 处理）
+            orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=False,
+                error='runner 未注册（该源不通过补采领取器执行）')
+            fail_n += 1
+            details.append(f"✗ {label}@{target}: runner 未注册")
+            continue
+        # SCOPE_RETRY 子项缺口（限流方案 20261120 §4.3）：只补缺失范围，不整源重跑
+        if (task.get('action') or 'SOURCE_RETRY') == 'SCOPE_RETRY':
+            scope = task.get('missing_scope') or {}
+            try:
+                if dataset == 'lhb' and scope.get('seats'):
+                    from src.sync.lhb_manager import LhbManager
+                    r = LhbManager(ctx.obj['config_manager']).backfill_seats(
+                        target, scope['seats'])
+                elif dataset == 'industry' and scope.get('scope') == 'sw_2021':
+                    from src.sync.industry_manager import IndustryManager
+                    r = IndustryManager(ctx.obj['config_manager']).enhance_only(
+                        today=target)
+                else:
+                    raise ValueError(f'未知 SCOPE_RETRY 分发: {dataset} keys={list(scope)}')
+            except Exception as e:
+                outcome = orchestrator.db.complete_retry(
+                    task['retry_id'], task['lease_token'], success=False,
+                    error=f'子项补采异常: {e}'[:500])
+                fail_n += 1
+                details.append(f"✗ {label}@{target}: 子项补采异常 {e}（{outcome}）")
+                continue
+            blocked = bool(isinstance(r, dict) and r.get('blocked'))
+            if blocked:
+                outcome = orchestrator.db.complete_retry(
+                    task['retry_id'], task['lease_token'], success=False,
+                    error='子项补采风控急停', requeue_delay_seconds=cooldown)
+                # 域冷却再登记（与整源补采同语义；cooldown_active 拦回不延长）
+                if (r or {}).get('blocked_kind') != 'cooldown_active':
+                    host = (r or {}).get('blocked_host')
+                    domain = domain_for_host(host) if host else domain_for_source(dataset)
+                    if domain:
+                        hint = int((r or {}).get('cooldown_hint') or 0)
+                        now = datetime.now(timezone.utc)
+                        with orchestrator.db.get_connection() as conn:
+                            orchestrator.db.register_domain_cooldown_tx(
+                                conn, domain, now + timedelta(seconds=max(cooldown, hint)),
+                                reason=f'补采 {dataset} 子项风控急停')
+                            conn.commit()
+                fail_n += 1
+                details.append(f"⚠ {label}@{target}: 子项补采风控急停（{outcome}，"
+                               f"{cooldown}s 后可再试）")
+                continue
+            if r.get('success'):
+                outcome = orchestrator.db.complete_retry(
+                    task['retry_id'], task['lease_token'], success=True)
+                ok_n += 1
+                s = r.get('stats') or {}
+                details.append(f"✓ {label}@{target}: 子项补采完成 "
+                               f"（recovered={s.get('recovered', s.get('rows', '?'))}）")
+            else:
+                errs = '; '.join((r.get('errors') or [])[:2]) or '未成功'
+                outcome = orchestrator.db.complete_retry(
+                    task['retry_id'], task['lease_token'], success=False, error=errs[:500])
+                fail_n += 1
+                details.append(f"✗ {label}@{target}: 子项补采未成功（{errs[:120]}，{outcome}）")
+            continue
+        # 分区已验收则跳过重跑（限流方案 §4.2：补采只处理缺失分区，不重复外发）
+        try:
+            p_status = orchestrator.db.latest_partition_status(
+                dataset, task.get('market') or 'CN', target)
+        except Exception:
+            p_status = None
+        if p_status in ('COMPLETE', 'CONFIRMED_EMPTY'):
+            orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=True)
+            ok_n += 1
+            details.append(f"✓ {label}@{target}: 分区已验收（{p_status}），跳过重跑")
+            continue
+        runner = orchestrator._build_runners(target)[dataset]
+        try:
+            src_result = runner(False)
+        except Exception as e:
+            outcome = orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=False, error=str(e)[:500])
+            fail_n += 1
+            details.append(f"✗ {label}@{target}: 异常 {e}（{outcome}）")
+            continue
+        blocked = bool(isinstance(src_result, dict) and src_result.get('blocked'))
+        success = bool(isinstance(src_result, dict) and src_result.get('success'))
+        if blocked:
+            # 再遇风控：requeue（冷却后可再试）+ 域冷却登记（交易所域）
+            outcome = orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=False,
+                error='补采时风控急停', requeue_delay_seconds=cooldown)
+            now = datetime.now(timezone.utc)
+            domain = domain_for_source(dataset)
+            if domain:
+                with orchestrator.db.get_connection() as conn:
+                    orchestrator.db.register_domain_cooldown_tx(
+                        conn, domain, now + timedelta(seconds=cooldown),
+                        reason=f'补采 {dataset} 风控急停')
+                    conn.commit()
+            fail_n += 1
+            details.append(f"⚠ {label}@{target}: 补采时风控急停（{outcome}，{cooldown}s 后可再试）")
+            continue
+        if success:
+            # 成功以目标分区已提交并验收为准：每次尝试独立作业号（parent_job_id 关联）
+            spec = DATASET_REGISTRY.get(dataset)
+            market = spec.market if spec else 'CN'
+            exchange = spec.exchanges[0] if (spec and len(spec.exchanges) == 1) else None
+            expected_date = target
+            try:
+                run_ctx = RunContext(job_id='placeholder', target_date=target,
+                                     run_mode=RunMode.BACKFILL)
+                exp = expected_partition(run_ctx, dataset, db=orchestrator.db,
+                                         config=orchestrator.config)
+                if exp.get('expected_date'):
+                    expected_date = exp['expected_date']
+            except Exception:
+                pass
+            entry = {'source': dataset, 'label': label, 'status': '成功',
+                     'rows': (src_result.get('stats') or {}).get('rows')
+                             or (src_result.get('stats') or {}).get('records') or 0,
+                     'duration': 0.0, 'detail': ''}
+            orchestrator._fill_entry(entry, src_result)
+            job_id = new_id()
+            pr = entry_to_partition_result(
+                entry, dataset=dataset, market=market, target_date=expected_date,
+                source=(spec.source if spec else dataset), exchange=exchange)
+            pr.job_id = job_id
+            try:
+                with orchestrator.db.get_connection() as conn:
+                    orchestrator.db.create_job_tx(
+                        conn, job_id, target, RunMode.BACKFILL.value,
+                        parent_job_id=task.get('parent_job_id'),
+                        requested_sources=[dataset])
+                    orchestrator.db.upsert_partition_tx(conn, pr.to_row(job_id))
+                    job_status = 'FAILED' if entry['status'] != '成功' else (
+                        'SUCCEEDED' if (entry.get('rows') or 0) > 0 else 'PARTIAL')
+                    orchestrator.db.finish_job_tx(conn, job_id, job_status)
+                    conn.commit()
+            except Exception as e:
+                orchestrator.db.complete_retry(
+                    task['retry_id'], task['lease_token'], success=False,
+                    error=f'分区验收交接失败: {e}'[:500])
+                fail_n += 1
+                details.append(f"✗ {label}@{target}: 分区交接失败 {e}")
+                continue
+            outcome = orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=True)
+            if outcome == 'DONE':
+                ok_n += 1
+                details.append(f"✓ {label}@{target}: 补采完成（行数 {entry.get('rows')}，"
+                               f"job {job_id[:8]}）")
+            else:
+                fail_n += 1
+                details.append(f"✗ {label}@{target}: 已执行但 token 失效（{outcome}）")
+        else:
+            errs = '; '.join((src_result.get('errors') or [])[:2]) or '未成功'
+            outcome = orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=False, error=errs[:500])
+            fail_n += 1
+            details.append(f"✗ {label}@{target}: 补采未成功（{errs[:120]}，{outcome}）")
+
+    click.echo("")
+    for d in details:
+        click.echo(f"  - {d}")
+    click.echo(f"\n本次领取执行: 成功 {ok_n} / 失败 {fail_n}")
+    stats2 = orchestrator.db.pending_retry_stats()
+    click.echo(f"剩余待办: 尚未到期 {stats2['not_due']} / 到期未领 {stats2['due_waiting']} / "
+               f"超上限 {stats2['failed_max']}")
+    if stats2['failed_max']:
+        click.echo("  ⚠ 存在超过重试上限的任务（缺口与错误已保留，请人工处理）")
+    # 退出码（§5.2）：0=本次应执行项均完成或没有到期任务；1=全部失败；3=部分完成
+    if fail_n == 0:
+        code = 0
+    elif ok_n == 0:
+        code = 1
+    else:
+        code = 3
+    click.echo(f"  - 退出码: {code}")
+    sys.exit(code)
+
+
 # CLI 注册清单（main.py 汇总 add_command）
 review_commands = [
     sync_review_all,
     sync_review_data,
+    sync_review_pending,        # 批次3（方案 V1.1 §5.2）：补采待办到期领取器
+    recover_kline_raw_fallback, # 批次2（方案 V1.1 §4）：独立 raw 兜底恢复作业
     sync_freshness_check,
     sync_index_kline,
     sync_adjust_factor,

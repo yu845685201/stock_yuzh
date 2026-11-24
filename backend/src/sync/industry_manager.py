@@ -14,9 +14,12 @@ base_stock_info 的 industry/sector 字段全空、库内无任何行业数据�
 """
 
 import logging
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
+from ..data_sources.http_collector_base import ReviewBlockedError
 from ..data_sources.sw_source import SwSectorSource
+from .review_common import mark_blocked
 from .sector_sync_base import ReviewSyncError, SectorNodeManagerBase
 
 logger = logging.getLogger(__name__)
@@ -47,13 +50,16 @@ class IndustryManager(SectorNodeManagerBase):
                             stats: Dict[str, Any]) -> None:
         if not self.sw_enabled:
             return
-        # G 项改良（V1.4）：单请求全量下载（含时点日期）优先；失败回退现行
-        # 31 次逐行业下载路径（保留兜底）
+        # G 项改良（V1.4）：单请求全量下载（含时点日期）优先；普通异常回退现行
+        # 31 次逐行业下载路径。明确被拒（ReviewBlockedError）不触发同域批量文件
+        # 回退（限流方案 20261120 §3 P0：清单+逐行业回退只用于可解释的格式/端点故障）
         try:
             rows = self.sw_source.fetch_all_classification()
             self._sw_apply_all_classification(rows, dry_run=dry_run, stats=stats)
             stats['sw_mode'] = 'all_download'
             return
+        except ReviewBlockedError:
+            raise
         except Exception as e:
             logger.warning(f'申万单请求路径失败，回退逐行业下载: {e}')
             stats['sw_mode'] = 'per_industry_fallback'
@@ -70,6 +76,49 @@ class IndustryManager(SectorNodeManagerBase):
         stats['sw_members'] = frag['members_active']
         stats['sw_new'] = frag['members_new']
         stats['sw_out'] = frag['members_out']
+
+    def _register_extra_snapshot_gap(self, e: Exception, today: str, dry_run: bool) -> None:
+        """申万增强失败 → 登记子项缺口（限流方案 §3 P0：新浪成功而申万失败时，
+        保留新浪结果不变，补采只执行增强部分，不整源重跑）"""
+        if dry_run or not self.sw_enabled:
+            return
+        try:
+            self.db.register_retry(
+                dataset='industry', source='industry', target_date=today, market='CN',
+                action='SCOPE_RETRY', reason='SW_ENHANCE_GAP', sub_key='sw_2021',
+                missing_scope={'scope': 'sw_2021'}, domain=None,
+                last_error=f'{today} 申万增强失败: {str(e)[:200]}')
+        except Exception as we:
+            logger.warning(f'申万缺口登记失败（报告仍记录）: {we}')
+
+    def enhance_only(self, dry_run: bool = False,
+                     today: Optional[str] = None) -> Dict[str, Any]:
+        """只执行申万增强口径（SCOPE_RETRY 子项补采；新浪主口径已验收不重跑）。
+
+        today 缺省当日；跨午夜补采时由补采分发传入原待办锚定日（限流方案 §4.1：
+        待办保存原作业锚定日），成功后按同日结清缺口。"""
+        run_date = today or datetime.now().strftime('%Y%m%d')
+        started = datetime.now()
+        stats: Dict[str, Any] = {'sw_mode': None, 'rows': 0}
+        result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
+                                  'blocked': False, 'backfill': True}
+        try:
+            self.run_extra_snapshots(dry_run, run_date, stats)
+            result['success'] = True
+            if not dry_run:
+                try:
+                    self.db.complete_scope_retry('industry', run_date, 'sw_2021')
+                except Exception as e:
+                    logger.debug(f'申万缺口结清检查失败（忽略）: {e}')
+        except ReviewBlockedError as e:
+            mark_blocked(result, e, f'申万增强风控急停: {e}')
+        except Exception as e:
+            result['errors'].append(f'申万增强失败: {e}')
+            logger.exception(f'申万增强失败: {e}')
+        finally:
+            result['duration'] = (datetime.now() - started).total_seconds()
+            result['report_path'] = self._write_report(result)
+        return result
 
     def _sw_apply_all_classification(self, rows, dry_run: bool,
                                      stats: Dict[str, Any]) -> None:

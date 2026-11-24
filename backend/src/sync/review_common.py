@@ -156,6 +156,70 @@ def load_manifest(path: Path) -> Dict[str, Any]:
     return {'stocks': {}, 'updated_at': None}
 
 
+def mark_blocked(result: Dict[str, Any], e: Exception, message: str) -> None:
+    """风控急停统一登记（限流方案 20261120 §1：结构化信号随结果保留）
+
+    - result['blocked']=True 且 errors 追加 message；
+    - blocked_kind/blocked_host/cooldown_hint 取自异常结构化字段
+      （ReviewBlockedError 新字段；旧式异常/域门拦回均优雅缺省）。
+    """
+    result['blocked'] = True
+    kind = getattr(e, 'kind', None)
+    host = getattr(e, 'host', None)
+    if kind:
+        result['blocked_kind'] = kind
+    if host:
+        result['blocked_host'] = host
+    hint = int(getattr(e, 'cooldown_seconds', 0) or 0)
+    if hint:
+        result['cooldown_hint'] = hint
+    result['errors'].append(message)
+
+
+def register_source_domain_cooldown(db: Any, e: Exception, default_host: str,
+                                    default_seconds: int = 1800) -> None:
+    """即时登记被拒主机域冷却（限流方案 20261120 §2：真实拒绝一经确认即独立提交冷却，
+    不等整轮汇总）。cooldown_active（域门本地拦回，请求未外发）不重复登记；
+    登记失败仅告警——编排层汇总事务仍会兜底登记。"""
+    if getattr(e, 'kind', None) == 'cooldown_active':
+        return
+    try:
+        from datetime import timedelta, timezone as _tz
+
+        from ..data_sources.domain_gate import domain_for_host
+        host = getattr(e, 'host', None) or default_host
+        domain = domain_for_host(host)
+        if not domain:
+            return
+        seconds = int(getattr(e, 'cooldown_seconds', 0) or 0) or default_seconds
+        db.register_domain_cooldown(
+            domain, datetime.now(_tz.utc) + timedelta(seconds=seconds),
+            reason=f'风控急停即时登记: {str(e)[:200]}')
+    except Exception as we:
+        logger.warning(f'域冷却即时登记失败（编排层兜底）: {we}')
+
+
+def domain_cooldown_early_exit(result: Dict[str, Any], gate: Any, url: str,
+                               label: str) -> bool:
+    """任务启动前域冷却预检（限流方案 §2）：冷却中直接拦截，本轮不外发。
+
+    拦截时置 blocked / blocked_kind='cooldown_active'——编排器据此不再延长冷却、
+    仅登记待补；错误文案含"风控急停"供夜间续跑脚本退避判定（而非误判完成）。
+    """
+    try:
+        remaining = gate.remaining_for_url(url) if getattr(gate, 'enabled', False) else 0
+    except Exception:
+        return False
+    if remaining <= 0:
+        return False
+    result['blocked'] = True
+    result['blocked_kind'] = 'cooldown_active'
+    result['errors'].append(
+        f'{label} 风控急停（域冷却继承，剩余 {remaining}s），本轮未外发')
+    logger.warning(f'{label} 域冷却继承（剩余 {remaining}s），本轮未外发')
+    return True
+
+
 def save_manifest(path: Path, manifest: Dict[str, Any]) -> None:
     """原子写 manifest（.tmp + replace）"""
     manifest['updated_at'] = datetime.now().isoformat(timespec='seconds')

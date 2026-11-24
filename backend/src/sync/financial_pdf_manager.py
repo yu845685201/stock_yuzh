@@ -20,8 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.config_manager import ConfigManager
 from ..data_sources.cninfo_source import CninfoBlockedError, CninfoSource
+from ..data_sources.domain_gate import get_gate
+from ..data_sources.errors import DomainCooldownError
 from ..database.connection import DatabaseConnection
 from .report_writer import resolve_repo_root, write_markdown_report
+from .review_common import (domain_cooldown_early_exit, mark_blocked,
+                            register_source_domain_cooldown)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +38,8 @@ class FinancialPdfManager:
     def __init__(self, config_manager: ConfigManager, manifest_path: Optional[Path] = None):
         self.config_manager = config_manager
         self.config = config_manager.load_config()
-        self.source = CninfoSource(self.config.get('cninfo', {}))
+        self.source = CninfoSource(self.config.get('cninfo', {}),
+                                   gate=get_gate(self.config))
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_financial_pdf_progress_table()
         self.pdf_dir = self._resolve_pdf_dir()
@@ -97,6 +102,12 @@ class FinancialPdfManager:
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
                                   'blocked': False, 'manifest_path': str(self.manifest_path),
                                   'report_path': None}
+        # 域冷却继承预检（限流方案 §2）：冷却中本轮不外发——夜间续跑脚本据此
+        # 退避（错误文案含"风控急停"，watcher grep 命中进入 COOL 而非误判完成）
+        if domain_cooldown_early_exit(result, getattr(self.source, 'gate', None),
+                                      self.source.query_base_url, '巨潮财报'):
+            result['report_path'] = self._write_report(result)
+            return result
         manifest = self._load_manifest()
 
         try:
@@ -113,10 +124,12 @@ class FinancialPdfManager:
                 try:
                     self._process_stock(code, info, init_mode, year_from, year_to,
                                         progress_map, manifest, stats, dry_run)
-                except CninfoBlockedError as e:
+                except (CninfoBlockedError, DomainCooldownError) as e:
+                    # 限流方案 §1/§3 P0：查询或下载被拒 → 整轮急停 + 即时登记域冷却
+                    # （下载层已将拒绝向上抛，不再降级为单文件 failed）
                     logger.error(f'巨潮风控触发，整轮急停（进度/断点已保存）: {e}')
-                    result['errors'].append(f'巨潮风控急停: {e}')
-                    result['blocked'] = True
+                    mark_blocked(result, e, f'巨潮风控急停: {e}')
+                    register_source_domain_cooldown(self.db, e, 'www.cninfo.com.cn')
                     break
                 except Exception as e:
                     logger.exception(f'{code} 处理异常: {e}')

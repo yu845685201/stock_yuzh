@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from .http_collector_base import HttpCollectorBase
+from .http_collector_base import HttpCollectorBase, ReviewBlockedError
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,10 @@ class SseOptionSource(HttpCollectorBase):
             params.update(extra)
         try:
             j = self.get_json(SSE_QUERY_URL, params=params)
+        except ReviewBlockedError:
+            # 明确被拒向上抛（限流方案 §1）：此前被吞成空列表，
+            # manager 无法区分"风控"与"未发布"，编排器也看不到急停
+            raise
         except Exception as e:
             logger.warning('SSE %s 请求失败: %r', sql_id, e)
             return []

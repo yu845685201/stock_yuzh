@@ -22,7 +22,7 @@
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait as wait_futures
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config.config_manager import ConfigManager
@@ -38,6 +38,11 @@ from .collection_contracts import (
     new_id,
 )
 from .source_expectations import DATASET_REGISTRY, expected_partition
+# 批次3（数据采集链路耗时优化技术方案 V1.1 §5.1）：补采待办/域冷却
+from ..database.dao_collection_retry import domain_for_source
+# 限流方案 20261120 §1/§2：拒绝分类常量与主机级域映射
+from ..data_sources.domain_gate import domain_for_host
+from ..data_sources.errors import KIND_BAD_REQUEST
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +136,12 @@ class ReviewSyncOrchestrator:
         review = self.config.get('review_sync', {}) or {}
         self.cooldown_seconds = int(review.get('blocked_cooldown_seconds', 600))
         self.retry_once = bool(review.get('blocked_retry_once', True))
+        # 批次3（方案 V1.1 §5.1）：持久化待补交接开关——true（默认）时风控急停不再原地
+        # sleep（每晚龙虎榜/两融各等 1800s 的痛点），登记补采任务后释放工作线程；
+        # false 保留"冷却 sleep + 重试一次"旧行为供回退（§6 回滚：消费者不可用时先恢复）
+        self.pending_handoff_enabled = bool(review.get('pending_handoff_enabled', True))
+        # 持久化待补的重试间隔：急停/失败 → blocked_cooldown_seconds；数据日滞后 → 该值
+        self.lag_retry_delay_seconds = int(review.get('pending_lag_retry_seconds', 300))
         self.parallel_workers = max(1, int(review.get('parallel_workers', 4)))
         self.parallel_enabled = bool(review.get('parallel_sources', True))
 
@@ -242,6 +253,10 @@ class ReviewSyncOrchestrator:
         if not dry_run:
             self._account_job_finish(ctx, summary, execution_status, data_readiness,
                                      result)
+            # 批次3（§5.1）：交接失败 → 退出码语义降为"失败"（重建范围已保留在报告中）
+            if result.get('handoff_failed'):
+                execution_status = '1'
+                result['execution_status'] = '1'
 
         # F1（方案 V1.0 §F1）：数据新鲜度巡检挂载——编排末尾自动跑，红灯进
         # result['freshness_red'] 并入汇总报告（不改变各源自身状态）
@@ -269,20 +284,41 @@ class ReviewSyncOrchestrator:
 
     def _run_source(self, name: str, runner: Callable[[bool], Dict[str, Any]],
                     dry_run: bool) -> Dict[str, Any]:
-        """单源执行（含风控急停冷却重试一次）；异常在 entry 内收敛，不外抛"""
+        """单源执行；异常在 entry 内收敛，不外抛
+
+        批次3（数据采集链路耗时优化技术方案 V1.1 §5.1 按缺口交接）：风控急停不再原地
+        sleep 占用采集线程——pending_handoff_enabled=true（默认）时登记持久化待补后
+        立即返回（补采作业按到期领取）；false 保留旧行为（冷却 sleep 后重试一次）供回退。
+        """
         label = SOURCE_LABELS.get(name, name)
         entry: Dict[str, Any] = {'source': name, 'label': label, 'status': '跳过',
                                  'rows': 0, 'duration': 0.0, 'detail': ''}
         src_start = time.time()
         try:
             src_result = runner(dry_run)
-            if self._is_blocked(src_result) and self.retry_once:
-                logger.warning(f'{label} 风控急停，冷却 {self.cooldown_seconds}s 后重试一次')
-                time.sleep(self.cooldown_seconds)
-                src_result = runner(dry_run)
             if self._is_blocked(src_result):
-                entry['status'] = '待补'
-                entry['detail'] = '风控急停（重试后仍失败）'
+                # 结构化拒绝信号（限流方案 §1）：kind/host/冷却提示随 entry 保留到记账
+                if isinstance(src_result, dict):
+                    for k in ('blocked_kind', 'blocked_host', 'cooldown_hint'):
+                        if src_result.get(k) is not None:
+                            entry[k] = src_result[k]
+                if self.pending_handoff_enabled:
+                    blocked_err = (src_result.get('errors') or [''])[0] \
+                        if isinstance(src_result, dict) else ''
+                    entry['status'] = '待补'
+                    entry['detail'] = (
+                        f'风控急停（已持久化待补，{self.cooldown_seconds}s 后可补采，'
+                        f'不再原地等待）' + (f'：{blocked_err}' if blocked_err else ''))
+                    entry['handoff'] = 'pending_retry'
+                elif self.retry_once:
+                    logger.warning(f'{label} 风控急停，冷却 {self.cooldown_seconds}s 后重试一次')
+                    time.sleep(self.cooldown_seconds)
+                    src_result = runner(dry_run)
+                if not self.pending_handoff_enabled and self._is_blocked(src_result):
+                    entry['status'] = '待补'
+                    entry['detail'] = '风控急停（重试后仍失败）'
+                elif not self.pending_handoff_enabled:
+                    self._fill_entry(entry, src_result)
             else:
                 self._fill_entry(entry, src_result)
         except Exception as e:
@@ -525,6 +561,7 @@ class ReviewSyncOrchestrator:
         """创建 sync_job（RUNNING）。记账失败只告警，不影响采集主流程"""
         try:
             self.db.ensure_collection_tables()
+            self.db.ensure_collection_retry_tables()
             with self.db.get_connection() as conn:
                 self.db.create_job_tx(
                     conn, ctx.job_id, ctx.target_date, ctx.run_mode.value,
@@ -575,7 +612,12 @@ class ReviewSyncOrchestrator:
                             execution_status: str,
                             data_readiness: Dict[str, str],
                             result: Dict[str, Any]) -> None:
-        """逐源写 sync_partition + finish_job（单事务；失败只告警）"""
+        """逐源写 sync_partition + finish_job + 登记/合并补采待办（单事务）。
+
+        批次3（方案 V1.1 §5.1）：登记分区结果与新待办用同一事务；"待补/失败"的源
+        登记补采任务（风控急停/失败 → 冷却后可试；数据日滞后 → 短间隔重试），
+        交易所系源同步登记域冷却。交接失败时主程序明确报告失败（§5.1），
+        保留原作业范围以便重建。"""
         if not ctx.job_id:
             return
         try:
@@ -596,12 +638,55 @@ class ReviewSyncOrchestrator:
                     e, dataset=name, market=market, target_date=expected_date,
                     source=(spec.source if spec else name), exchange=exchange)
                 pr.job_id = ctx.job_id
-                partition_rows.append(pr.to_row(ctx.job_id))
+                partition_rows.append((pr, e, expected_date))
             job_status = {'0': 'SUCCEEDED', '3': 'PARTIAL', '1': 'FAILED'} \
                 .get(execution_status, 'FAILED')
+            now = datetime.now(timezone.utc)
             with self.db.get_connection() as conn:
-                for row in partition_rows:
-                    self.db.upsert_partition_tx(conn, row)
+                for pr, e, expected_date in partition_rows:
+                    self.db.upsert_partition_tx(conn, pr.to_row(ctx.job_id))
+                    # 批次3：同事务登记补采待办（待补/失败源；跳过不登记）
+                    if e.get('status') in ('待补', '失败') and not ctx.dry_run:
+                        # 结构化 kind 优先（限流方案 §1）；'风控' 子串仅迁移期回退
+                        kind = e.get('blocked_kind')
+                        is_blocked = bool(kind) or '风控' in (e.get('detail') or '')
+                        # 400/bad_request：端点诊断暂停，不触发全域频控统计（方案 §1 表）
+                        rate_limited = is_blocked and kind != KIND_BAD_REQUEST
+                        reason = ('RATE_LIMITED' if rate_limited
+                                  else ('SOURCE_STALE' if e['status'] == '待补'
+                                        else 'REQUEST_FAILED'))
+                        cooldown_hint = int(e.get('cooldown_hint') or 0)
+                        delay = self.cooldown_seconds if (rate_limited
+                                                          or e['status'] == '失败') \
+                            else self.lag_retry_delay_seconds
+                        if rate_limited and cooldown_hint:
+                            delay = max(delay, cooldown_hint)  # 尊重 Retry-After 提示
+                        domain = domain_for_source(e['source'])
+                        if rate_limited and e.get('blocked_host'):
+                            # 按实际被拒主机登记（szse/sse/cninfo_query/...），兼容旧源级映射
+                            domain = domain_for_host(e['blocked_host']) or domain
+                        self.db.register_retry_tx(
+                            conn,
+                            dataset=e['source'],
+                            source=e['source'],
+                            target_date=expected_date or ctx.target_date,
+                            market=pr.market,
+                            partition_key=pr.partition_key,
+                            action='SOURCE_RETRY',
+                            reason=reason,
+                            missing_scope={'detail': e.get('detail'),
+                                           'rows': e.get('rows', 0)},
+                            domain=domain,
+                            retry_at=now + timedelta(seconds=delay),
+                            parent_job_id=ctx.job_id,
+                            last_error=(e.get('detail') or '')[:500])
+                        # 域冷却：同步登记（主流程/补采共用互斥与冷却）
+                        if domain and rate_limited:
+                            self.db.register_domain_cooldown_tx(
+                                conn, domain,
+                                now + timedelta(seconds=max(self.cooldown_seconds,
+                                                            cooldown_hint)),
+                                reason=f"{e['source']} 风控急停: {(e.get('detail') or '')[:200]}")
                 self.db.finish_job_tx(
                     conn, ctx.job_id, job_status, execution_status=execution_status,
                     data_readiness=data_readiness,
@@ -615,7 +700,11 @@ class ReviewSyncOrchestrator:
             logger.info(f'采集作业记账完成: job_id={ctx.job_id} status={job_status} '
                         f'partitions={len(partition_rows)}')
         except Exception as e:
-            logger.warning(f'采集作业记账收尾失败（不影响采集结果）: {e}')
+            # 批次3（§5.1）：交接写入失败时主程序明确报告失败，保留原作业范围以便重建
+            logger.exception(f'采集作业记账收尾失败: {e}')
+            result['errors'].append(
+                f'持久化交接失败（分区/补采待办未落库，请用本报告范围重建待办）: {e}')
+            result['handoff_failed'] = True
 
     # ---------- 工具 ----------
 

@@ -294,8 +294,11 @@ def entry_to_partition_result(entry: Dict[str, Any], dataset: str, market: str,
         reason_codes.append(REASON_REQUEST_FAILED)
     elif status_raw == '待补':
         status = PartitionStatus.PARTIAL
-        reason_codes.append(REASON_RATE_LIMITED if '风控' in (detail or '')
-                            else REASON_SOURCE_STALE)
+        # 结构化 kind 优先（限流方案 §1）；'风控' 子串仅迁移期回退
+        if entry.get('blocked_kind') or '风控' in (detail or ''):
+            reason_codes.append(REASON_RATE_LIMITED)
+        else:
+            reason_codes.append(REASON_SOURCE_STALE)
     else:  # 跳过
         detail_l = detail or ''
         if '日K' in detail_l or '门控' in detail_l or '依赖' in detail_l:

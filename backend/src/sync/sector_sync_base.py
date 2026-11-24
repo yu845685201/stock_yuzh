@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 NODE_COUNT_TOLERANCE = 2
 # 节点成分较库内在册数异常缩减比例（超过则判定翻页截断，整轮不落库）
 NODE_SHRINK_RATIO = 0.3
+# 中度缩减的自然流失容差（≤此值视为正常成员退出，直接接受；超过则复核验收）
+_EXIT_SHRINK_TOLERANCE = 3
 
 
 class SectorNodeManagerBase:
@@ -50,6 +52,9 @@ class SectorNodeManagerBase:
         review = self.config.get('review_sync', {}) or {}
         section = review.get(self.config_section, {}) or {}
         self.enabled = bool(section.get('enabled', True))
+        # 空页/缩减复核预算（限流方案 20261120 §3 P0：临时空页复核计入整轮预算，
+        # 防软限流下空页重抓循环放大请求）
+        self.recheck_budget = int(review.get('sina_recheck_budget', 12))
         self.source = SinaSectorSource(self.config)
 
     config_section: str = ''
@@ -67,6 +72,7 @@ class SectorNodeManagerBase:
         today = datetime.now().strftime('%Y%m%d')
         stats: Dict[str, Any] = {
             'enabled': self.enabled, 'nodes_total': 0, 'nodes_ok': 0,
+            'nodes_unverified': 0, 'rechecks_used': 0,
             'members_active': 0, 'members_new': 0, 'members_out': 0,
             'concepts': 0, 'rows': 0,
         }
@@ -84,38 +90,84 @@ class SectorNodeManagerBase:
                 raise ReviewSyncError('板块清单解析为空（接口结构变更或风控页），本轮不落库')
             stats['nodes_total'] = len(nodes)
             active_before = self.db.fetch_concept_active_codes(self.source_tag)
+            recheck_budget = self.recheck_budget
             members_by_node: Dict[str, List[str]] = {}
+            unverified: List[str] = []
+
+            def _recheck(node: str, expected: Optional[int]) -> Optional[List[Dict[str, str]]]:
+                """节点复核（整轮共享预算；耗尽返回 None 不再外发——限流方案 §3 P0）"""
+                nonlocal recheck_budget
+                if recheck_budget <= 0:
+                    return None
+                recheck_budget -= 1
+                stats['rechecks_used'] = stats.get('rechecks_used', 0) + 1
+                time.sleep(self.source.request_interval * 2)
+                return self.source.fetch_node_members(node, expected_count=expected)
+
             for node, info in nodes.items():
                 expected = info.get('count')
                 members = self.source.fetch_node_members(node, expected_count=expected)
+                # 数量不足复核（清单 count 口径不可靠，仅触发重抓、不作硬校验）
                 if expected and len(members) < int(expected) - NODE_COUNT_TOLERANCE:
-                    time.sleep(self.source.request_interval * 2)
-                    members = self.source.fetch_node_members(node, expected_count=expected)
+                    again = _recheck(node, expected)
+                    if again is not None:
+                        members = again
                 # 截断判定以库内在册数为基准（清单 count 口径不可靠）：
-                # 异常缩减（>30%，如 2026-09-29 盘中实测 247→40）先重抓、仍缩减则整轮不落库
+                # 批量缩减（>30%，如 2026-09-29 盘中实测 247→40）先重抓、仍缩减则整轮不落库
                 prev_n = len(active_before.get(node, []))
+                verified = True
                 if prev_n and len(members) < prev_n * (1 - NODE_SHRINK_RATIO):
-                    time.sleep(self.source.request_interval * 2)
-                    members = self.source.fetch_node_members(node, expected_count=expected)
-                if prev_n and len(members) < prev_n * (1 - NODE_SHRINK_RATIO):
-                    raise ReviewSyncError(
-                        f'节点 {node} 实抓成分 {len(members)} 较库内在册 {prev_n} '
-                        f'异常缩减超 {NODE_SHRINK_RATIO:.0%}（疑似翻页截断），本轮不落库')
+                    again = _recheck(node, expected)
+                    if again is not None:
+                        members = again
+                    if prev_n and len(members) < prev_n * (1 - NODE_SHRINK_RATIO):
+                        raise ReviewSyncError(
+                            f'节点 {node} 实抓成分 {len(members)} 较库内在册 {prev_n} '
+                            f'异常缩减超 {NODE_SHRINK_RATIO:.0%}（疑似翻页截断），本轮不落库')
+                # 中度缩减门控（限流方案 §3 P0：退出更新只在验收通过的节点执行）——
+                # 缩减 ≤30% 但超自然流失容差（或不满足清单 count）时复核一次，
+                # 仍缩减则该节点本轮跳过快照，防止分页截断造成成员误退出
+                elif prev_n and len(members) < prev_n:
+                    meets = ((not expected)
+                             or len(members) >= int(expected) - NODE_COUNT_TOLERANCE)
+                    if (prev_n - len(members)) > _EXIT_SHRINK_TOLERANCE or not meets:
+                        again = _recheck(node, expected)
+                        if again is not None:
+                            members = again
+                        still_shrunk = prev_n - len(members)
+                        meets = ((not expected)
+                                 or len(members) >= int(expected) - NODE_COUNT_TOLERANCE)
+                        if still_shrunk > 0 and (not meets
+                                                 or still_shrunk > _EXIT_SHRINK_TOLERANCE):
+                            verified = False
+                if not verified:
+                    unverified.append(node)
+                    stats['nodes_unverified'] = stats.get('nodes_unverified', 0) + 1
+                    logger.warning(f'{self.label} 节点 {node} 未验收（实抓 {len(members)} '
+                                   f'< 在册 {prev_n}，疑似截断），本轮跳过快照、不产生成员进出')
+                    continue
                 members_by_node[node] = [m['ts_code'] for m in members]
                 stats['nodes_ok'] += 1
+            if nodes and not members_by_node:
+                raise ReviewSyncError('全部节点未验收（疑似风控/翻页截断），本轮不落库')
+            if unverified:
+                stats['unverified_nodes'] = unverified
             stats.update(self.apply_snapshot(self.source_tag, nodes, members_by_node,
                                              dry_run=dry_run, today=today,
                                              active_before=active_before))
             result['success'] = True
-            # 增强口径（如申万一级行业）随主口径成功后顺带刷新；失败只记 errors 不回滚主口径
+            # 增强口径（如申万一级行业）随主口径成功后顺带刷新；失败只记 errors、
+            # 登记子项缺口待补（不回滚主口径）
             if result['success']:
                 try:
                     self.run_extra_snapshots(dry_run, today, stats)
                 except ReviewBlockedError as e:
                     result['errors'].append(f'增强口径风控急停（主口径不受影响）: {e}')
+                    self._register_extra_snapshot_gap(e, today, dry_run)
                 except Exception as e:
                     result['errors'].append(f'增强口径失败: {e}')
                     logger.exception(f'{self.label} 增强口径失败: {e}')
+                    self._register_extra_snapshot_gap(e, today, dry_run)
         except ReviewBlockedError as e:
             result['blocked'] = True
             result['errors'].append(f'新浪板块源风控急停（本轮未落库，冷却后重跑）: {e}')
@@ -144,7 +196,10 @@ class SectorNodeManagerBase:
         concept_rows: List[Dict[str, Any]] = []
         map_rows: List[Dict[str, Any]] = []
         frag: Dict[str, Any] = {'members_new': 0, 'members_out': 0}
-        for node, info in nodes.items():
+        # 只处理本轮验收通过的节点（未验收节点不在 members_by_node，
+        # 不产生任何成员进出——限流方案 §3 P0 节点验收门控）
+        for node in members_by_node:
+            info = nodes.get(node) or {}
             ts_codes = members_by_node.get(node) or []
             concept_rows.append({
                 'concept_code': node, 'concept_name': info.get('name'),
@@ -178,6 +233,12 @@ class SectorNodeManagerBase:
 
     def run_extra_snapshots(self, dry_run: bool, today: str, stats: Dict[str, Any]) -> None:
         """增强口径钩子（子类覆写，如行业 manager 挂申万一级行业）；默认无增强口径"""
+        return None
+
+    def _register_extra_snapshot_gap(self, e: Exception, today: str, dry_run: bool) -> None:
+        """增强口径失败登记子项缺口（限流方案 §3 P0：主口径保留、补采只执行增强部分）。
+
+        基类默认无增强口径（no-op）；IndustryManager 覆写登记 sw_2021 缺口。"""
         return None
 
     def report_extra_lines(self, stats: Dict[str, Any]) -> List[str]:

@@ -30,6 +30,8 @@ class FakeCalDB:
         self.upsert_details = []
         self.upsert_margins = []
         self.deletes = []
+        self.scope_gaps = {}
+        self.completed_scopes = []
 
     def fetch_trade_calendar(self, start, end):
         return [{'calendar_date': d} for d in self.calendar if start <= d <= end]
@@ -55,6 +57,20 @@ class FakeCalDB:
     def upsert_margin_trades(self, rows):
         self.upsert_margins.extend(rows)
         return len(rows)
+
+    # ---- 限流方案 20261120 §4.2/§4.3 新增 DAO 依赖桩 ----
+
+    def fetch_margin_row_counts_by_exchange(self, d):
+        counts = self.counts.get(d, 0)
+        # 桩口径：单值 counts 视为两侧齐备（>0），0 则两侧均缺
+        return {'sse': counts, 'szse': counts}
+
+    def scope_retry_missing_scope(self, dataset, target_date, sub_key):
+        return self.scope_gaps.get((dataset, target_date, sub_key))
+
+    def complete_scope_retry(self, dataset, target_date, sub_key):
+        self.completed_scopes.append((dataset, target_date, sub_key))
+        return True
 
 
 # ---------- 交易日历展开 ----------

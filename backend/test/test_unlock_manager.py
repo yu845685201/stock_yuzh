@@ -64,6 +64,9 @@ class FakeCninfo:
         self._windows = windows or {}
         self._blocked = blocked
         self.queries = []
+        # 限流方案 20261120 §2：真源为 CninfoSource（域冷却预检读 gate/query_base_url）
+        self.gate = None
+        self.query_base_url = 'http://www.cninfo.com.cn'
 
     def query_market_window(self, start, end, searchkey=''):
         if self._blocked:

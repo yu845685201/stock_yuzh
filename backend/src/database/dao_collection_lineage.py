@@ -187,6 +187,20 @@ class CollectionLineageDaoMixin:
                   _j(result_summary) if result_summary is not None else None,
                   job_id))
 
+    def latest_partition_status(self, dataset: str, market: str,
+                                target_date: str) -> Optional[str]:
+        """查某数据集某分区最近一次验收状态（限流方案 20261120 §4.2：
+        补采前先查已验收分区，COMPLETE/CONFIRMED_EMPTY 不再重跑外发）。
+
+        以 expected_date（= 目标补采日）+ dataset + market 定位，
+        取 first_observed_at 最新一条；无记录返回 None。"""
+        rows = self.execute_query(
+            "SELECT status FROM sync_partition "
+            "WHERE dataset = %s AND market = %s AND expected_date = %s "
+            "ORDER BY first_observed_at DESC LIMIT 1",
+            (dataset, market, target_date))
+        return rows[0]['status'] if rows else None
+
     def upsert_partition_tx(self, conn: Any, row: Dict[str, Any]) -> None:
         """分区验收结果 upsert（唯一键 job_id+dataset+source+market+partition_key）。
 
