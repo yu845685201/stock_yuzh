@@ -126,6 +126,42 @@ SOURCE_LABELS = {
 }
 
 
+
+
+def _announcement_with_versions(cm, as_of, dry):
+    """公告同步 + 财报版本行回填（§7.3 批次 C 挂接：公告证据行日增；
+    版本行失败不阻塞公告主源——影子路径）。"""
+    from .announcement_manager import AnnouncementManager
+    from .financial_version_manager import FinancialVersionManager
+    m = AnnouncementManager(cm)
+    r = m.execute(as_of=as_of, dry_run=dry)
+    try:
+        v = FinancialVersionManager(cm).build_announcement_versions(
+            days_back=10, dry_run=dry)
+        r['stats']['fin_versions'] = v.get('stats')
+        if not v.get('success'):
+            r.setdefault('errors', []).append('fin_versions 回填失败')
+    except Exception as e:
+        r.setdefault('errors', []).append(f'fin_versions: {e}')
+    return r
+
+
+def _industry_with_cnindex(cm, as_of, dry):
+    """行业同步 + 国证一级快照（§6 批次 B 挂接：独立于新浪，待补不阻塞主源）。"""
+    from .industry_manager import IndustryManager
+    m = IndustryManager(cm)
+    r = m.execute(dry_run=dry)
+    try:
+        r2 = m.execute_cnindex(trade_date=as_of, dry_run=dry)
+        r['stats']['cnindex'] = r2.get('stats')
+        if not r2.get('success'):
+            r.setdefault('errors', []).append(
+                'cnindex 待补: ' + ';'.join((r2.get('errors') or [])[:1]))
+    except Exception as e:
+        r.setdefault('errors', []).append(f'cnindex: {e}')
+    return r
+
+
 class ReviewSyncOrchestrator:
     """每日复盘数据采集编排器（波次并行，单源隔离）"""
 
@@ -201,6 +237,11 @@ class ReviewSyncOrchestrator:
                     result['report_path'] = self._write_report(result, started)
                     return result
 
+        # 盘后采集数据源整合详细技术方案 V1.0 §2.1：目标日只解析一次——两融业务日
+        # 按"锚定日前一交易日"解析（expected_partition 优先，日历不可用回退锚定日），
+        # 期权等 T 日数据集取锚定日；runner 不再各自退回自然日。
+        # margin_target 经实例属性传递（_build_runners 签名保持 (as_of) 兼容既有 mock）
+        self._margin_target = self._resolve_dataset_business_date(ctx, 'margin', as_of_str)
         runners = self._build_runners(as_of_str)
 
         # F4（方案 V1.0 §F4）：中间件健康预检——请求集含 tdx 依赖源时统一预检一次，
@@ -427,6 +468,23 @@ class ReviewSyncOrchestrator:
 
     # ---------- 各源 runner ----------
 
+    def _resolve_dataset_business_date(self, ctx: RunContext, dataset: str,
+                                       as_of_str: str) -> str:
+        """按源期望解析数据集业务日（§2.1：两融 T-1 等；目标日只解析一次）。
+
+        expected_partition 走交易日历展开 business_date_offset；日历不可用
+        （CALENDAR_UNKNOWN / 异常）回退锚定日并由 manager 按日历兜底，不硬算自然日差。
+        """
+        try:
+            exp = expected_partition(ctx, dataset, db=self.db, config=self.config)
+            if exp.get('expected_date'):
+                return exp['expected_date']
+            logger.warning(f'{dataset} 业务日解析无应到日（{exp.get("reason_codes")}），'
+                           f'回退锚定日 {as_of_str}')
+        except Exception as e:
+            logger.warning(f'{dataset} 业务日解析异常，回退锚定日 {as_of_str}: {e}')
+        return as_of_str
+
     def _build_runners(self, as_of: str) -> Dict[str, Callable[[bool], Dict[str, Any]]]:
         from .adjust_factor_manager import AdjustFactorManager
         from .announcement_manager import AnnouncementManager
@@ -462,10 +520,14 @@ class ReviewSyncOrchestrator:
             # 外围日K（ifzq，技术方案 20261004）：对外围快照无依赖，波 1 并发，互拍在采集器内部
             'overseas_kline': lambda dry: OverseasKlineManager(cm).execute(dry_run=dry),
             'valuation_idx': lambda dry: IndexValuationManager(cm).execute(dry_run=dry),
-            'announcement': lambda dry: AnnouncementManager(cm).execute(as_of=as_of, dry_run=dry),
+            'announcement': lambda dry: _announcement_with_versions(cm, as_of, dry),
             'disclosure': lambda dry: DisclosureManager(cm).execute(dry_run=dry),
             'lhb': lambda dry: LhbManager(cm).execute(trade_date=as_of, dry_run=dry),
-            'margin': lambda dry: MarginManager(cm).execute(dry_run=dry),
+            # §2.1：两融目标日由编排统一解析（self._margin_target），manager 内显式
+            # 日期直采不再回看偏移；缺省仍由 manager 按交易日历解析业务日
+            'margin': lambda dry: MarginManager(cm).execute(
+                trade_date=getattr(self, '_margin_target', None) or as_of,
+                dry_run=dry, explicit_date=bool(getattr(self, '_margin_target', None))),
             'ths_finance': lambda dry: ThsFinanceManager(cm).execute(as_of=as_of, dry_run=dry),
             'money_flow': lambda dry: MoneyFlowManager(cm).execute(trade_date=as_of, dry_run=dry),
             'valuation_calc': lambda dry: ValuationCalcManager(cm).execute(
@@ -473,7 +535,7 @@ class ReviewSyncOrchestrator:
             # 开发项 B：缺省增量模式（最近 10 个交易日补齐，~40s；历史用 review backfill-sentiment）
             'sentiment_metrics': lambda dry: SentimentMetricsManager(cm).execute(dry_run=dry),
             'concept': lambda dry: ConceptManager(cm).execute(dry_run=dry),
-            'industry': lambda dry: IndustryManager(cm).execute(dry_run=dry),
+            'industry': lambda dry: _industry_with_cnindex(cm, as_of, dry),
             'unlock': lambda dry: UnlockManager(cm).execute(dry_run=dry),
             'ths_l2': lambda dry: ThsIndustryL2Manager(cm).execute(dry_run=dry),
             'bj_kline': lambda dry: BjKlineManager(cm).execute(trade_date=as_of, dry_run=dry),
@@ -488,7 +550,7 @@ class ReviewSyncOrchestrator:
             # F15（方案 V1.0 §F15，2026-11-18 用户拍板）：macro/option 入盘后编排，
             # 消除静默停更（macro 曾停 26 天、option 停 2 个交易日无人知）
             'macro': lambda dry: MacroManager(cm).execute(dry_run=dry),
-            'option': lambda dry: OptionManager(cm).execute(dry_run=dry),
+            'option': lambda dry: OptionManager(cm).execute(trade_date=as_of, dry_run=dry),
         }
 
     # ---------- 一键模式：内置日K ----------
@@ -634,18 +696,33 @@ class ReviewSyncOrchestrator:
                         expected_date = exp['expected_date']
                 except Exception:
                     pass
-                pr = entry_to_partition_result(
-                    e, dataset=name, market=market, target_date=expected_date,
-                    source=(spec.source if spec else name), exchange=exchange)
-                pr.job_id = ctx.job_id
-                partition_rows.append((pr, e, expected_date))
+                source_tag = spec.source if spec else name
+                # §2.2：margin 分 sse/szse（detail）、option 分 risk/stats 子项——
+                # 每个子项独立 PartitionResult/分区键/发布指针；其余源单行记账
+                for sub_entry, exchange_i, sub_i in \
+                        self._expand_sub_entries(name, e):
+                    pr = entry_to_partition_result(
+                        sub_entry, dataset=name, market=market,
+                        target_date=expected_date, source=source_tag,
+                        exchange=exchange_i, sub_dataset=sub_i)
+                    pr.job_id = ctx.job_id
+                    partition_rows.append((pr, sub_entry, expected_date))
             job_status = {'0': 'SUCCEEDED', '3': 'PARTIAL', '1': 'FAILED'} \
                 .get(execution_status, 'FAILED')
             now = datetime.now(timezone.utc)
             with self.db.get_connection() as conn:
                 for pr, e, expected_date in partition_rows:
                     self.db.upsert_partition_tx(conn, pr.to_row(ctx.job_id))
-                    # 批次3：同事务登记补采待办（待补/失败源；跳过不登记）
+                    # §3.1 批次 A：COMPLETE/CONFIRMED_EMPTY 子项同步更新逻辑分区
+                    # 发布指针（首达 COALESCE 固定；PARTIAL/FAILED 只记台账不动指针）
+                    if pr.status.value in ('COMPLETE', 'CONFIRMED_EMPTY'):
+                        self.db.accept_partition_current_tx(
+                            conn, dataset=pr.dataset, partition_key=pr.partition_key,
+                            business_date=expected_date, job_id=ctx.job_id,
+                            status=pr.status.value, source=pr.source,
+                            revision_id=pr.revision_id, first_daily=True)
+                    # 批次3：同事务登记补采待办（待补/失败子项；跳过不登记）——
+                    # §2.2 子项粒度待办键（margin 缺哪所补哪所、option 缺哪表补哪表）
                     if e.get('status') in ('待补', '失败') and not ctx.dry_run:
                         # 结构化 kind 优先（限流方案 §1）；'风控' 子串仅迁移期回退
                         kind = e.get('blocked_kind')
@@ -707,6 +784,44 @@ class ReviewSyncOrchestrator:
             result['handoff_failed'] = True
 
     # ---------- 工具 ----------
+
+    @staticmethod
+    def _expand_sub_entries(name: str, e: Dict[str, Any]) -> List[tuple]:
+        """单源 summary entry → (子项 entry, exchange, sub_dataset) 列表（§2.2）。
+
+        - margin → sse/szse 各一行（sub='detail'），行数取 sub_counts；
+          该市场无数据且源整体成功 → 子项标"待补"（未发布 ≠ 已确认空）；
+        - option → risk/stats 各一行（exchange=sse）；
+        - 其他源/无子项计数的源 → 单行原样（exchange 传 None 由调用方决定）。
+        """
+        sc = e.get('sub_counts') or {}
+
+        def _sub(rows_n: int, exchange: str, sub: str,
+                 zero_detail: str) -> tuple:
+            se = dict(e)
+            se['rows'] = rows_n
+            if rows_n > 0:
+                se['status'] = '成功'
+            elif e.get('status') == '成功':
+                se['status'] = '待补'
+                se['detail'] = zero_detail
+            return (se, exchange, sub)
+
+        if name == 'margin' and ('szse_rows' in sc or 'sse_rows' in sc):
+            return [
+                _sub(int(sc.get('szse_rows') or 0), 'szse', 'detail',
+                     '深市两融当日无数据（未发布或无记录）'),
+                _sub(int(sc.get('sse_rows') or 0), 'sse', 'detail',
+                     '沪市两融当日无数据（未发布或无记录）'),
+            ]
+        if name == 'option' and ('risk_rows' in sc or 'stats_rows' in sc):
+            return [
+                _sub(int(sc.get('risk_rows') or 0), 'sse', 'risk',
+                     '期权风险指标当日无数据（未发布或非交易日）'),
+                _sub(int(sc.get('stats_rows') or 0), 'sse', 'stats',
+                     '期权逐标的统计当日无数据（未发布或非交易日）'),
+            ]
+        return [(e, None, None)]
 
     @staticmethod
     def _parse_sources(sources: Optional[str]) -> List[str]:
@@ -787,6 +902,17 @@ class ReviewSyncOrchestrator:
             entry['status'] = '失败' if failed_n else '待补'
         stats = src_result.get('stats') or {}
         entry['rows'] = stats.get('rows') or stats.get('records') or 0
+        # §2.2 按子项记账：margin 分沪深、option 分 risk/stats——子项行数与实际来源
+        # 随 entry 保留，供 _account_job_finish 展开为逐子项 PartitionResult
+        sub_counts = {}
+        for k in ('szse_rows', 'sse_rows', 'risk_rows', 'stats_rows'):
+            if stats.get(k) is not None:
+                sub_counts[k] = stats[k]
+        for k in ('szse_source', 'sse_source'):
+            if stats.get(k):
+                sub_counts[k] = stats[k]
+        if sub_counts:
+            entry['sub_counts'] = sub_counts
 
         # F2（数据采集链路风险修复方案 V1.0 §F2）："成功 ≠ 有当日数据"——源自报
         # stats.data_date_max（本次入库最大数据日），落后于最近已收盘交易日（基准日，

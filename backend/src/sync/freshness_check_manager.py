@@ -176,6 +176,41 @@ class FreshnessCheckManager:
             red.append(cal_entry)
         rows.append(cal_entry)
 
+        # 专项：复权因子 divergent 比例监控（§8 批次 C——候选=权益重建独立口径，
+        # divergent 占比跳变=官方因子被修订/出错的早期信号；基线 2026-11-26 ≈ 44%）
+        DIV_BASELINE = 44.0
+        DIV_ALERT_PP = 10.0   # 相对基线跳变 10 个百分点即告警
+        div_entry = {'table': 'adjust_factor_candidate', 'label': '复权因子口径校验',
+                     'date_column': 'update_time', 'max_date': None,
+                     'lag_days': None, 'status': '未知', 'exempt': False,
+                     'max_lag_days': 0}
+        try:
+            r = db.execute_query(
+                "SELECT check_result, COUNT(*) AS n FROM adjust_factor_candidate "
+                "WHERE check_result IS NOT NULL GROUP BY check_result")
+            cnt = {x['check_result']: x['n'] for x in r}
+            total = sum(cnt.values())
+            if total:
+                div_pct = round(cnt.get('divergent', 0) * 100.0 / total, 2)
+                div_entry['max_date'] = datetime.now().strftime('%Y%m%d')
+                div_entry['lag_days'] = 0
+                div_entry['detail'] = (f'官方对比 {total} 行：divergent {div_pct}%'
+                                       f'（基线 {DIV_BASELINE}%）/ match '
+                                       f'{round(cnt.get("match", 0) * 100.0 / total, 1)}%')
+                if abs(div_pct - DIV_BASELINE) <= DIV_ALERT_PP:
+                    div_entry['status'] = '绿灯'
+                else:
+                    div_entry['status'] = '红灯'
+                    div_entry['detail'] += f'——跳变超 {DIV_ALERT_PP}pp，官方因子可能被修订，排查'
+                    red.append(div_entry)
+            else:
+                div_entry['status'] = '黄灯'
+                div_entry['detail'] = '无已评校验行（候选未校验）'
+        except Exception as e:
+            div_entry['status'] = '错误'
+            div_entry['detail'] = str(e)[:120]
+        rows.append(div_entry)
+
         red_n = len(red)
         status = '正常' if red_n == 0 else f'红灯 {red_n} 项'
         lines = self._render(base_str, rows, red, yellow)

@@ -67,7 +67,8 @@ class SectorNodeManagerBase:
 
     # ---------- 主流程 ----------
 
-    def execute(self, dry_run: bool = False) -> Dict[str, Any]:
+    def execute(self, dry_run: bool = False,
+                trade_date: Optional[str] = None) -> Dict[str, Any]:
         started = datetime.now()
         today = datetime.now().strftime('%Y%m%d')
         stats: Dict[str, Any] = {
@@ -76,6 +77,11 @@ class SectorNodeManagerBase:
             'members_active': 0, 'members_new': 0, 'members_out': 0,
             'concepts': 0, 'rows': 0,
         }
+        # 盘后采集数据源整合详细技术方案 V1.0 §10：单源 --trade-date 透传位。
+        # 新浪/申万口径为当前快照语义，显式业务日仅随 stats 记录（国证日期快照
+        # 属批次 B——日期快照表落地后由此参数驱动历史日回放）
+        if trade_date:
+            stats['requested_trade_date'] = str(trade_date).replace('-', '')[:8]
         result: Dict[str, Any] = {'success': False, 'stats': stats, 'errors': [],
                                   'blocked': False, 'skipped_disabled': not self.enabled}
         if not self.enabled:

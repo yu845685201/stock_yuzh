@@ -209,7 +209,9 @@ class FakeMarginSource:
 
 
 def test_margin_backfill_records_actual_data_dates(monkeypatch):
-    """X-14：请求日≠数据日（回看采到 d-1）如实记入 date_notes；断点判定只信查库"""
+    """X-14 新语义（盘后采集数据源整合详细技术方案 V1.0 §2.1）：历史回填逐日
+    直采不回看——请求日 d 未发布当天记失败可续补，不再静默采到 d-1 冒充成功；
+    断点判定仍只信查库"""
     import src.sync.margin_manager as mm
     monkeypatch.setattr(mm, 'write_review_report', lambda *a, **k: None)
     db = FakeCalDB(calendar=['2023-01-04', '2023-01-05'])
@@ -218,12 +220,17 @@ def test_margin_backfill_records_actual_data_dates(monkeypatch):
     result = m.backfill_range('20230104', '20230105')
     stats = result['stats']
 
-    assert result['success'] is True
+    # 0104 双所成功；0105 深市未发布 → 当日仅沪市入库（单所部分成功如实呈现），
+    # 不再静默回看采到 0104 冒充深市成功（旧行为是 X-14 的根源）
     assert stats['days_done'] == 2
-    # 0105 深市未发布 -> 回看采到 0104：数据日期核对如实记录
-    assert {'requested': '20230105', 'szse_date': '20230104', 'sse_date': '20230105'} \
+    assert result['success'] is True
+    # 0105 深市请求只发 0105；0104 深市只请求一次（0104 本身），无回看补抓
+    assert m.source.asked.count(('szse', '20230104')) == 1
+    assert m.source.asked.count(('szse', '20230105')) == 1
+    # 0105 深市无数据的 date_note 如实记录（szse_date=None）
+    assert {'requested': '20230105', 'szse_date': None, 'sse_date': '20230105'} \
         in stats['date_notes']
-    # 0104 的行正常入库（trade_date=实际数据日）
+    # 入库行：0104 双所 + 0105 沪市（深市 0105 不入任何行）
     trade_dates = {r['trade_date'] for r in db.upsert_margins}
     assert trade_dates == {'20230104', '20230105'}
 

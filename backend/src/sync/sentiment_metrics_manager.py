@@ -78,6 +78,22 @@ class SentimentMetricsManager:
                 chunk_end = min(end, date(year, 12, 31))
                 self._backfill_chunk(chunk_start, chunk_end, dry_run, stats)
             result['success'] = stats['days_done'] + stats['days_no_kline'] == stats['days_total']
+            # §9 批次 D：结账按日精确验收——终点日自己的行数（多日窗口写 15 行
+            # 不证明某具体日完成；11-24 场景验收必须返回 11-24 自己的一行）
+            if not dry_run:
+                end_compact = end.strftime('%Y%m%d')
+                try:
+                    r = self.db.execute_query(
+                        "SELECT COUNT(*) AS n FROM sentiment_metrics_daily "
+                        "WHERE trade_date = %s", (end_compact,))
+                    stats['target_date'] = end_compact
+                    stats['target_date_rows'] = int(r[0]['n']) if r else 0
+                    if not stats['target_date_rows']:
+                        result['errors'].append(
+                            f'{end_compact} 当日情绪行缺失（窗口总行数不能代替按日验收）')
+                        result['success'] = False
+                except Exception as e:
+                    stats['missing'] = [f'按日验收查询失败: {e}']
         finally:
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = self._write_report(result)

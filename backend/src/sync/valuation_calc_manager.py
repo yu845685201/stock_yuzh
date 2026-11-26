@@ -35,6 +35,12 @@ class ValuationCalcManager:
         self.config = config_manager.load_config()
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_review_tables()
+        # §7.3 批次 C 接线第三步：财报输入模式（legacy=base_financial_report 现状；
+        # shadow=双路对比、正式行仍 legacy；publish=版本表 asof 正式启用）。
+        # 缺省 legacy——配置缺省时老部署行为不变
+        review = self.config.get('review_sync', {}) or {}
+        self.financial_report_mode = str(
+            (review.get('financial_report') or {}).get('mode', 'legacy')).lower()
 
     def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
                 start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
@@ -58,7 +64,42 @@ class ValuationCalcManager:
             if not snapshot:
                 result['errors'].append(f'当日 {trade_date} 日K快照为空——先跑 sync-kline-day')
                 return result
-            rows = self.compute(snapshot, self.db.fetch_financial_reports_asof(trade_date, 8),
+            mode = getattr(self, 'financial_report_mode', 'legacy')
+            reports_legacy = self.db.fetch_financial_reports_asof(trade_date, 8)
+            if mode == 'publish':
+                reports = self.db.fetch_financial_reports_from_versions(trade_date, 8)
+                stats['financial_source'] = 'financial_report_version'
+            else:
+                reports = reports_legacy
+                stats['financial_source'] = 'base_financial_report'
+            if mode == 'shadow':
+                # §7.3 批次 C 接线第三步：影子对比——版本表口径同步计算，逐股
+                # pe/pb 差异入 stats，正式行走 legacy（差异归零后才可切 publish）
+                rows_shadow = self.compute(
+                    snapshot, self.db.fetch_financial_reports_from_versions(trade_date, 8),
+                    self.db.fetch_total_shares_asof(trade_date))
+                legacy_by_code = {r['ts_code']: r for r in rows}
+                diff_pe = diff_pb = both_missing = 0
+                for r in rows_shadow:
+                    b = legacy_by_code.get(r['ts_code'])
+                    if b is None:
+                        continue
+                    if (r['pe_ttm'] is None) != (b['pe_ttm'] is None):
+                        diff_pe += 1
+                    elif r['pe_ttm'] is not None and b['pe_ttm'] is not None \
+                            and abs(r['pe_ttm'] - b['pe_ttm']) > max(0.05, b['pe_ttm'] * 1e-4):
+                        diff_pe += 1
+                    if (r['pb'] is None) != (b['pb'] is None):
+                        diff_pb += 1
+                    elif r['pb'] is not None and b['pb'] is not None \
+                            and abs(r['pb'] - b['pb']) > max(0.01, b['pb'] * 1e-4):
+                        diff_pb += 1
+                stats['shadow'] = {
+                    'version_rows': len(rows_shadow),
+                    'pe_diff': diff_pe, 'pb_diff': diff_pb,
+                    'publish_ready': diff_pe == 0 and diff_pb == 0,
+                }
+            rows = self.compute(snapshot, reports,
                                 self.db.fetch_total_shares_asof(trade_date))
             stats['stocks'] = len(rows)
             stats['mv_ok'] = sum(1 for r in rows if r['total_mv'] is not None)

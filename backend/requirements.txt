@@ -27,6 +27,9 @@ psutil==5.9.8
 # Excel .xls 解析（中证指数官网 indicator 估值文件）
 xlrd>=2.0.1
 
+# Excel .xlsx 解析（深交所两融/龙虎榜 XLSX 整表导出，§4.1；read_only + reset_dimensions）
+openpyxl==3.1.5
+
 # HTTP客户端
 requests==2.31.0
 

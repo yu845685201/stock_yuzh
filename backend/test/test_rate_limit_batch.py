@@ -75,7 +75,8 @@ def _collector(monkeypatch, responses, interval=0.0):
                          'default_timeout': [1, 2]}},
         'test', interval_seconds=interval)
     session = FakeSession(responses)
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     return collector, session
 
 

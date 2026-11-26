@@ -18,15 +18,17 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ..data_sources.http_collector_base import ReviewBlockedError
+from ..data_sources.cnindex_industry_source import CnindexIndustrySource
 from ..data_sources.sw_source import SwSectorSource
-from .review_common import mark_blocked
+from .review_common import latest_closed_trade_date, mark_blocked
 from .sector_sync_base import ReviewSyncError, SectorNodeManagerBase
 
 logger = logging.getLogger(__name__)
 
 
 class IndustryManager(SectorNodeManagerBase):
-    """行业分类：新浪行业板块（sina_hy）+ 申万一级行业（sw_2021，可配置）"""
+    """行业分类：新浪行业板块（sina_hy）+ 申万一级行业（sw_2021，可配置）+
+    国证一级日期快照（cnindex_level1，§6 批次 B——独立运行，不依赖新浪成功）"""
 
     source_tag = 'sina_hy'
     label = '行业分类'
@@ -40,9 +42,10 @@ class IndustryManager(SectorNodeManagerBase):
                    .get(self.config_section, {}) or {})
         self.sw_enabled = bool(section.get('sw_enabled', False))
         self.sw_source = SwSectorSource(self.config) if self.sw_enabled else None
+        self.cnindex_enabled = bool(section.get('cnindex_enabled', True))
+        self.cnindex_source = CnindexIndustrySource(self.config) if self.cnindex_enabled else None
 
-    def fetch_nodes(self) -> Dict[str, Dict[str, Any]]:
-        return self.source.fetch_industry_list()
+    def fetch_nodes(self) -> Dict[str, Dict[str, Any]]:        return self.source.fetch_industry_list()
 
     # ---------- 增强口径：申万 2021 一级行业 ----------
 
@@ -118,6 +121,82 @@ class IndustryManager(SectorNodeManagerBase):
         finally:
             result['duration'] = (datetime.now() - started).total_seconds()
             result['report_path'] = self._write_report(result)
+        return result
+
+    # ---------- 国证一级日期快照（§6 批次 B） ----------
+
+    def execute_cnindex(self, trade_date: Optional[str] = None,
+                        dry_run: bool = False) -> Dict[str, Any]:
+        """国证一级日期快照采集（独立于新浪/申万——解除新浪成功才能刷新其他体系的依赖）。
+
+        trade_date 缺省按交易日历取最近已收盘交易日；目录未发布（404/无 id=4 组）
+        记待补非失败。全部 11 个行业页级对账闭合后，一事务发布整套当日快照
+        （§6：临时数据残缺时不产生大批"退出行业"）。
+        """
+        started = datetime.now()
+        if trade_date:
+            target = str(trade_date).replace('-', '')[:8]
+        else:
+            latest = latest_closed_trade_date(self.db)
+            target = str(latest).replace('-', '')
+        stats: Dict[str, Any] = {'trade_date': target, 'industries': 0,
+                                 'unique_codes': 0, 'published': False,
+                                 'missing': []}
+        result: Dict[str, Any] = {'success': False, 'stats': stats,
+                                  'errors': [], 'blocked': False}
+        try:
+            if not self.cnindex_source:
+                result['errors'].append('国证源未启用（industry.cnindex_enabled=false）')
+                return result
+            snap = self.cnindex_source.fetch_market_snapshot(target)
+            stats['industries'] = len(snap['catalog']['industries'])
+            stats['unique_codes'] = snap['unique_codes']
+            stats['catalog_date'] = snap['catalog']['catalog_date']
+            # 当日证券池差集解释（§6：11-24 应为零；差异单列不阻塞快照）
+            try:
+                local_codes = {str(r['ts_code']) for r in self.db.execute_query(
+                    "SELECT ts_code FROM base_stock_info")}
+                snap_codes = set(snap['members'].keys())
+                stats['local_not_in_snap'] = sorted(local_codes - snap_codes)[:20]
+                stats['snap_not_in_local'] = sorted(snap_codes - local_codes)[:20]
+                if local_codes - snap_codes or snap_codes - local_codes:
+                    stats['missing'].append(
+                        f'本地-快照差集 {len(local_codes - snap_codes)} / '
+                        f'快照-本地 {len(snap_codes - local_codes)}')
+            except Exception as e:
+                stats['missing'].append(f'本地截面差集核对失败: {e}')
+            if not dry_run:
+                self.db.ensure_industry_snapshot_tables()
+                rows = []
+                for ts_code, r in snap['members'].items():
+                    rows.append({
+                        'trade_date': target, 'scheme': 'cnindex', 'level': 1,
+                        'ts_code': ts_code,
+                        'industry_code': r.get('industryCode1'),
+                        'industry_name': r.get('industryName1'),
+                        'source': 'cnindex', 'revision_id': None,
+                    })
+                with self.db.get_connection() as conn:
+                    try:
+                        self.db.replace_industry_snapshot_tx(
+                            conn, target, 'cnindex', 1, rows)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                stats['published'] = True
+            result['success'] = True
+        except ReviewBlockedError as e:
+            mark_blocked(result, e, f'国证行业风控急停: {e}')
+        except ValueError as e:
+            # 目录未发布/结构变更——待补，不算已确认空
+            result['errors'].append(f'{target} 国证行业待补: {e}')
+            stats['missing'].append(str(e)[:160])
+        except Exception as e:
+            logger.exception(f'国证行业采集失败: {e}')
+            result['errors'].append(str(e))
+        finally:
+            result['duration'] = (datetime.now() - started).total_seconds()
         return result
 
     def _sw_apply_all_classification(self, rows, dry_run: bool,

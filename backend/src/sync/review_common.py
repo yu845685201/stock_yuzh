@@ -275,6 +275,26 @@ def latest_closed_trade_date(db: Any) -> str:
     return latest_str
 
 
+def prev_trade_date(db: Any, ymd: str) -> Optional[str]:
+    """交易日历中严格早于给定业务日的最近交易日（yyyyMMdd 返回；无日历/无结果返回 None）。
+
+    两融 T-1 业务日解析用（盘后采集数据源整合详细技术方案 V1.0 §2.1：次交易日晨间
+    采集按"发布交易日 P 的上一交易日"排任务，避免对最近收盘日再减一次自然日）。
+    """
+    iso = _parse_date_arg(ymd)
+    if iso is None:
+        return None
+    rows = db.execute_query(
+        "SELECT calendar_date FROM base_trade_calendar "
+        "WHERE calendar_date < %s AND is_trading_day = 1 "
+        "ORDER BY calendar_date DESC LIMIT 1", (iso.isoformat(),))
+    if not rows:
+        return None
+    d = rows[0]['calendar_date']
+    s = d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d)
+    return s.replace('-', '') or None
+
+
 def expand_trade_days(db: Any, start_date: str, end_date: str) -> List[str]:
     """按 base_trade_calendar 展开回填区间交易日（is_trading_day=1，yyyyMMdd 升序）。
 

@@ -57,10 +57,14 @@ class SseOptionSource(HttpCollectorBase):
     # ---------- 通用 ----------
 
     def _query(self, sql_id: str, *, trade_date: Optional[str] = None,
+               date_param: str = 'trade_date',
                extra: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """通用查询。``date_param`` 按子表区分（§4.2：risk 表传 ``trade_date``、
+        stats 表传 ``tradeDate``——原实现两者同参，历史请求可能收到最新统计）。
+        """
         params: Dict[str, Any] = {'sqlId': sql_id, 'isPagination': 'false'}
         if trade_date:
-            params['trade_date'] = trade_date
+            params[date_param] = trade_date
         if extra:
             params.update(extra)
         try:
@@ -81,12 +85,14 @@ class SseOptionSource(HttpCollectorBase):
     # ---------- 三类数据 ----------
 
     def fetch_risk_indicators(self, trade_date: str) -> List[Dict[str, Any]]:
-        """逐合约希腊字母 + IV（返回原始 dict 列表，字段见文件头）"""
-        return self._query(SQL_RISK_INDICATOR, trade_date=trade_date)
+        """逐合约希腊字母 + IV（参数名 trade_date；返回原始 dict 列表）"""
+        return self._query(SQL_RISK_INDICATOR, trade_date=trade_date,
+                           date_param='trade_date')
 
     def fetch_daily_stats(self, trade_date: str) -> List[Dict[str, Any]]:
-        """逐标的每日统计（原始 dict 列表）"""
-        return self._query(SQL_DAILY_STATS, trade_date=trade_date)
+        """逐标的每日统计（参数名 tradeDate——与 risk 表不同，§4.2）"""
+        return self._query(SQL_DAILY_STATS, trade_date=trade_date,
+                           date_param='tradeDate')
 
     def fetch_contract_master(self) -> List[Dict[str, Any]]:
         """全量挂牌合约主数据（原始 dict 列表）"""

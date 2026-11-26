@@ -60,7 +60,8 @@ def make_collector(interval=0.0, attempts=3, monkeypatch=None):
 def test_4xx_not_retried_raises_blocked(monkeypatch):
     collector = make_collector(attempts=3)
     session = FakeSession([FakeResponse(status_code=403, content='forbidden')])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     with pytest.raises(ReviewBlockedError) as exc_info:
         collector.get_json('http://example.com/api')
     # 风控信号不重试：仅 1 次请求
@@ -71,7 +72,8 @@ def test_4xx_not_retried_raises_blocked(monkeypatch):
 def test_429_not_retried(monkeypatch):
     collector = make_collector(attempts=3)
     session = FakeSession([FakeResponse(status_code=429)])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     with pytest.raises(ReviewBlockedError):
         collector.get_json('http://example.com/api')
     assert len(session.calls) == 1
@@ -80,7 +82,8 @@ def test_429_not_retried(monkeypatch):
 def test_5xx_retried_then_raises_http_error(monkeypatch):
     collector = make_collector(attempts=3)
     session = FakeSession([FakeResponse(status_code=502)])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     monkeypatch.setattr('time.sleep', lambda s: None)
     with pytest.raises(requests.HTTPError):
         collector.get_json('http://example.com/api')
@@ -90,7 +93,8 @@ def test_5xx_retried_then_raises_http_error(monkeypatch):
 def test_non_json_raises_blocked(monkeypatch):
     collector = make_collector()
     session = FakeSession([FakeResponse(status_code=200, content='<html>验证码</html>')])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     with pytest.raises(ReviewBlockedError) as exc_info:
         collector.get_json('http://example.com/api')
     assert '非 JSON' in str(exc_info.value)
@@ -111,7 +115,8 @@ def test_network_error_retried(monkeypatch):
         return session.responses[0]
 
     session.request = _request
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     monkeypatch.setattr('time.sleep', lambda s: None)
     assert collector.get_json('http://example.com/api') == {'ok': 1}
     assert calls['n'] == 2
@@ -125,7 +130,8 @@ def test_retry_exhausted_network_error(monkeypatch):
         raise requests.Timeout('timed out')
 
     session.request = _request
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     monkeypatch.setattr('time.sleep', lambda s: None)
     with pytest.raises(requests.Timeout):
         collector.get_json('http://example.com/api')
@@ -139,7 +145,8 @@ def test_risk_control_hook_called(monkeypatch):
 
     collector._check_risk_control = _hook
     session = FakeSession([FakeResponse(status_code=200, json_data={'ok': 1})])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     with pytest.raises(ReviewBlockedError) as exc_info:
         collector.get_json('http://example.com/api')
     assert 'hook 命中' in str(exc_info.value)
@@ -148,6 +155,7 @@ def test_risk_control_hook_called(monkeypatch):
 def test_allow_status_passthrough(monkeypatch):
     collector = make_collector()
     session = FakeSession([FakeResponse(status_code=404, content='not found')])
-    monkeypatch.setattr('src.data_sources.http_collector_base._SESSION', session)
+    monkeypatch.setattr('src.data_sources.http_collector_base._session_for',
+                        lambda url: session)
     resp = collector.get_text('http://example.com/file', allow_status=(404,))
     assert resp == 'not found'

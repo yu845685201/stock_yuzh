@@ -465,6 +465,7 @@ def sync_ths_finance(ctx, init_mode, as_of, codes, dry_run):
 @click.option('--end-date', default=None, help='回填区间止 yyyyMMdd（含当日）')
 @click.option('--daily-reports', is_flag=True, default=False,
               help='调试用：回填模式逐日落盘报告（默认抑制，只写一份汇总，X-19）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行（不落库）')
 @click.option('--yes', is_flag=True, default=False, help='确认继续（15:30 前缺省当日会被拦）')
 @click.pass_context
 def sync_lhb(ctx, trade_date, start_date, end_date, daily_reports, dry_run, yes):
@@ -609,13 +610,17 @@ def sync_concept(ctx, dry_run):
 
 
 @click.command('sync-industry')
+@click.option('--trade-date', default=None,
+              help='业务日 yyyyMMdd（可选，整合方案 §10；无参数保持日常语义——'
+                   '新浪/申万为当前快照口径，显式业务日随 stats 记录，'
+                   '国证日期快照属批次 B）')
 @click.option('--dry-run', is_flag=True, default=False, help='试运行')
 @click.pass_context
-def sync_industry(ctx, dry_run):
+def sync_industry(ctx, trade_date, dry_run):
     """同步行业分类（新浪行业板块，source=sina_hy；补齐 base_stock_info 行业字段缺失缺口）"""
     from src.sync.industry_manager import IndustryManager
     manager = IndustryManager(ctx.obj['config_manager'])
-    result = manager.execute(dry_run=dry_run)
+    result = manager.execute(dry_run=dry_run, trade_date=trade_date)
     stats = result['stats']
     if result.get('skipped_disabled'):
         for err in result['errors']:
@@ -1109,7 +1114,7 @@ def sync_review_pending(ctx, max_tasks, lease_seconds, owner):
     from src.database.dao_collection_retry import domain_for_source
     from src.data_sources.domain_gate import domain_for_host
     from src.sync.collection_contracts import (
-        PartitionStatus, entry_to_partition_result, new_id, RunContext, RunMode)
+        entry_to_partition_result, new_id, RunMode)
 
     owner = owner or f'{socket.gethostname()}:{os.getpid()}'
     try:
@@ -1199,7 +1204,22 @@ def sync_review_pending(ctx, max_tasks, lease_seconds, owner):
                 fail_n += 1
                 details.append(f"✗ {label}@{target}: 子项补采未成功（{errs[:120]}，{outcome}）")
             continue
-        # 分区已验收则跳过重跑（限流方案 §4.2：补采只处理缺失分区，不重复外发）
+        # 分区已验收则跳过重跑（限流方案 §4.2 + 整合方案 §3.1：补采只处理缺失分区）。
+        # 优先按逻辑分区指针（sync_partition_current，子项互不混排）判整日全验收；
+        # 无指针的历史旧分区回退 sync_partition 最近状态。
+        try:
+            cur_rows = orchestrator.db.list_partition_current_by_date(dataset, target)
+        except Exception:
+            cur_rows = []
+        if cur_rows and all(
+                r.get('accepted_status') in ('COMPLETE', 'CONFIRMED_EMPTY')
+                for r in cur_rows):
+            orchestrator.db.complete_retry(
+                task['retry_id'], task['lease_token'], success=True)
+            ok_n += 1
+            details.append(f"✓ {label}@{target}: 逻辑分区已验收（{len(cur_rows)} 子项），"
+                           "跳过重跑")
+            continue
         try:
             p_status = orchestrator.db.latest_partition_status(
                 dataset, task.get('market') or 'CN', target)
@@ -1243,16 +1263,10 @@ def sync_review_pending(ctx, max_tasks, lease_seconds, owner):
             spec = DATASET_REGISTRY.get(dataset)
             market = spec.market if spec else 'CN'
             exchange = spec.exchanges[0] if (spec and len(spec.exchanges) == 1) else None
+            # 盘后采集数据源整合详细技术方案 V1.0 §2.1：队列领到的 target_date 已是
+            # 注册时解析好的业务日（两融 T-1 偏移在登记时已套用）——补采执行不得对
+            # 显式业务日再次套用 expected_partition 偏移（原实现会让两融回看到 T-2）
             expected_date = target
-            try:
-                run_ctx = RunContext(job_id='placeholder', target_date=target,
-                                     run_mode=RunMode.BACKFILL)
-                exp = expected_partition(run_ctx, dataset, db=orchestrator.db,
-                                         config=orchestrator.config)
-                if exp.get('expected_date'):
-                    expected_date = exp['expected_date']
-            except Exception:
-                pass
             entry = {'source': dataset, 'label': label, 'status': '成功',
                      'rows': (src_result.get('stats') or {}).get('rows')
                              or (src_result.get('stats') or {}).get('records') or 0,
@@ -1318,7 +1332,43 @@ def sync_review_pending(ctx, max_tasks, lease_seconds, owner):
 
 
 # CLI 注册清单（main.py 汇总 add_command）
+@click.command('sync-financial-versions')
+@click.option('--days-back', default=10, help='公告证据行回看天数（缺省 10）')
+@click.option('--periods', default=None, help='季度包期次逗号分隔（缺省最新 8 期）')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行')
+@click.pass_context
+def sync_financial_versions(ctx, days_back, periods, dry_run):
+    """财报版本行回填（§7.3 批次 C：公告证据行 + 季度包数值行 → financial_report_version）"""
+    from src.sync.financial_version_manager import FinancialVersionManager
+    m = FinancialVersionManager(ctx.obj['config_manager'])
+    period_list = [p.strip() for p in periods.split(',')] if periods else None
+    r = m.run(days_back=days_back, periods=period_list, dry_run=dry_run)
+    click.echo(f"\n{'✓' if r['success'] else '✗'} 财报版本行回填")
+    click.echo(f"  - 公告证据行: {r['announcement']}")
+    click.echo(f"  - 季度包数值行: {r['packs']}")
+    if not r['success']:
+        click.echo("  - ⚠ 存在拒收包（占位/重复证券），清单见输出")
+
+
+@click.command('sync-gbbq-events')
+@click.option('--dry-run', is_flag=True, default=False, help='试运行（只检查版本不落库）')
+@click.pass_context
+def sync_gbbq_events(ctx, dry_run):
+    """权益事件增量（§8：gbbq.zip 版本检查，变化才重新解析入库）"""
+    from src.sync.adjust_factor_builder import sync_gbbq_incremental
+    from src.database.connection import DatabaseConnection
+    db = DatabaseConnection(ctx.obj['config_manager'])
+    r = sync_gbbq_incremental(db, dry_run=dry_run)
+    ok = '✓' if r['success'] else '✗'
+    chg = '版本未变化' if not r['changed'] else '版本已更新'
+    click.echo(f"\n{ok} gbbq 权益事件")
+    click.echo(f"  - {chg}")
+    click.echo(f"  - {r['stats']}")
+
+
 review_commands = [
+    sync_financial_versions,
+    sync_gbbq_events,    # §7.3 批次 C：财报版本行回填（公告证据+季度包数值）
     sync_review_all,
     sync_review_data,
     sync_review_pending,        # 批次3（方案 V1.1 §5.2）：补采待办到期领取器

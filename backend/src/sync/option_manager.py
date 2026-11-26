@@ -36,7 +36,8 @@ from ..data_sources.sse_option_source import (SSE_QUERY_URL, SseOptionSource,
                                               parse_stats_row)
 from ..database.connection import DatabaseConnection
 from .review_common import (domain_cooldown_early_exit, expand_trade_days,
-                            mark_blocked, write_review_report)
+                            latest_closed_trade_date, mark_blocked,
+                            write_review_report)
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +59,21 @@ class OptionManager:
     # ---------- 单日执行 ----------
 
     def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
-                write_report: bool = True) -> Dict[str, Any]:
-        """拉取某交易日（缺省 T-1）期权风险指标 + 每日统计 + 合约主数据。"""
+                write_report: bool = True,
+                sub_datasets: Optional[set] = None) -> Dict[str, Any]:
+        """拉取某交易日期权风险指标 + 每日统计 + 合约主数据（§4.2 按缺失子表补齐）。
+
+        日期语义（§2.1）：显式 trade_date 直采该业务日；缺省取最近已收盘交易日
+        （T 日盘后发布——不再退回自然日-1）。sub_datasets ∈ {'risk','stats','master'}，
+        None=全部；局部到数时先保存已验子表（断点续跑按子表粒度）。
+        """
         started = datetime.now()
         if trade_date:
             target = str(trade_date)
         else:
-            target = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            latest = latest_closed_trade_date(self.db)
+            target = str(latest).replace('-', '')
+        want = sub_datasets or {'risk', 'stats', 'master'}
         stats: Dict[str, Any] = {'trade_date': target, 'risk_rows': 0,
                                  'stats_rows': 0, 'master_rows': 0,
                                  'missing': []}
@@ -76,54 +85,95 @@ class OptionManager:
             return result
         try:
             # 合约主数据先取（风险指标行需要 underlying/strike/expiry 富化——
-            # SSE 风险指标接口只给行情字段，主数据走合约主数据接口）
-            master_rows = [r for r in (parse_contract_row(x) for x in
-                                       self.source.fetch_contract_master())
-                           if r]
-            stats['master_rows'] = len(master_rows)
-            master_by_code = {r['contract_code']: r for r in master_rows}
+            # SSE 风险指标接口只给行情字段，主数据走合约主数据接口；
+            # master 按真实观察日缓存，first_seen/last_seen 保护历史观察边界）
+            master_rows: List[Dict[str, Any]] = []
+            master_by_code: Dict[str, Dict[str, Any]] = {}
+            if 'master' in want or 'risk' in want:
+                master_rows = [r for r in (parse_contract_row(x) for x in
+                                           self.source.fetch_contract_master())
+                               if r]
+                stats['master_rows'] = len(master_rows)
+                master_by_code = {r['contract_code']: r for r in master_rows}
 
-            risk_rows = [r for r in (parse_risk_row(x) for x in
-                                     self.source.fetch_risk_indicators(target))
-                         if r]
-            for r in risk_rows:
-                m = master_by_code.get(r['contract_code'])
-                if m:
-                    r['underlying_code'] = m.get('underlying_code')
-                    r['call_put'] = m.get('call_put')
-                    r['strike'] = m.get('strike')
-                    r['expiry_date'] = m.get('expiry_date')
-            stats['risk_rows'] = len(risk_rows)
-            if 0 < len(risk_rows) < _MIN_CONTRACTS:
-                stats['missing'].append(
-                    f'风险指标仅 {len(risk_rows)} 行（预期 >{_MIN_CONTRACTS}）')
-            if not risk_rows:
-                result['errors'].append(
-                    f'{target} 期权风险指标无数据（非交易日或未发布）')
+            risk_rows: List[Dict[str, Any]] = []
+            if 'risk' in want:
+                risk_rows = [r for r in (parse_risk_row(x) for x in
+                                         self.source.fetch_risk_indicators(target))
+                             if r]
+                # §4.2：按返回行 TRADE_DATE 校验整批（错日响应不入账）
+                wrong_date = [r for r in risk_rows if r['trade_date'] != target]
+                if wrong_date:
+                    actual = sorted({r['trade_date'] for r in wrong_date})
+                    stats['missing'].append(
+                        f'风险指标含错日响应 {len(wrong_date)} 行（{actual[:2]}），'
+                        f'错日行已剔除不入账')
+                    risk_rows = [r for r in risk_rows if r['trade_date'] == target]
+                for r in risk_rows:
+                    m = master_by_code.get(r['contract_code'])
+                    if m:
+                        r['underlying_code'] = m.get('underlying_code')
+                        r['call_put'] = m.get('call_put')
+                        r['strike'] = m.get('strike')
+                        r['expiry_date'] = m.get('expiry_date')
+                # §4.2：旧 DAO 占位符需要的行字段一律显式提供——历史已到期合约
+                # 不在当前挂牌清单（无法富化）时补 None，不让整批写库异常
+                for r in risk_rows:
+                    r.setdefault('strike', None)
+                    r.setdefault('expiry_date', None)
+                    r.setdefault('underlying_code', None)
+                    r.setdefault('call_put', None)
+                    r.setdefault('contract_symbol', None)
+                stats['risk_rows'] = len(risk_rows)
+                if 0 < len(risk_rows) < _MIN_CONTRACTS:
+                    stats['missing'].append(
+                        f'风险指标仅 {len(risk_rows)} 行（预期 >{_MIN_CONTRACTS}）')
+                if not risk_rows:
+                    result['errors'].append(
+                        f'{target} 期权风险指标无数据（非交易日或未发布）')
 
-            stat_rows = [r for r in (parse_stats_row(x) for x in
-                                     self.source.fetch_daily_stats(target))
-                         if r]
-            stats['stats_rows'] = len(stat_rows)
-            # SSE 每日统计接口只返回最新交易日（忽略 trade_date 参数，实测
-            # 2026-10-23）——数据按自身 TRADE_DATE 入库，请求日不一致时记
-            # date_note（仿两融回看机制），禁冒充请求日数据
-            if stat_rows:
-                actual = max(r['trade_date'] for r in stat_rows)
-                stats['stats_date_actual'] = actual
-                if actual != target:
-                    stats.setdefault('date_notes', []).append(
-                        {'requested': target, 'stats_actual': actual,
-                         'note': 'SSE 每日统计仅返回最新交易日'})
+            stat_rows: List[Dict[str, Any]] = []
+            if 'stats' in want:
+                stat_rows = [r for r in (parse_stats_row(x) for x in
+                                         self.source.fetch_daily_stats(target))
+                             if r]
+                # §4.2：stats 同样按行内 TRADE_DATE 校验整批（历史请求传 tradeDate）
+                wrong_date = [r for r in stat_rows if r['trade_date'] != target]
+                if wrong_date:
+                    actual = sorted({r['trade_date'] for r in wrong_date})
+                    stats['missing'].append(
+                        f'逐标的统计含错日响应 {len(wrong_date)} 行（{actual[:2]}），'
+                        f'错日行已剔除不入账')
+                    stat_rows = [r for r in stat_rows if r['trade_date'] == target]
+                stats['stats_rows'] = len(stat_rows)
+                if not stat_rows and 'risk' not in want:
+                    result['errors'].append(
+                        f'{target} 期权逐标的统计无数据（非交易日或未发布）')
+                elif stat_rows:
+                    # 交叉验证：risk 行数 = 统计表合约数量合计（§4.2 按标的核对）
+                    if risk_rows:
+                        declared = sum(int(r.get('contract_count') or 0)
+                                       for r in stat_rows)
+                        if declared and declared != len(risk_rows):
+                            stats['missing'].append(
+                                f'交叉验证差异：风险表 {len(risk_rows)} 行 ≠ '
+                                f'统计表合约数合计 {declared}')
 
             if not dry_run:
                 if risk_rows:
                     self.db.upsert_option_daily(risk_rows)
                 if stat_rows:
                     self.db.upsert_option_underlying_daily(stat_rows)
-                if master_rows:
+                if master_rows and 'master' in want:
                     self._upsert_master(master_rows, target)
-            result['success'] = bool(risk_rows)
+            # 成功语义按子表：请求的两个业务子表各自有数即成功（§2.2 按子项验收）
+            wanted_biz = want & {'risk', 'stats'}
+            ok_parts = []
+            if 'risk' in wanted_biz:
+                ok_parts.append(bool(risk_rows))
+            if 'stats' in wanted_biz:
+                ok_parts.append(bool(stat_rows))
+            result['success'] = all(ok_parts) if ok_parts else bool(risk_rows)
         except ReviewBlockedError as e:
             # 限流方案 §1：明确被拒按风控急停记账（期权已入交易所域覆盖范围）
             mark_blocked(result, e, f'官网风控急停（本日未入库，稍后重跑补）: {e}')
@@ -133,7 +183,7 @@ class OptionManager:
             result['errors'].append(str(e))
         finally:
             # F2（方案 V1.0 §F2）：自报数据日（option_daily 当日 max；与 stats['trade_date']
-            # 请求日不同口径——SSE 统计接口只返回最新交易日，实际入库日以库内 max 为准）
+            # 请求日不同口径——实际入库日以库内 max 为准）
             try:
                 r = self.db.execute_query('SELECT MAX(trade_date) AS mx FROM option_daily')
                 stats['data_date_max'] = str(r[0]['mx']) if r and r[0].get('mx') else None
@@ -144,28 +194,44 @@ class OptionManager:
                                      if write_report else None)
         return result
 
-    # ---------- 历史回填 ----------
+    # ---------- 历史回填（§4.2：按缺失子表补齐） ----------
 
     def backfill_range(self, start_date: str, end_date: str,
                        dry_run: bool = False) -> Dict[str, Any]:
-        """按交易日历展开逐日回填（断点只信查库：当日已有合约行 > 0 跳过）。"""
+        """按交易日历展开逐日回填。
+
+        断点只信查库且**按子表粒度**（§4.2：风险表已有行跳过仅指 risk 子表；
+        原实现 risk 有行即整日跳过，统计表缺口永不补——11-20 场景"已有风险表时
+        单补标的统计"）。当日子表行数判断：risk>0 且 stats>0 才算完整。
+        """
         started = datetime.now()
         days = expand_trade_days(self.db, start_date, end_date)
         stats: Dict[str, Any] = {
             'range': f'{start_date}~{end_date}', 'days_total': len(days),
-            'days_done': 0, 'days_skipped': 0, 'risk_rows': 0,
+            'days_done': 0, 'days_skipped': 0, 'risk_rows': 0, 'stats_rows': 0,
             'days_failed': [], 'last_completed_date': None,
         }
         result: Dict[str, Any] = {'success': False, 'stats': stats,
                                   'errors': [], 'backfill': True}
         for d in days:
-            if not dry_run and self.db.fetch_option_row_count(d) > 0:
-                stats['days_skipped'] += 1
-                continue
-            r = self.execute(trade_date=d, dry_run=dry_run, write_report=False)
+            if not dry_run:
+                want: Optional[set] = set()
+                if self.db.fetch_option_row_count(d) == 0:
+                    want.add('risk')
+                if self.db.fetch_option_stats_row_count(d) == 0:
+                    want.add('stats')
+                if not want:
+                    stats['days_skipped'] += 1
+                    continue
+                want.add('master')
+            else:
+                want = None
+            r = self.execute(trade_date=d, dry_run=dry_run, write_report=False,
+                             sub_datasets=want)
             if r['success']:
                 stats['days_done'] += 1
                 stats['risk_rows'] += r['stats']['risk_rows']
+                stats['stats_rows'] += r['stats']['stats_rows']
                 stats['last_completed_date'] = d
             else:
                 stats['days_failed'].append({'date': d, 'errors': r['errors'][:2]})

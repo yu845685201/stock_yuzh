@@ -45,10 +45,20 @@ logger = logging.getLogger(__name__)
 _JSONP_PATTERN = re.compile(r'^[\w$.]+\((.*)\)\s*;?\s*$', re.S)
 
 SZSE_SHOWREPORT = 'http://www.szse.cn/api/report/ShowReport/data'
+SZSE_SHOWREPORT_EXPORT = 'http://www.szse.cn/api/report/ShowReport'
 SZSE_REFERER = 'http://www.szse.cn/'
 SSE_QUERY = 'http://query.sse.com.cn/commonSoaQuery.do'
+# 两融明细新接口（盘后采集数据源整合详细技术方案 V1.0 §4.1：tabType=mxtype +
+# detailsDate，每页 pageNo=beginPage=endPage=n 全部带 pageHelp. 前缀——只改 pageNo
+# 会取回第一页，2026-11-20 实测 2,000+19 两页）
+SSE_MARGIN_URL = 'http://query.sse.com.cn/marketdata/tradedata/queryMargin.do'
+SSE_MARGIN_REFERER = 'http://www.sse.com.cn/market/othersdata/margin/detail/'
 SSE_LHB_SUMMARY_URL = 'http://query.sse.com.cn/marketdata/tradedata/queryAllTradeOpenDate.do'
 SSE_LHB_REFERER = 'http://www.sse.com.cn/disclosure/diclosure/public/dailydata/'
+# 科创板龙虎榜独立接口（§5.1：使用日期选择器的 tradeDate=D + 空 flag；区间成交额
+# 与席位额均为万元；refType 按科创板字典解释）
+SSE_KCB_LHB_URL = 'http://query.sse.com.cn/marketdata/tradedata/queryKCBTradeInfo.do'
+SSE_KCB_LHB_REFERER = 'http://www.sse.com.cn/disclosure/diclosure/public/dailydatatib/'
 SSE_REFERER = 'http://www.sse.com.cn/'
 
 # 上交所龙虎榜 refType -> 披露原因文本（第七轮 T21：全量提取自官网
@@ -87,6 +97,149 @@ def _num(value: Any, scale: float = 1.0) -> Optional[float]:
         return float(s) * scale
     except ValueError:
         return None
+
+
+# 深交所两融 XLSX 列名 → 行键映射（括号全/半角兼容；§4.1：余额/买入额/融券余额
+# 列已是元，两融合计仅作校验，融资偿还额该文件无 → rzche 留空）
+_SZSE_MARGIN_XLSX_COLUMNS = {
+    'rzye': ('融资余额(元)',),
+    'rzmre': ('融资买入额(元)',),
+    'rqye': ('融券余额(元)',),
+    'rzrqhj': ('两融合计(元)',),
+}
+
+
+# 深交所龙虎榜 XLSX 列名 → 行键映射（2026-11-20 实测表头）
+_SZSE_LHB_XLSX_COLUMNS = {
+    'ann_date': ('公告日期',),
+    'zqdm': ('证券代码',),
+    'zqjc': ('证券简称',),
+    'cjje': ('成交金额(元)',),
+    'sl': ('成交量(股/份)',),
+    'plyy': ('披露原因',),
+}
+
+
+def parse_szse_lhb_xlsx(content: bytes) -> List[Dict[str, Any]]:
+    """深交所龙虎榜 XLSX 字节流 → 原始行列表（模块级纯函数，离线样本可测）。
+
+    A1:A1 维度陷阱同两融 XLSX：read_only 先 reset_dimensions 再遍历实际末行。
+    证券代码保留六位前导零；成交金额/成交量千分位清洗为 Decimal（元、股/份）；
+    披露原因保留原文（原始实际涨跌值，§5.1 原文随事件保存）。
+    """
+    from decimal import Decimal
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        ws.reset_dimensions()
+        col_of: Dict[str, int] = {}
+        out: List[Dict[str, Any]] = []
+        for row in ws.iter_rows(values_only=True):
+            if row is None:
+                continue
+            cells = ['' if c is None else str(c).strip() for c in row]
+            if not col_of:
+                header = [_xlsx_header_key(c) for c in cells]
+                if not any(h in {_xlsx_header_key(c) for c in candidates}
+                           for key, candidates in _SZSE_LHB_XLSX_COLUMNS.items()
+                           for h in header):
+                    continue
+                for key, candidates in _SZSE_LHB_XLSX_COLUMNS.items():
+                    col_of[key] = next(
+                        (i for i, h in enumerate(header)
+                         if h in {_xlsx_header_key(c) for c in candidates}), -1)
+                if col_of['zqdm'] < 0:
+                    raise ValueError(f'深交所龙虎榜 XLSX 表头缺证券代码列: {cells}')
+                continue
+            code = cells[col_of['zqdm']] if col_of['zqdm'] < len(cells) else ''
+            code = code.replace('.', '').strip()
+            if not code or not code.isdigit() or len(code) != 6:
+                continue
+            ann = cells[col_of['ann_date']] if 0 <= col_of['ann_date'] < len(cells) else ''
+            item: Dict[str, Any] = {
+                'ann_date': ann.replace('-', ''),
+                'zqdm': code,
+                'zqjc': cells[col_of['zqjc']] if 0 <= col_of['zqjc'] < len(cells) else None,
+                'plyy': cells[col_of['plyy']] if 0 <= col_of['plyy'] < len(cells) else '',
+            }
+            for key in ('cjje', 'sl'):
+                idx = col_of.get(key, -1)
+                raw = cells[idx] if 0 <= idx < len(cells) else ''
+                s = _NUM_CLEAN.sub('', raw)
+                item[key] = Decimal(s) if s not in ('', '--', '-') else None
+            out.append(item)
+        if not out:
+            raise ValueError('深交所龙虎榜 XLSX 未解析到有效数据行（缺表头/截断）')
+        return out
+    finally:
+        wb.close()
+
+
+def _xlsx_header_key(name: str) -> str:
+    """表头名归一：全角括号/空格 → 半角紧凑，供列名匹配"""
+    return (str(name or '').strip()
+            .replace('（', '(').replace('）', ')')
+            .replace(' ', '').replace('\u00a0', ''))
+
+
+def parse_szse_margin_xlsx(content: bytes) -> List[Dict[str, Any]]:
+    """深交所两融 XLSX 字节流 → 行列表（模块级纯函数，离线样本可测）。
+
+    解析陷阱（§4.1）：11-20 两融/龙虎榜 XLSX 工作表尺寸均声明为 ``A1:A1``——
+    ``openpyxl`` read_only 模式下必须先 ``ws.reset_dimensions()`` 再遍历到实际
+    末行（样本 2,120 行含表头）。证券代码保留六位（前导零），金额按表头识别、
+    千分位清洗，值以 Decimal 返回（§4.1：规范化金额全程 Decimal，落 NUMERIC(24,4)）。
+    """
+    from decimal import Decimal
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        ws.reset_dimensions()          # A1:A1 声明陷阱：重置后才能读到实际末行
+        col_of: Dict[str, int] = {}
+        out: List[Dict[str, Any]] = []
+        for row in ws.iter_rows(values_only=True):
+            if row is None:
+                continue
+            cells = ['' if c is None else str(c).strip() for c in row]
+            if not col_of:
+                if any('证券代码' in _xlsx_header_key(c) or c == '证券代码' for c in cells):
+                    header = [_xlsx_header_key(c) for c in cells]
+                    code_col = next((i for i, h in enumerate(header)
+                                     if h == '证券代码'), None)
+                    if code_col is None:
+                        raise ValueError(f'深交所两融 XLSX 表头缺证券代码列: {cells}')
+                    col_of['code'] = code_col
+                    for key, candidates in _SZSE_MARGIN_XLSX_COLUMNS.items():
+                        col_of[key] = next(
+                            (i for i, h in enumerate(header)
+                             if h in {_xlsx_header_key(c) for c in candidates}), -1)
+                continue
+            code = cells[col_of['code']] if col_of['code'] < len(cells) else ''
+            code = code.replace('.', '').strip()
+            if not code or not code.isdigit() or len(code) != 6:
+                continue               # 表头重复行/说明行/脏行剔除（六位代码保留）
+            item: Dict[str, Any] = {'zqdm': code}
+            for key in ('rzye', 'rzmre', 'rqye', 'rzrqhj'):
+                idx = col_of.get(key, -1)
+                raw = cells[idx] if 0 <= idx < len(cells) else ''
+                s = _NUM_CLEAN.sub('', raw)
+                item[key] = Decimal(s) if s not in ('', '--', '-') else None
+            if item['rzye'] is None and item['rzmre'] is None:
+                continue               # 脏行剔除（与旧 JSON 口径一致）
+            out.append(item)
+        if not out:
+            raise ValueError('深交所两融 XLSX 未解析到有效数据行（缺表头/维度未重置/截断）')
+        return out
+    finally:
+        wb.close()
 
 
 class SzseSseSource(HttpCollectorBase):
@@ -203,33 +356,89 @@ class SzseSseSource(HttpCollectorBase):
     # ---------- 上交所 两融明细 ----------
 
     def fetch_sse_margin(self, trade_date: str) -> List[Dict[str, Any]]:
-        """上交所两融明细（全市场单日，yyyyMMdd 日期参数；分页 pageHelp）"""
+        """上交所两融明细（§4.1：queryMargin.do，tabType=mxtype + detailsDate）。
+
+        分页陷阱（2026-11-20 实测锁定）：第 n 页须把 ``pageHelp.pageNo/beginPage/endPage``
+        **同设为 n**（均带 pageHelp. 前缀，cacheSize=1）；只改 pageNo 会重复第一页——
+        本方法对"第 n>1 页返回第一页内容"显式报错拒收。逐行核 opDate（错日拒收），
+        核 pageHelp.total/pageCount 闭合。
+        """
         rows: List[Dict[str, Any]] = []
         page = 1
-        page_size = 200
+        page_size = 2000
+        total = None
+        page_count = None
+        first_page_sig: Optional[Tuple[Any, ...]] = None
         while True:
-            data = self._sse_query({
+            data = self._parse_jsonp(self.get_text(SSE_MARGIN_URL, params={
                 'isPagination': 'true',
+                'tabType': 'mxtype',
+                'detailsDate': trade_date,
                 'pageHelp.pageSize': page_size,
-                'pageHelp.pageNo': page,
-                'pageHelp.beginPage': 1,
                 'pageHelp.cacheSize': 1,
-                'pageHelp.endPage': 5,
-                'preStockCode': '',
-                'beginDate': trade_date,
-                'endDate': trade_date,
-                'sqlId': self.sse_margin_sqlid,
-            })
+                'pageHelp.pageNo': page,
+                'pageHelp.beginPage': page,
+                'pageHelp.endPage': page,
+                # 2026-11-26 实测：缺 jsonCallBack 参数时该端点 HTTP 400
+                'jsonCallBack': 'jsonpCallback',
+            }, headers={'Referer': SSE_MARGIN_REFERER}))
             page_help = data.get('pageHelp') or {}
-            batch = page_help.get('data') or []
+            batch = page_help.get('data') or data.get('result') or []
+            if page == 1 and not batch:
+                return []          # 未发布/非交易日：与旧行为一致返回空
+            if batch:
+                sig = (batch[0].get('stockCode'), batch[-1].get('stockCode'),
+                       len(batch))
+                if page == 1:
+                    first_page_sig = sig
+                elif sig == first_page_sig:
+                    raise ValueError(
+                        f'上交所两融第 {page} 页返回第一页内容（pageNo/beginPage/endPage '
+                        f'未生效或被服务端忽略），拒收整批防重复写入')
+                rows.extend(batch)
+            total = int(page_help.get('total') or total or 0)
+            page_count = int(page_help.get('pageCount') or page_count or 0)
+            if total and len(rows) >= total:
+                break
+            if page_count and page >= page_count:
+                break
             if not batch:
-                break
-            rows.extend(batch)
-            total = int(page_help.get('total') or 0)
-            if page * page_size >= total or page > 50:
-                break
+                raise ValueError(
+                    f'上交所两融分页中断：已取 {len(rows)}/{total or "?"} 行，'
+                    f'第 {page} 页无数据（少页拒收）')
+            if page > 50:
+                raise ValueError(f'上交所两融达安全阀页数 {page}，疑似分页异常')
             page += 1
+        if total and len(rows) != total:
+            raise ValueError(f'上交所两融行数与官方总数不一致: {len(rows)} ≠ {total}')
+        for r in rows:
+            op = str(r.get('opDate') or '')[:10].replace('-', '')
+            if op and op != trade_date:
+                raise ValueError(f'上交所两融行 opDate={op} ≠ 请求日 {trade_date}（错日拒收）')
         return rows
+
+    # ---------- 深交所 两融明细（XLSX 整表导出） ----------
+
+    def fetch_szse_margin_xlsx(self, trade_date: str) -> List[Dict[str, Any]]:
+        """深交所两融 XLSX 整表导出（§4.1：SHOWTYPE=xlsx，一份 ~145KB / 2,119 行）。
+
+        替代旧 JSON 翻页（106 页 × pagesize=20）。文件名与生成时刻均不含业务日——
+        调用方须用带日期的巨潮同日代码集验证归属后入库。无数据（非交易日/未发布）
+        返回空列表；HTTP 404/结构异常向上抛。
+        """
+        date_param = f'{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}'
+        content = self.get_content(SZSE_SHOWREPORT_EXPORT, params={
+            'SHOWTYPE': 'xlsx',
+            'CATALOGID': self.szse_margin_catalog,
+            'TABKEY': 'tab2',
+            'txtDate': date_param,
+            'random': '0.123456',
+        }, headers={'Referer': SZSE_REFERER})
+        if not content:
+            return []
+        if content[:2] != b'PK':    # xlsx=ZIP 容器；HTML/JSON 拦截页在此拦下
+            raise ValueError(f'深交所两融 XLSX 响应非 ZIP 容器: {content[:80]!r}')
+        return parse_szse_margin_xlsx(content)
 
     # ---------- 上交所 龙虎榜（汇总接口：1 请求全部上榜行 + 打包席位） ----------
 
@@ -254,6 +463,50 @@ class SzseSseSource(HttpCollectorBase):
         if rows is None:
             rows = (data.get('pageHelp') or {}).get('data') or []
         return rows
+
+    def fetch_sse_kcb_lhb(self, trade_date: str) -> List[Dict[str, Any]]:
+        """上交所科创板龙虎榜（§5.1：queryKCBTradeInfo.do，tradeDate=D + 空 flag）。
+
+        2026-11-20 实测 3 起（688078/688199/688679）。行字段：secCode/secAbbr/
+        secType（'A'）/fileDate/tradeDate/unnormalStartDate/unnormalEndDate/
+        regionTxAmt（万元，披露区间竞价成交额）/regionTxVol/refType/
+        deptNameB/deptTxAmtB/deptNameS/deptTxAmtS（买卖各 5 席位逗号打包，万元）。
+        返回行数需结合实际数组核对，分页壳可能给零。
+        """
+        data = self._parse_jsonp(self.get_text(SSE_KCB_LHB_URL, params={
+            'jsonCallBack': 'jsonpCallback', 'isPagination': 'false',
+            'tradeDate': trade_date, 'flag': '',
+        }, headers={'Referer': SSE_KCB_LHB_REFERER}))
+        if not isinstance(data, dict):
+            raise ValueError(f'上交所科创板龙虎榜响应结构变更: {str(data)[:200]}')
+        rows = data.get('result')
+        if rows is None:
+            rows = (data.get('pageHelp') or {}).get('data') or []
+        for r in rows:
+            td = str(r.get('tradeDate') or '')[:10].replace('-', '')
+            if td and td != trade_date:
+                raise ValueError(f'科创板龙虎榜行 tradeDate={td} ≠ 请求日 {trade_date}（错日拒收）')
+        return rows
+
+    def fetch_szse_lhb_xlsx(self, trade_date: str) -> List[Dict[str, Any]]:
+        """深交所龙虎榜列表 XLSX 整表导出（§5.1：SHOWTYPE=xlsx，替代 JSON 翻页）。
+
+        表头（2026-11-20 实测）：公告日期、证券代码、证券简称、成交金额(元)、
+        成交量(股/份)、披露原因。同股多原因为多行；金额千分位元；公告日期带横线。
+        """
+        date_param = f'{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}'
+        content = self.get_content(SZSE_SHOWREPORT_EXPORT, params={
+            'SHOWTYPE': 'xlsx',
+            'CATALOGID': self.szse_lhb_catalog,
+            'txtStart': date_param,
+            'txtEnd': date_param,
+            'random': '0.123456',
+        }, headers={'Referer': SZSE_REFERER})
+        if not content:
+            return []
+        if content[:2] != b'PK':
+            raise ValueError(f'深交所龙虎榜 XLSX 响应非 ZIP 容器: {content[:80]!r}')
+        return parse_szse_lhb_xlsx(content)
 
     # ---------- 上交所 预约披露 ----------
 

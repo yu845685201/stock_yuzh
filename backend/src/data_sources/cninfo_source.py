@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 
 QUERY_PATH = '/new/hisAnnouncement/query'
 STOCK_MAP_PATH = '/new/data/szse_stock.json'
+# 两融全市场明细（盘后采集数据源整合详细技术方案 V1.0 §4.1：POST，查询参数
+# tdate=YYYY-MM-DD；单次读 data.records，核 resultCode/count=total/TRADEDATE）
+MARGIN_DETAIL_PATH = '/data20/marginTrading/detailList'
+# 龙虎榜公开信息（§5.1：POST，sdate=edate=YYYY-MM-DD，page/rows=100；
+# 事件行在 marketList，核 total/totalPage/count；detail 买卖各 5 位置，单位元）
+LHB_STATIS_PATH = '/data/statis/getMarketStatisticsData'
 
 # 四类定期报告 category（年报/半年报/一季报/三季报，_szsh 后缀覆盖沪深北）
 PERIODIC_CATEGORIES = ('category_ndbg_szsh', 'category_bndbg_szsh',
@@ -348,6 +354,151 @@ class CninfoSource:
                 break
             page_num += 1
         return announcements
+
+    # ---------- 两融全市场明细（§4.1 巨潮校验/补缺路径） ----------
+
+    def fetch_margin_detail(self, trade_date: str) -> Dict[str, Any]:
+        """巨潮两融全市场明细（trade_date: yyyyMMdd；返回原始 records 与完备证据）。
+
+        - 请求：POST {query_base}/data20/marginTrading/detailList，查询参数
+          ``tdate=YYYY-MM-DD``（文档实测口径）；
+        - 完备证据：核 ``resultCode``、``count = total = len(records)``、逐行
+          ``TRADEDATE`` 一致——任一不符即抛错拒收（不带日期证据的结果不作业务凭据）；
+        - 字段语义（优化方案 §三）：``F001N/F002N/F003N/F008N`` 分别为融资余额/
+          融资买入额/融资偿还额/融券余额（元），``F010V`` 定市场（sse/sz/bj 等），
+          ``F009N`` 两融合计（用于 ``F001N + F008N = F009N`` 可比校验）；
+        - 11-20 全市场 4,491 条，按项目范围保留沪深 4,138 条（北交所记录进入范围
+          统计不落沪深表）；深市偿还额空值保留。
+
+        Returns:
+            {'records': [...], 'total': int, 'count': int, 'trade_date': 'YYYYMMDD'}
+        """
+        date_param = f'{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}'
+        url = f'{self.query_base_url}{MARGIN_DETAIL_PATH}'
+        endpoint = build_endpoint_tag(url)
+        if self.query_interval > 0:
+            time.sleep(self.query_interval)
+        self.gate.acquire(url, endpoint=endpoint)
+        resp = self._session.post(url, params={'tdate': date_param},
+                                  headers=self._headers(), timeout=self.timeout)
+        if resp.status_code in (403, 429):
+            retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+            kind = KIND_RATE_LIMITED if resp.status_code == 429 else KIND_FORBIDDEN
+            self.gate.report(url, endpoint=endpoint, kind=kind,
+                             retry_after=retry_after, ok=False)
+            raise CninfoBlockedError(f'两融明细 HTTP {resp.status_code}，疑似触发风控',
+                                     kind=kind, host=self._query_host,
+                                     retry_after=retry_after)
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError as e:
+            self.gate.report(url, endpoint=endpoint, kind=KIND_BLOCKED_PAGE, ok=False)
+            raise CninfoBlockedError('两融明细返回非 JSON，疑似触发风控',
+                                     kind=KIND_BLOCKED_PAGE,
+                                     host=self._query_host) from e
+        self.gate.report(url, endpoint=endpoint, ok=True)
+        # 2026-11-26 实测响应结构：resultCode/resultMsg/count/total/records 均在
+        # ``data`` 内（顶层为 path/code 元信息）；resultCode 成功值 '200'
+        payload = data.get('data') or {}
+        result_code = str(payload.get('resultCode')
+                          or data.get('resultCode') or '')
+        if result_code not in ('0', '200'):
+            raise ValueError(f'巨潮两融 resultCode={result_code!r}（结构变更或参数错误）: '
+                             f'{str(data)[:200]}')
+        records = payload.get('records') or []
+        total = int(payload.get('total') or 0)
+        count = int(payload.get('count') or 0)
+        if count != total or count != len(records):
+            raise ValueError(f'巨潮两融完备性不符: count={count} total={total} '
+                             f'len(records)={len(records)}（拒收防截断入账）')
+        for r in records:
+            td = str(r.get('TRADEDATE') or '')[:10].replace('-', '')
+            if td and td != trade_date:
+                raise ValueError(f'巨潮两融行 TRADEDATE={td} ≠ 请求日 {trade_date}（错日拒收）')
+        return {'records': records, 'total': total, 'count': count,
+                'trade_date': trade_date}
+
+    # ---------- 龙虎榜公开信息（§5.1 巨潮席位路径） ----------
+
+    def fetch_lhb_seats(self, trade_date: str, page_size: int = 5,
+                        max_pages: int = 40) -> Dict[str, Any]:
+        """巨潮交易公开信息（事件行 + 席位 detail；trade_date: yyyyMMdd）。
+
+        2026-11-26 实测锁定：
+        - 响应顶层：``total``（全品种事件数，11-20=73）、``totalPage``、
+          ``count``（本页行数）、``marketList``（事件行数组）——rows 即页大小
+          （rows=3 → totalPage=25），实测该接口对 rows>5 及连续调用有软风控：
+          连续 10+ 次请求后返回 ``total=0`` 空数据（HTTP 200），需大间隔重试；
+        - 事件行：``secCode``/``secName``/``tradeTime``/``type``（披露原因规则
+          名原文）/``detail``（样本每起 5 个位置，buy/sell 席位成对，金额千分位
+          字符串、单位元）；顶层 buyTotal/sellTotal 可能为空；
+        - 超 1 页跟随 totalPage 翻页；count 与 len(marketList) 不符拒收。
+
+        Returns:
+            {'events': [row, ...], 'total': int, 'trade_date': 'YYYYMMDD'}
+        """
+        date_param = f'{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}'
+        url = f'{self.query_base_url}{LHB_STATIS_PATH}'
+        endpoint = build_endpoint_tag(url)
+        events: List[Dict[str, Any]] = []
+        total = None
+        page = 1
+        while True:
+            if self.query_interval > 0:
+                time.sleep(self.query_interval)
+            self.gate.acquire(url, endpoint=endpoint)
+            resp = self._session.post(
+                url, params={'sdate': date_param, 'edate': date_param,
+                             'page': page, 'rows': page_size},
+                data={'sdate': date_param, 'edate': date_param,
+                      'page': str(page), 'rows': str(page_size)},
+                headers=self._headers(), timeout=self.timeout)
+            if resp.status_code in (403, 429):
+                retry_after = parse_retry_after(resp.headers.get('Retry-After'))
+                kind = KIND_RATE_LIMITED if resp.status_code == 429 else KIND_FORBIDDEN
+                self.gate.report(url, endpoint=endpoint, kind=kind,
+                                 retry_after=retry_after, ok=False)
+                raise CninfoBlockedError(f'龙虎榜公开信息 HTTP {resp.status_code}',
+                                         kind=kind, host=self._query_host,
+                                         retry_after=retry_after)
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except ValueError as e:
+                self.gate.report(url, endpoint=endpoint, kind=KIND_BLOCKED_PAGE, ok=False)
+                raise CninfoBlockedError('龙虎榜公开信息返回非 JSON',
+                                         kind=KIND_BLOCKED_PAGE,
+                                         host=self._query_host) from e
+            self.gate.report(url, endpoint=endpoint, ok=True)
+            batch = data.get('marketList')
+            if batch is None:
+                raise ValueError(f'巨潮龙虎榜响应缺 marketList: {str(data)[:200]}')
+            count = int(data.get('count') or 0)
+            if count != len(batch):
+                raise ValueError(f'巨潮龙虎榜 count={count} ≠ len(marketList)='
+                                 f'{len(batch)}（拒收防截断）')
+            if page == 1 and not batch and int(data.get('total') or 0) == 0:
+                # 软风控形态：HTTP 200 + total=0 空数据（连续调用后触发）——
+                # 与"当日确实无事件"无法区分，一律按风控报错留待补，不入账
+                raise CninfoBlockedError('巨潮龙虎榜返回空数据（疑似软风控，稍后重试）',
+                                         kind=KIND_BLOCKED_PAGE,
+                                         host=self._query_host)
+            for ev in batch:
+                tt = str(ev.get('tradeTime') or '')[:10].replace('-', '')
+                if tt and tt != trade_date:
+                    raise ValueError(f'巨潮龙虎榜行 tradeTime={tt} ≠ 请求日 {trade_date}（错日拒收）')
+            events.extend(batch)
+            total = int(data.get('total') or total or 0)
+            total_page = int(data.get('totalPage') or 0)
+            if (total and len(events) >= total) or (total_page and page >= total_page):
+                break
+            if page >= max_pages:
+                raise ValueError(f'巨潮龙虎榜达安全阀页数 {page}（少页拒收）')
+            page += 1
+        if total and len(events) != total:
+            raise ValueError(f'巨潮龙虎榜事件数与官方总数不一致: {len(events)} ≠ {total}')
+        return {'events': events, 'total': total, 'trade_date': trade_date}
 
     # ---------- 标题解析 ----------
 

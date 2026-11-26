@@ -272,6 +272,7 @@ def resolve_target_date(run_mode: RunMode,
 def entry_to_partition_result(entry: Dict[str, Any], dataset: str, market: str,
                               target_date: str, source: Optional[str] = None,
                               exchange: Optional[str] = None,
+                              sub_dataset: Optional[str] = None,
                               as_of: Optional[datetime] = None) -> PartitionResult:
     """编排器 summary entry → PartitionResult（编排器最小接入用映射）。
 
@@ -280,6 +281,8 @@ def entry_to_partition_result(entry: Dict[str, Any], dataset: str, market: str,
     - 失败 → FAILED（原因码 REQUEST_FAILED）
     - 待补 → PARTIAL（数据日滞后/风控冷却后仍失败 → RATE_LIMITED）
     - 跳过 → NOT_APPLICABLE（未注册/被门控）/ BLOCKED（日K门控未过）
+    sub_dataset：验收子项后缀（§2.2 margin→sse/szse 的 detail、option→risk/stats），
+    进分区键 `日期|市场|交易所|数据集|子项`——主路径和备用路径共享同一逻辑分区。
     """
     status_raw = str(entry.get('status') or '')
     rows = int(entry.get('rows') or 0)
@@ -311,7 +314,8 @@ def entry_to_partition_result(entry: Dict[str, Any], dataset: str, market: str,
         source=source or dataset,
         market=market,
         partition_key=build_partition_key(target_date, dataset, market,
-                                          exchange=exchange),
+                                          exchange=exchange,
+                                          sub_dataset=sub_dataset),
         expected_date=target_date,
         status=status,
         reason_codes=reason_codes,

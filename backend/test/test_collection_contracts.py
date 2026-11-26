@@ -450,7 +450,21 @@ class TestMigrationSqlParity:
 
     def test_ensure_ddl_tables_match(self):
         from src.database.dao_review_publication import ReviewPublicationDaoMixin
+        # 20261126 批次 A：+sync_partition_current（逻辑分区发布指针，整合方案 §3.1）
         assert set(CollectionLineageDaoMixin._COLLECTION_TABLE_DDL) == {
-            'sync_job', 'sync_partition', 'dataset_revision', 'recompute_task'}
+            'sync_job', 'sync_partition', 'dataset_revision', 'recompute_task',
+            'sync_partition_current'}
         assert set(ReviewPublicationDaoMixin._PUBLICATION_TABLE_DDL) == {
             'review_batch', 'review_verification_version'}
+
+    def test_source_integration_migration_files_exist(self):
+        """批次 A 迁移与 ensure DDL 同源（整合方案 §3.1 sync_partition_current）"""
+        up = Path(__file__).resolve().parents[2] / 'doc/migrations/20261126_source_integration_up.sql'
+        down = Path(__file__).resolve().parents[2] / 'doc/migrations/20261126_source_integration_down.sql'
+        assert up.exists() and down.exists()
+        text = up.read_text(encoding='utf-8')
+        assert 'CREATE TABLE IF NOT EXISTS sync_partition_current ' in text
+        # 外键引用与主键/索引与 ensure DDL 关键列一致
+        assert 'REFERENCES dataset_revision(revision_id)' in text
+        assert 'PRIMARY KEY (dataset, partition_key, contract_version)' in text
+        assert 'idx_partition_current_day' in text

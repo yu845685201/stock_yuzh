@@ -123,6 +123,29 @@ class CollectionLineageDaoMixin:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """,
+        # 逻辑分区发布指针（盘后采集数据源整合详细技术方案 V1.0 §3.1 批次 A）：
+        # 按 (dataset, partition_key, contract_version) 保存发布指针与首轮验收时刻。
+        # latest_partition_status 会把不同子项混在一起，本表按完整逻辑键区分；
+        # 首达时间/作业号 COALESCE 固定，不回填倒签；历史旧记录由回放复核后再建指针。
+        'sync_partition_current': """
+            CREATE TABLE IF NOT EXISTS sync_partition_current (
+                dataset              VARCHAR(64)  NOT NULL,
+                partition_key        VARCHAR(256) NOT NULL,
+                business_date        VARCHAR(8)   NOT NULL,
+                contract_version     VARCHAR(32)  NOT NULL,
+                first_check_at       TIMESTAMPTZ,
+                deadline_at          TIMESTAMPTZ,
+                first_daily_job_id   VARCHAR(36),
+                first_ready_job_id   VARCHAR(36),
+                first_ready_at       TIMESTAMPTZ,
+                accepted_revision_id VARCHAR(36) REFERENCES dataset_revision(revision_id),
+                accepted_status      VARCHAR(24)
+                    CHECK (accepted_status IN ('COMPLETE', 'CONFIRMED_EMPTY')),
+                accepted_source      VARCHAR(64),
+                accepted_at          TIMESTAMPTZ,
+                PRIMARY KEY (dataset, partition_key, contract_version)
+            )
+        """,
     }
 
     _COLLECTION_INDEX_DDL: List[str] = [
@@ -133,6 +156,8 @@ class CollectionLineageDaoMixin:
         "ON sync_partition (dataset, market, expected_date, status)",
         "CREATE INDEX IF NOT EXISTS idx_dataset_revision_chain "
         "ON dataset_revision (dataset, partition_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_partition_current_day "
+        "ON sync_partition_current (business_date, dataset, contract_version)",
         # required_input_hash 可为 NULL：唯一索引用 COALESCE 把 NULL 归一到空串，
         # 避免 PG 唯一约束对 NULL 不去重（技术方案 §6.3 唯一键语义）
         "CREATE UNIQUE INDEX IF NOT EXISTS uk_recompute_task_scope "
@@ -143,7 +168,8 @@ class CollectionLineageDaoMixin:
     ]
 
     def ensure_collection_tables(self) -> None:
-        """闭环控制表建表兜底（幂等；DDL 同步维护在 doc/migrations/20261119_*.sql）"""
+        """闭环控制表建表兜底（幂等；DDL 同步维护在 doc/migrations/20261119_*.sql
+        与 20261126_source_integration_up.sql）"""
         with self.get_connection() as conn:
             with conn.cursor() as cursor:
                 for ddl in self._COLLECTION_TABLE_DDL.values():
@@ -151,7 +177,8 @@ class CollectionLineageDaoMixin:
                 for idx in self._COLLECTION_INDEX_DDL:
                     cursor.execute(idx)
             conn.commit()
-        logger.info('闭环控制表 ensure 完成（sync_job/sync_partition/dataset_revision/recompute_task）')
+        logger.info('闭环控制表 ensure 完成（sync_job/sync_partition/dataset_revision/'
+                    'recompute_task/sync_partition_current）')
 
     # ---------- 显式事务 API（*_tx：调用方事务内执行，不 commit） ----------
 
@@ -304,6 +331,86 @@ class CollectionLineageDaoMixin:
                       'codes': _j(t.get('codes') or []),
                       'trigger_revisions': _j(t.get('trigger_revisions') or [])})
         return len(tasks)
+
+    # ---------- sync_partition_current 逻辑分区发布指针（§3.1 批次 A） ----------
+
+    def ensure_partition_current_tx(self, conn: Any, dataset: str,
+                                    partition_key: str, business_date: str,
+                                    contract_version: str = 'v1',
+                                    first_check_at: Optional[datetime] = None,
+                                    deadline_at: Optional[datetime] = None) -> None:
+        """计划时创建当前合同期望行（ON CONFLICT DO NOTHING——已有指针不覆盖）。
+
+        某天作业整轮漏跑时，依据交易日历重建的应到集合中缺失指针算未达（§3.1）。
+        """
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO sync_partition_current
+                (dataset, partition_key, business_date, contract_version,
+                 first_check_at, deadline_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (dataset, partition_key, contract_version)
+                DO NOTHING
+            """, (dataset, partition_key, business_date, contract_version,
+                  first_check_at, deadline_at))
+
+    def accept_partition_current_tx(self, conn: Any, dataset: str,
+                                    partition_key: str, business_date: str,
+                                    job_id: str, status: str,
+                                    source: Optional[str] = None,
+                                    revision_id: Optional[str] = None,
+                                    contract_version: str = 'v1',
+                                    accepted_at: Optional[datetime] = None,
+                                    first_daily: bool = False) -> None:
+        """提交验收指针（仅 COMPLETE/CONFIRMED_EMPTY；PARTIAL/FAILED 只记 sync_partition）。
+
+        - 首达时间/作业号 COALESCE 固定（first_daily_job_id/first_ready_job_id/
+          first_ready_at——首次正式作业写 first_daily_job_id，第一次合格提交固定
+          首达，不回填倒签）；
+        - 后续来源修订只更新当前指针（accepted_*）；
+        - 调用方须持有该逻辑分区锁（apply_partition 同款 advisory lock）。
+        """
+        if status not in ('COMPLETE', 'CONFIRMED_EMPTY'):
+            raise ValueError(f'发布指针仅接受 COMPLETE/CONFIRMED_EMPTY，收到 {status}')
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO sync_partition_current
+                (dataset, partition_key, business_date, contract_version,
+                 first_daily_job_id, first_ready_job_id, first_ready_at,
+                 accepted_revision_id, accepted_status, accepted_source, accepted_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (dataset, partition_key, contract_version)
+                DO UPDATE SET
+                    business_date = EXCLUDED.business_date,
+                    first_daily_job_id = COALESCE(sync_partition_current.first_daily_job_id,
+                                                  EXCLUDED.first_daily_job_id),
+                    first_ready_job_id = COALESCE(sync_partition_current.first_ready_job_id,
+                                                  EXCLUDED.first_ready_job_id),
+                    first_ready_at = COALESCE(sync_partition_current.first_ready_at,
+                                              EXCLUDED.first_ready_at),
+                    accepted_revision_id = EXCLUDED.accepted_revision_id,
+                    accepted_status = EXCLUDED.accepted_status,
+                    accepted_source = EXCLUDED.accepted_source,
+                    accepted_at = EXCLUDED.accepted_at
+            """, (dataset, partition_key, business_date, contract_version,
+                  job_id if first_daily else None,
+                  job_id,
+                  accepted_at or datetime.now(timezone.utc),
+                  revision_id, status, source,
+                  accepted_at or datetime.now(timezone.utc)))
+
+    def list_partition_current_by_date(self, dataset: str, business_date: str,
+                                       contract_version: str = 'v1'
+                                       ) -> List[Dict[str, Any]]:
+        """按业务日查逻辑分区指针（补采判定/截止完整率核对；完整逻辑键防子项混排）"""
+        rows = self.execute_query(
+            "SELECT partition_key, business_date, accepted_status, accepted_source, "
+            "first_ready_at, deadline_at, first_daily_job_id, first_ready_job_id "
+            "FROM sync_partition_current "
+            "WHERE dataset = %s AND business_date = %s AND contract_version = %s "
+            "ORDER BY partition_key",
+            (dataset, business_date, contract_version))
+        return [dict(r) for r in rows]
 
     # ---------- §4.3 分区写入事务模板 ----------
 

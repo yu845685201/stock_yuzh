@@ -57,8 +57,19 @@ DEFAULT_UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
 # 报错附带的原始响应片段上限（方案 §6.1：结构变更报错必须带原始响应片段）
 _SNIPPET_CHARS = 200
 
-# 模块级唯一会话（连接复用；headers 逐请求注入，源间互不影响）
-_SESSION = requests.Session()
+# 按主机隔离的会话池（2026-11-26 批次 A 回放实测：深市 XLSX 大响应后共享单例
+# Session 上发沪市 queryMargin.do 恒被 nginx 400——连接池状态跨主机残留污染；
+# 新建 Session 即恢复。cookie/连接池按 netloc 隔离，headers 仍逐请求注入）
+_SESSIONS: Dict[str, requests.Session] = {}
+
+
+def _session_for(url: str) -> requests.Session:
+    host = _host_of(url) or ''
+    sess = _SESSIONS.get(host)
+    if sess is None:
+        sess = requests.Session()
+        _SESSIONS[host] = sess
+    return sess
 
 __all__ = ['HttpCollectorBase', 'ReviewBlockedError', 'DEFAULT_UA']
 
@@ -197,10 +208,11 @@ class HttpCollectorBase:
         # （修复：仅传 Referer 的调用丢失采集器 UA/Accept 的既有缺陷）
         merged_headers = {**self.headers, **(headers or {})}
         try:
-            resp = _SESSION.request(method, url, params=params, data=data,
-                                    headers=merged_headers,
-                                    timeout=self.request_timeout, proxies=self._proxies,
-                                    verify=self.verify)
+            resp = _session_for(url).request(method, url, params=params, data=data,
+                                             headers=merged_headers,
+                                             timeout=self.request_timeout,
+                                             proxies=self._proxies,
+                                             verify=self.verify)
         except requests.RequestException:
             # 网络类失败：释放时隙，交由重试预算退避
             self.gate.report(url, endpoint=endpoint, ok=True)

@@ -752,6 +752,22 @@ class ReviewDaoMixin:
             ) t WHERE rn <= {int(periods)}
         """, (as_of,))
 
+    def fetch_financial_reports_from_versions(self, as_of: str,                                              periods: int = 8) -> List[Dict[str, Any]]:
+        """版本表口径的估值输入（§7.3 批次 C 接线第三步；与
+        fetch_financial_reports_asof 同构返回 ts_code/stat_date/net_profit/net_assets）。
+
+        cutoff = as_of（YYYYMMDD）当日 15:00+08 收盘可知时刻——严格回放：仅
+        first_observed_at <= cutoff 的版本参与（"旧可知时点不读新值"）。
+        影子/publish 模式共用；publish 前须完成 shadow 差异对比归零。
+        """
+        cutoff = f'{as_of[:4]}-{as_of[4:6]}-{as_of[6:8]} 15:00:00+08'
+        rows = self.fetch_financial_versions_asof(cutoff, limit_periods=periods)
+        return [{'ts_code': r['ts_code'], 'stat_date': r['stat_date'],
+                 'net_profit': r.get('net_profit'), 'net_assets': r.get('net_assets'),
+                 '_sources': r.get('_sources')}
+                for r in rows
+                if r.get('net_profit') is not None]
+
     def fetch_total_shares_asof(self, as_of: str) -> Dict[str, float]:
         """每只股票在 as_of 日已披露的最新总股本（disclosure_date <= as_of，开发项 A 回退口径）"""
         rows = self.execute_query("""
@@ -1013,6 +1029,381 @@ class ReviewDaoMixin:
         """
         return self.execute_batch(sql, [self._strip(r) for r in rows])
 
+    # ---------- 龙虎榜事件层（盘后采集数据源整合详细技术方案 V1.0 §5.2 批次 B） ----------
+
+    _LHB_EVENT_DDL = (
+        "CREATE TABLE IF NOT EXISTS lhb_event ("
+        " event_id VARCHAR(64) PRIMARY KEY,"
+        " trade_date VARCHAR(8) NOT NULL,"
+        " exchange VARCHAR(16) NOT NULL,"
+        " board VARCHAR(16) NOT NULL,"
+        " ts_code VARCHAR(12) NOT NULL,"
+        " security_type VARCHAR(16),"
+        " reason_code VARCHAR(64) NOT NULL,"
+        " reason_text TEXT,"
+        " period_start VARCHAR(8),"
+        " period_end VARCHAR(8),"
+        " sec_tx_amount NUMERIC(24,4),"
+        " buy_amt NUMERIC(24,4),"
+        " sell_amt NUMERIC(24,4),"
+        " net_amt NUMERIC(24,4),"
+        " source_keys JSONB,"
+        " revision_id VARCHAR(36),"
+        " update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+        "CREATE INDEX IF NOT EXISTS idx_lhb_event_day ON lhb_event (trade_date, ts_code)",
+        "CREATE INDEX IF NOT EXISTS idx_lhb_event_reason "
+        "ON lhb_event (trade_date, exchange, board, reason_code)",
+        "CREATE TABLE IF NOT EXISTS lhb_event_seat ("
+        " event_id VARCHAR(64) NOT NULL REFERENCES lhb_event(event_id),"
+        " side CHAR(1) NOT NULL CHECK (side IN ('B', 'S')),"
+        " seat_rank SMALLINT NOT NULL CHECK (seat_rank > 0),"
+        " seat_name TEXT NOT NULL,"
+        " buy_amount NUMERIC(24,4),"
+        " sell_amount NUMERIC(24,4),"
+        " amount_unit VARCHAR(8) NOT NULL DEFAULT 'yuan',"
+        " source VARCHAR(24),"
+        " PRIMARY KEY (event_id, side, seat_rank))",
+        "CREATE INDEX IF NOT EXISTS idx_lhb_event_seat_name ON lhb_event_seat (seat_name)",
+    )
+
+    def ensure_lhb_event_tables(self) -> None:
+        """龙虎榜事件/席位层建表兜底（幂等；DDL 同步维护在
+        doc/migrations/20261126_source_integration_batch_b_up.sql）"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                for ddl in self._LHB_EVENT_DDL:
+                    cursor.execute(ddl)
+            conn.commit()
+        logger.info('龙虎榜事件层 ensure 完成（lhb_event/lhb_event_seat）')
+
+    def replace_lhb_events_tx(self, conn: Any, events: List[Dict[str, Any]],
+                              trade_date: str) -> int:
+        """事件+席位同事务整日替换（§5.2：按同一事件事务替换；先删该日全部旧
+        事件与席位再插入——披露原因或区间更正导致身份变化时，旧事件随本轮
+        整体撤下）。调用方持有 conn 且负责 commit/rollback。"""
+        import json as _json
+
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM lhb_event_seat WHERE event_id IN "
+                           "(SELECT event_id FROM lhb_event WHERE trade_date = %s)",
+                           (trade_date,))
+            cursor.execute("DELETE FROM lhb_event WHERE trade_date = %s", (trade_date,))
+            for ev in events or []:
+                ev_row = {**ev}
+                ev_row.setdefault('revision_id', None)
+                ev_row.setdefault('source_keys', {})
+                cursor.execute("""
+                    INSERT INTO lhb_event
+                    (event_id, trade_date, exchange, board, ts_code, security_type,
+                     reason_code, reason_text, period_start, period_end,
+                     sec_tx_amount, buy_amt, sell_amt, net_amt, source_keys, revision_id)
+                    VALUES (%(event_id)s, %(trade_date)s, %(exchange)s, %(board)s,
+                            %(ts_code)s, %(security_type)s, %(reason_code)s,
+                            %(reason_text)s, %(period_start)s, %(period_end)s,
+                            %(sec_tx_amount)s, %(buy_amt)s, %(sell_amt)s,
+                            %(net_amt)s, %(source_keys)s, %(revision_id)s)
+                """, {**ev_row,
+                      'source_keys': _json.dumps(ev_row.get('source_keys') or {},
+                                                 ensure_ascii=False, default=str)})
+                for seat in ev.get('seats') or []:
+                    seat_row = {**seat, 'event_id': ev['event_id']}
+                    seat_row.setdefault('amount_unit', 'yuan')
+                    seat_row.setdefault('source', None)
+                    cursor.execute("""
+                        INSERT INTO lhb_event_seat
+                        (event_id, side, seat_rank, seat_name, buy_amount,
+                         sell_amount, amount_unit, source)
+                        VALUES (%(event_id)s, %(side)s, %(seat_rank)s, %(seat_name)s,
+                                %(buy_amount)s, %(sell_amount)s, %(amount_unit)s,
+                                %(source)s)
+                        ON CONFLICT (event_id, side, seat_rank)
+                        DO UPDATE SET seat_name = EXCLUDED.seat_name,
+                            buy_amount = EXCLUDED.buy_amount,
+                            sell_amount = EXCLUDED.sell_amount,
+                            source = EXCLUDED.source
+                    """, seat_row)
+        return len(events or [])
+
+    def fetch_lhb_events_day(self, trade_date: str,
+                             exchange: Optional[str] = None) -> List[Dict[str, Any]]:
+        """某日事件清单（读端'逐事件榜单'查询；seat 行内嵌返回）"""
+        rows = self.execute_query(
+            "SELECT * FROM lhb_event WHERE trade_date = %s "
+            + ("AND exchange = %s " if exchange else "")
+            + "ORDER BY ts_code, reason_code",
+            (trade_date, exchange) if exchange else (trade_date,))
+        out = [dict(r) for r in rows]
+        if out:
+            seat_rows = self.execute_query(
+                "SELECT s.* FROM lhb_event_seat s JOIN lhb_event e "
+                "ON e.event_id = s.event_id WHERE e.trade_date = %s "
+                "ORDER BY s.event_id, s.side, s.seat_rank", (trade_date,))
+            by_event: Dict[str, List[Dict[str, Any]]] = {}
+            for s in seat_rows:
+                by_event.setdefault(s['event_id'], []).append(dict(s))
+            for ev in out:
+                ev['seats'] = by_event.get(ev['event_id'], [])
+        return out
+
+    # ---------- 国证行业日期快照（§6 批次 B） ----------
+
+    _INDUSTRY_SNAPSHOT_DDL = (
+        "CREATE TABLE IF NOT EXISTS industry_member_snapshot ("
+        " trade_date VARCHAR(8) NOT NULL,"
+        " scheme VARCHAR(24) NOT NULL,"
+        " level SMALLINT NOT NULL,"
+        " ts_code VARCHAR(12) NOT NULL,"
+        " industry_code VARCHAR(32),"
+        " industry_name TEXT,"
+        " source VARCHAR(16) NOT NULL DEFAULT 'cnindex',"
+        " revision_id VARCHAR(36),"
+        " update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        " PRIMARY KEY (trade_date, scheme, level, ts_code))",
+        "CREATE INDEX IF NOT EXISTS idx_industry_snapshot_ind "
+        "ON industry_member_snapshot (scheme, level, trade_date, industry_code)",
+    )
+
+    def ensure_industry_snapshot_tables(self) -> None:
+        """国证行业快照建表兜底（幂等；DDL 同步维护在
+        doc/migrations/20261126_source_integration_batch_b_up.sql）"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                for ddl in self._INDUSTRY_SNAPSHOT_DDL:
+                    cursor.execute(ddl)
+            conn.commit()
+        logger.info('国证行业快照 ensure 完成（industry_member_snapshot）')
+
+    def replace_industry_snapshot_tx(self, conn: Any, trade_date: str, scheme: str,
+                                     level: int, rows: List[Dict[str, Any]]) -> int:
+        """整日整套快照事务替换（§6：11 个行业页级对账全过后一事务发布）。
+        回填历史日只写对应快照行（主键含 trade_date，不影响其他日期）。"""
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM industry_member_snapshot "
+                           "WHERE trade_date = %s AND scheme = %s AND level = %s",
+                           (trade_date, scheme, level))
+            for r in rows or []:
+                cursor.execute("""
+                    INSERT INTO industry_member_snapshot
+                    (trade_date, scheme, level, ts_code, industry_code,
+                     industry_name, source, revision_id)
+                    VALUES (%(trade_date)s, %(scheme)s, %(level)s, %(ts_code)s,
+                            %(industry_code)s, %(industry_name)s, %(source)s,
+                            %(revision_id)s)
+                    ON CONFLICT (trade_date, scheme, level, ts_code)
+                    DO UPDATE SET industry_code = EXCLUDED.industry_code,
+                        industry_name = EXCLUDED.industry_name,
+                        revision_id = EXCLUDED.revision_id, update_time = NOW()
+                """, r)
+        return len(rows or [])
+
+    # ---------- 财报版本行（§7.3 批次 C 接线） ----------
+
+    _FINANCIAL_VERSION_DDL = (
+        "CREATE TABLE IF NOT EXISTS financial_report_version ("
+        " version_id VARCHAR(36) PRIMARY KEY,"
+        " ts_code VARCHAR(12) NOT NULL,"
+        " stat_date VARCHAR(8) NOT NULL,"
+        " announcement_id VARCHAR(64),"
+        " report_kind VARCHAR(16),"
+        " source VARCHAR(24) NOT NULL,"
+        " source_version VARCHAR(128) NOT NULL,"
+        " published_at TIMESTAMPTZ,"
+        " published_precision VARCHAR(8),"
+        " first_observed_at TIMESTAMPTZ,"
+        " availability_basis VARCHAR(32),"
+        " supersedes_id VARCHAR(36),"
+        " content_hash VARCHAR(64),"
+        " revision_id VARCHAR(36),"
+        " field_provenance JSONB,"
+        " net_profit NUMERIC(24,4),"
+        " operate_cashflow NUMERIC(24,4),"
+        " net_assets NUMERIC(24,4),"
+        " revenue NUMERIC(24,4),"
+        " revenue_yoy NUMERIC(16,4),"
+        " net_profit_yoy NUMERIC(16,4),"
+        " eps NUMERIC(16,4),"
+        " roe NUMERIC(16,4),"
+        " gross_margin NUMERIC(16,4),"
+        " update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        " UNIQUE (ts_code, stat_date, source, source_version, content_hash))",
+        "CREATE INDEX IF NOT EXISTS idx_fin_ver_asof "
+        "ON financial_report_version (ts_code, stat_date, published_at, first_observed_at)",
+    )
+
+    def ensure_financial_version_tables(self) -> None:
+        """财报版本表建表兜底（幂等；DDL 同步维护在
+        doc/migrations/20261126_source_integration_batch_c_up.sql）"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cursor:
+                for ddl in self._FINANCIAL_VERSION_DDL:
+                    cursor.execute(ddl)
+            conn.commit()
+        logger.info('财报版本表 ensure 完成（financial_report_version）')
+
+    _FIN_VER_VALUE_COLS = ('net_profit', 'operate_cashflow', 'net_assets', 'revenue',
+                           'revenue_yoy', 'net_profit_yoy', 'eps', 'roe', 'gross_margin')
+
+    def upsert_financial_report_versions(self, rows: List[Dict[str, Any]]) -> int:
+        """版本行 upsert（唯一键 ts_code+stat_date+source+source_version+content_hash
+        天然去重——同包/同公告重跑幂等；数值列 COALESCE 保留已写入值）。"""
+        if not rows:
+            return 0
+        val_cols = self._FIN_VER_VALUE_COLS
+        set_clause = ', '.join(
+            f'{c} = COALESCE(EXCLUDED.{c}, financial_report_version.{c})' for c in val_cols)
+        col_list = ('version_id, ts_code, stat_date, announcement_id, report_kind, source,'
+                    ' source_version, published_at, published_precision, first_observed_at,'
+                    ' availability_basis, content_hash, field_provenance, '
+                    + ', '.join(val_cols))
+        placeholders = ('%(version_id)s, %(ts_code)s, %(stat_date)s, %(announcement_id)s,'
+                        ' %(report_kind)s, %(source)s, %(source_version)s,'
+                        ' %(published_at)s, %(published_precision)s, %(first_observed_at)s,'
+                        ' %(availability_basis)s, %(content_hash)s, %(field_provenance)s, '
+                        + ', '.join(f'%({c})s' for c in val_cols))
+        sql = f"""
+        INSERT INTO financial_report_version
+        ({col_list})
+        VALUES ({placeholders})
+        ON CONFLICT (ts_code, stat_date, source, source_version, content_hash)
+        DO UPDATE SET {set_clause},
+            published_at = COALESCE(EXCLUDED.published_at, financial_report_version.published_at),
+            first_observed_at = COALESCE(EXCLUDED.first_observed_at,
+                                         financial_report_version.first_observed_at),
+            field_provenance = EXCLUDED.field_provenance, update_time = NOW()
+        """
+        import json as _json
+        prepared = []
+        for r in rows:
+            item = {**r}
+            fp = item.get('field_provenance')
+            item['field_provenance'] = (_json.dumps(fp, ensure_ascii=False, default=str)
+                                        if fp else None)
+            item.setdefault('announcement_id', None)
+            item.setdefault('report_kind', None)
+            item.setdefault('published_precision', None)
+            item.setdefault('availability_basis', None)
+            item.setdefault('content_hash', None)
+            for c in val_cols:
+                item.setdefault(c, None)
+            prepared.append(item)
+        return self.execute_batch(sql, prepared)
+
+    def fetch_financial_versions_asof(self, cutoff_at: str,
+                                      codes: Optional[List[str]] = None,
+                                      periods: Optional[List[str]] = None,
+                                      limit_periods: int = 8) -> List[Dict[str, Any]]:
+        """截止时刻版本选读（§7.3：先按截止过滤 → 每股每期选一个完整可用版本 →
+        截取最近 N 个报告期）。
+
+        选版规则（本实现）：
+        - 只有 first_observed_at <= cutoff_at 的版本参与（严格回放红线）；
+        - 同股同期同 source 取 first_observed_at 最新的一行；
+        - 跨 source 字段权威次序：数值字段优先 tdx_gpcw（有值），公告版本行
+          提供披露时点；两源合并为每股每期一行（_asof_source 标注来源组合）；
+        - 每股每期一行后按 stat_date 降序截 limit_periods。
+        """
+        cond_codes = ''
+        params: List[Any] = [cutoff_at]
+        if codes:
+            cond_codes = 'AND ts_code = ANY(%s)'
+            params.append(codes)
+        if periods:
+            cond_codes += ' AND stat_date = ANY(%s)'
+            params.append(periods)
+        rows = self.execute_query(f"""
+            SELECT DISTINCT ON (ts_code, stat_date, source)
+                   ts_code, stat_date, source, source_version, announcement_id,
+                   report_kind, published_at, published_precision, first_observed_at,
+                   availability_basis, content_hash, field_provenance,
+                   net_profit, operate_cashflow, net_assets, revenue,
+                   revenue_yoy, net_profit_yoy, eps, roe, gross_margin
+            FROM financial_report_version
+            WHERE first_observed_at <= %s {cond_codes}
+            ORDER BY ts_code, stat_date, source, first_observed_at DESC
+        """, tuple(params))
+        by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for r in rows:
+            key = (r['ts_code'], r['stat_date'])
+            cur = by_key.get(key)
+            if cur is None:
+                merged = {**r, '_sources': [r['source']]}
+                by_key[key] = merged
+                continue
+            # 字段权威合并：数值列 gpcw 有值优先（cur 若已是 gpcw 则保持）
+            merged = cur
+            if r['source'] == 'tdx_gpcw' and cur.get('_sources') == ['announcement']:
+                for c in self._FIN_VER_VALUE_COLS:
+                    if r.get(c) is not None:
+                        merged[c] = r[c]
+                merged['published_at'] = merged.get('published_at') or r.get('published_at')
+                merged['_sources'] = ['announcement', 'tdx_gpcw']
+            elif r['source'] == 'announcement' and 'announcement' not in merged['_sources']:
+                merged['published_at'] = merged.get('published_at') or r.get('published_at')
+                merged['announcement_id'] = merged.get('announcement_id') or r.get('announcement_id')
+                merged['_sources'].append('announcement')
+        per_code: Dict[str, List[Dict[str, Any]]] = {}
+        for (ts, _sd), v in by_key.items():
+            per_code.setdefault(ts, []).append(v)
+        out: List[Dict[str, Any]] = []
+        for ts, items in per_code.items():
+            items.sort(key=lambda x: x['stat_date'], reverse=True)
+            out.extend(items[:limit_periods])
+        return out
+
+    # ---------- 兼容因子候选（§8 批次 C 接线） ----------
+
+    def upsert_adjust_factor_candidates(self, rows: List[Dict[str, Any]]) -> int:
+        """候选行 upsert（主键 series_version+ts_code+trade_date；不动正式键
+        base_adjust_factor——§8 只从已验收序列投影）"""
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO adjust_factor_candidate
+        (series_version, ts_code, trade_date, qfq_factor, hfq_factor,
+         reference_raw_close, anchor_date, algo_version, based_event_version,
+         check_result, check_detail)
+        VALUES (%(series_version)s, %(ts_code)s, %(trade_date)s, %(qfq_factor)s,
+                %(hfq_factor)s, %(reference_raw_close)s, %(anchor_date)s,
+                %(algo_version)s, %(based_event_version)s, %(check_result)s,
+                %(check_detail)s)
+        ON CONFLICT (series_version, ts_code, trade_date)
+        DO UPDATE SET qfq_factor = EXCLUDED.qfq_factor,
+            hfq_factor = EXCLUDED.hfq_factor,
+            reference_raw_close = EXCLUDED.reference_raw_close,
+            algo_version = EXCLUDED.algo_version,
+            based_event_version = EXCLUDED.based_event_version,
+            check_detail = EXCLUDED.check_detail, update_time = NOW()
+        """
+        import json as _json
+        prepared = []
+        for r in rows:
+            item = {**r}
+            cd = item.get('check_detail')
+            item['check_detail'] = (_json.dumps(cd, ensure_ascii=False, default=str)
+                                    if cd else None)
+            item.setdefault('check_result', None)
+            prepared.append(item)
+        return self.execute_batch(sql, prepared)
+
+    def upsert_stock_action_events(self, rows: List[Dict[str, Any]]) -> int:
+        """权益事件 upsert（§8：source+source_version+ts_code+effective_date+event_key
+        唯一；同版本重跑/未变化包天然去重）"""
+        if not rows:
+            return 0
+        sql = """
+        INSERT INTO stock_action_event_version
+        (source, source_version, ts_code, effective_date, event_key, category,
+         raw_event_type, cash_dividend, cash_reference, bonus_ratio,
+         rights_issue_ratio, raw_unit, observed_at)
+        VALUES (%(source)s, %(source_version)s, %(ts_code)s, %(effective_date)s,
+                %(event_key)s, %(category)s, %(raw_event_type)s, %(cash_dividend)s,
+                %(cash_reference)s, %(bonus_ratio)s, %(rights_issue_ratio)s,
+                %(raw_unit)s, %(observed_at)s)
+        ON CONFLICT (source, source_version, ts_code, effective_date, event_key)
+        DO NOTHING
+        """
+        return self.execute_batch(sql, rows)
+
     # ---------- 两融 ----------
 
     def upsert_hkex_connect(self, rows: List[Dict[str, Any]]) -> int:
@@ -1051,6 +1442,8 @@ class ReviewDaoMixin:
         return self.execute_batch(sql, [self._strip(r) for r in rows])
 
     def upsert_margin_trades(self, rows: List[Dict[str, Any]]) -> int:
+        """两融明细 upsert（§4.1：NULL 不清空已验证值——官网缺沪市 rqye 时保留
+        巨潮已验证金额，避免交替重跑把值清空；显式新值/正式更正常规覆盖）。"""
         if not rows:
             return 0
         sql = """
@@ -1058,8 +1451,11 @@ class ReviewDaoMixin:
         (trade_date, ts_code, rzye, rzmre, rzche, rqye)
         VALUES (%(trade_date)s, %(ts_code)s, %(rzye)s, %(rzmre)s, %(rzche)s, %(rqye)s)
         ON CONFLICT (trade_date, ts_code)
-        DO UPDATE SET rzye = EXCLUDED.rzye, rzmre = EXCLUDED.rzmre,
-                      rzche = EXCLUDED.rzche, rqye = EXCLUDED.rqye, update_time = NOW()
+        DO UPDATE SET rzye = COALESCE(EXCLUDED.rzye, margin_trade_daily.rzye),
+                      rzmre = COALESCE(EXCLUDED.rzmre, margin_trade_daily.rzmre),
+                      rzche = COALESCE(EXCLUDED.rzche, margin_trade_daily.rzche),
+                      rqye  = COALESCE(EXCLUDED.rqye,  margin_trade_daily.rqye),
+                      update_time = NOW()
         """
         return self.execute_batch(sql, [self._strip(r) for r in rows])
 
@@ -1183,6 +1579,13 @@ class ReviewDaoMixin:
     def fetch_option_row_count(self, trade_date: str) -> int:
         rows = self.execute_query(
             "SELECT COUNT(*) AS n FROM option_daily WHERE trade_date = %s",
+            (trade_date,))
+        return int(rows[0]['n']) if rows else 0
+
+    def fetch_option_stats_row_count(self, trade_date: str) -> int:
+        """option_underlying_daily 某日行数（§4.2：期权按缺失子表补齐的 stats 断点）"""
+        rows = self.execute_query(
+            "SELECT COUNT(*) AS n FROM option_underlying_daily WHERE trade_date = %s",
             (trade_date,))
         return int(rows[0]['n']) if rows else 0
 

@@ -121,18 +121,40 @@ def _rebuild_hfq(conn, df: pd.DataFrame) -> pd.DataFrame:
     fac["trade_date"] = fac["trade_date"].astype(str).str.replace("-", "")
     code_set = set(codes)
     out = []
+    from bisect import bisect_right
     for code, g in df.groupby("ts_code"):
         if code not in code_set:
             out.append(g)
             continue
         f = fac[fac["ts_code"] == code].sort_values("trade_date")
+        if f.empty:
+            out.append(g)
+            continue
         ratio = pd.Series((f["hfq_factor"] / f["qfq_factor"]).to_numpy())
         stair = ratio.where(ratio.diff().abs() > STAIR_STEP).ffill().to_numpy()
-        m = dict(zip(f["trade_date"], stair))
-        default = stair[-1]
+        dates_sorted = f["trade_date"].tolist()
         g = g.copy()
-        r = np.array([m.get(d, default) for d in g["trade_date"]])
+
+        def _lookup(d: str):
+            """§8 修复：目标日只允许 ≤ 该日的最近因子阶梯（不取序列末值——
+            那是未来值前视）；早于因子首日为无前值，输出不可用"""
+            idx = bisect_right(dates_sorted, d)
+            if idx == 0:
+                return None
+            return stair[idx - 1]
+
+        ratios: list = []
+        notes: list = []
+        for d in g["trade_date"]:
+            v = _lookup(str(d))
+            if v is None or not np.isfinite(v):
+                ratios.append(1.0)
+                notes.append("hfq_stair_unavailable:无前值/无匹配因子阶梯")
+            else:
+                ratios.append(v)
+                notes.append(None)
+        g["_hfq_note"] = notes
         for col in ("open", "high", "low", "close", "preclose"):
-            g[col] = g[col] * r
+            g[col] = g[col] * np.array(ratios)
         out.append(g)
     return pd.concat(out, ignore_index=True)

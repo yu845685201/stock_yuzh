@@ -15,12 +15,14 @@
 - 失败次日补抓（官网保留历史榜单）；入库榜单数与官网展示条数校验
 """
 
+import hashlib
 import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.config_manager import ConfigManager
+from ..data_sources.cninfo_source import CninfoBlockedError, CninfoSource
 from ..data_sources.http_collector_base import ReviewBlockedError
 from ..data_sources.sse_szse_source import SSE_REF_TYPE_NAMES, SzseSseSource
 from ..database.connection import DatabaseConnection
@@ -33,16 +35,36 @@ logger = logging.getLogger(__name__)
 # 深交所 bz 字段明细入口参数（a-param='/ShowReport/data?...ZBDM=0902'）
 _ZBDM_PATTERN = re.compile(r'ZBDM=(\d+)')
 
+# 科创板原因映射（§5.1：refType 按科创板字典解释；未知码回落保持兼容）
+SSE_KCB_REF_TYPE_NAMES = dict(SSE_REF_TYPE_NAMES)   # 科创板沿用官网披露类型字典，未知原文回落
+
+
+def _event_id(trade_date: str, exchange: str, board: str, ts_code: str,
+              reason_code: str, period_start: Optional[str],
+              period_end: Optional[str]) -> str:
+    """事件归一身份 -> event_id（§5.2：披露日+交易所+板块+代码+原因规则+区间）"""
+    key = (f'{trade_date}|{exchange}|{board}|{ts_code}|{reason_code}|'
+           f'{period_start or ""}~{period_end or ""}')
+    return hashlib.sha1(key.encode('utf-8')).hexdigest()[:32]
+
 
 class LhbManager:
-    """龙虎榜：官网 JSON -> lhb_stock_daily + lhb_detail（含席位则一并入库）"""
+    """龙虎榜：官网 JSON -> lhb_stock_daily + lhb_detail（含席位则一并入库）；
+    批次 B 事件层（§5.1/§5.2）：三源归并 -> lhb_event + lhb_event_seat（事务替换）
+    """
 
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
         self.config = config_manager.load_config()
         self.db = DatabaseConnection(config_manager)
         self.db.ensure_review_tables()
+        self.db.ensure_lhb_event_tables()
         self.source = SzseSseSource(self.config)
+        cninfo_cfg = dict(self.config.get('data_sources', {}).get('cninfo', {}) or {})
+        cninfo_cfg.setdefault('query_base_url', 'http://www.cninfo.com.cn')
+        self.cninfo = CninfoSource(cninfo_cfg)
+        review = self.config.get('review_sync', {}) or {}
+        self.events_enabled = bool(review.get('lhb_events_enabled', True))
 
     def execute(self, trade_date: Optional[str] = None, dry_run: bool = False,
                 write_report: bool = True) -> Dict[str, Any]:
@@ -117,6 +139,18 @@ class LhbManager:
                     mark_blocked(result, e, f'官网风控急停（{label}）: {e}')
             result['success'] = bool(stock_rows) \
                 and szse_blocked is None and sse_blocked is None
+            # §5.1/§5.2 批次 B 事件层：三源归并写 lhb_event/lhb_event_seat
+            # （事件+席位同事务整日替换；旧表并行投影不动，读端切换独立进行）
+            if self.events_enabled and not dry_run:
+                try:
+                    ev_stats = self._collect_and_store_events(trade_date)
+                    stats['events'] = ev_stats
+                except ReviewBlockedError as e:
+                    logger.warning(f'龙虎榜事件层风控急停 {trade_date}: {e}')
+                    stats['events'] = {'error': str(e)[:200]}
+                except Exception as e:
+                    logger.warning(f'龙虎榜事件层失败 {trade_date}: {e}')
+                    stats['events'] = {'error': str(e)[:200]}
         except Exception as e:
             logger.exception(f'龙虎榜采集失败: {e}')
             result['errors'].append(str(e))
@@ -429,6 +463,173 @@ class LhbManager:
                                 'seat_name': name, 'side': f'卖{i + 1}', 'amount': amount})
         return stocks, details
 
+    # ---------- 事件层（§5.1 三源归并；§5.2 事务替换） ----------
+
+    def _collect_and_store_events(self, trade_date: str) -> Dict[str, Any]:
+        """官方事件优先归并三源，整日事务替换事件与席位。
+
+        - 沪主板 queryAllTradeOpenDate（元、打包席位、abnormalStart/End）；
+        - 科创板 queryKCBTradeInfo（万元→元、unnormalStart/End）；
+        - 深市 XLSX（原因原文、无区间列——period 留空不以披露日伪造）；
+        - 巨潮 getMarketStatisticsData 对账 + 席位补充（沪市与官网事件按
+          (ts_code×事件数) 对账；深市单原因股直接按该股当日唯一事件补席位，
+          多原因股留待核不猜配对）。
+        """
+        events: List[Dict[str, Any]] = []
+        # ---- 沪主板（汇总接口，元） ----
+        sse_main = 0
+        sse_fund = 0
+        for item in self.source.fetch_sse_lhb_summary(trade_date):
+            code = str(item.get('secCode') or '')
+            if not code:
+                continue
+            ts_code = code6_to_ts_code(code)
+            ref_type = str(item.get('refType') or '')
+            security_type = 'fund' if code.startswith('5') else 'stock'
+            reason_code = f'sse_main.r{ref_type}'
+            reason_text = SSE_REF_TYPE_NAMES.get(ref_type, f'披露原因代码{ref_type}')
+            period_start = _compact_date(item.get('abnormalStart'))
+            period_end = _compact_date(item.get('abnormalEnd'))
+            buy_names = _split_packed_names(item.get('branchNameB'))
+            buy_amts = _split_packed_amounts(item.get('branchTxAmtB'))
+            sell_names = _split_packed_names(item.get('branchNameS'))
+            sell_amts = _split_packed_amounts(item.get('branchTxAmtS'))
+            seats = _packed_seats(buy_names, buy_amts, sell_names, sell_amts,
+                                  scale=1.0, source='sse_main')
+            buy_vals = [a for a in buy_amts if a is not None]
+            sell_vals = [a for a in sell_amts if a is not None]
+            buy_amt = round(sum(buy_vals), 2) if buy_vals else None
+            sell_amt = round(sum(sell_vals), 2) if sell_vals else None
+            events.append({
+                'event_id': _event_id(trade_date, 'sse', 'main', ts_code,
+                                      reason_code, period_start, period_end),
+                'trade_date': trade_date, 'exchange': 'sse', 'board': 'main',
+                'ts_code': ts_code, 'security_type': security_type,
+                'reason_code': reason_code, 'reason_text': reason_text,
+                'period_start': period_start, 'period_end': period_end,
+                'sec_tx_amount': _to_float(item.get('secTxAmount')),
+                'buy_amt': buy_amt, 'sell_amt': sell_amt,
+                'net_amt': (round(buy_amt - sell_amt, 2)
+                            if buy_amt is not None and sell_amt is not None else None),
+                'source_keys': {'sse': item.get('fileDate') or trade_date},
+                'seats': seats,
+            })
+            if security_type == 'fund':
+                sse_fund += 1
+            else:
+                sse_main += 1
+        # ---- 科创板（万元→元） ----
+        kcb_n = 0
+        for item in self.source.fetch_sse_kcb_lhb(trade_date):
+            code = str(item.get('secCode') or '')
+            if not code:
+                continue
+            ts_code = code6_to_ts_code(code)
+            ref_type = str(item.get('refType') or '')
+            reason_code = f'sse_kcb.r{ref_type}'
+            reason_text = SSE_KCB_REF_TYPE_NAMES.get(ref_type, f'披露原因代码{ref_type}')
+            period_start = _compact_date(item.get('unnormalStartDate'))
+            period_end = _compact_date(item.get('unnormalEndDate'))
+            buy_names = _split_packed_names(item.get('deptNameB'))
+            buy_amts = _split_packed_amounts(item.get('deptTxAmtB'))
+            sell_names = _split_packed_names(item.get('deptNameS'))
+            sell_amts = _split_packed_amounts(item.get('deptTxAmtS'))
+            seats = _packed_seats(buy_names, buy_amts, sell_names, sell_amts,
+                                  scale=1e4, source='sse_kcb')   # 万元→元
+            buy_vals = [a for a in buy_amts if a is not None]
+            sell_vals = [a for a in sell_amts if a is not None]
+            buy_amt = round(sum(v * 1e4 for v in buy_vals), 2) if buy_vals else None
+            sell_amt = round(sum(v * 1e4 for v in sell_vals), 2) if sell_vals else None
+            region = _to_float(item.get('regionTxAmt'))
+            events.append({
+                'event_id': _event_id(trade_date, 'sse', 'kcb', ts_code,
+                                      reason_code, period_start, period_end),
+                'trade_date': trade_date, 'exchange': 'sse', 'board': 'kcb',
+                'ts_code': ts_code, 'security_type': 'stock',
+                'reason_code': reason_code, 'reason_text': reason_text,
+                'period_start': period_start, 'period_end': period_end,
+                'sec_tx_amount': (round(region * 1e4, 2)
+                                  if region is not None else None),
+                'buy_amt': buy_amt, 'sell_amt': sell_amt,
+                'net_amt': (round(buy_amt - sell_amt, 2)
+                            if buy_amt is not None and sell_amt is not None else None),
+                'source_keys': {'sse_kcb': item.get('fileDate') or trade_date},
+                'seats': seats,
+            })
+            kcb_n += 1
+        # ---- 深市 XLSX（原因原文；无区间） ----
+        szse_n = 0
+        szse_by_code: Dict[str, int] = {}
+        for item in self.source.fetch_szse_lhb_xlsx(trade_date):
+            code = str(item.get('zqdm') or '')
+            if not code:
+                continue
+            ts_code = code6_to_ts_code(code)
+            reason_text = str(item.get('plyy') or '').strip()
+            reason_code = f'szse_main.{reason_text[:48]}'
+            events.append({
+                'event_id': _event_id(trade_date, 'szse', 'main', ts_code,
+                                      reason_code, None, None),
+                'trade_date': trade_date, 'exchange': 'szse', 'board': 'main',
+                'ts_code': ts_code, 'security_type': 'stock',
+                'reason_code': reason_code, 'reason_text': reason_text,
+                'period_start': None, 'period_end': None,
+                'sec_tx_amount': (float(item['cjje'])
+                                  if item.get('cjje') is not None else None),
+                'buy_amt': None, 'sell_amt': None, 'net_amt': None,
+                'source_keys': {'szse_xlsx': item.get('ann_date') or trade_date},
+                'seats': [],
+            })
+            szse_n += 1
+            szse_by_code[ts_code] = szse_by_code.get(ts_code, 0) + 1
+        # ---- 巨潮对账 + 席位补充 ----
+        recon: Dict[str, Any] = {}
+        try:
+            cn = self.cninfo.fetch_lhb_seats(trade_date)
+            cn_events = cn['events']
+            cn_by_code: Dict[str, List[Dict[str, Any]]] = {}
+            for ev in cn_events:
+                code = str(ev.get('secCode') or '')
+                if not code:
+                    continue
+                cn_by_code.setdefault(code, []).append(ev)
+            cn_sse_stock = sum(1 for c in cn_by_code if c.startswith('6')
+                               for _ in cn_by_code[c])
+            recon = {
+                'cninfo_total': cn['total'],
+                'cn_sse_stock_events': cn_sse_stock,
+                'official_sse_stock_events': sse_main + kcb_n,
+                'sse_stock_match': (cn_sse_stock == sse_main + kcb_n),
+            }
+            # 深市单原因股：按该股当日唯一巨潮事件补席位（多原因留待核不猜配对）
+            seat_filled = 0
+            seat_pending = 0
+            for ev in events:
+                if ev['exchange'] != 'szse' or ev.get('seats'):
+                    continue
+                code6 = ev['ts_code'].split('.')[1]
+                cn_rows = cn_by_code.get(code6) or []
+                if len(cn_rows) == 1 and szse_by_code.get(ev['ts_code'], 0) == 1:
+                    ev['seats'] = _cninfo_seats(cn_rows[0], source='cninfo')
+                    ev['buy_amt'] = ev['sell_amt'] = None   # 席位后汇总由读端计算
+                    seat_filled += 1
+                else:
+                    seat_pending += 1
+            recon['szse_seat_filled'] = seat_filled
+            recon['szse_seat_pending'] = seat_pending
+        except (CninfoBlockedError, Exception) as e:   # noqa: B014 巨潮为增强路径，不拖垮官方事件
+            recon = {'error': f'巨潮不可用: {str(e)[:120]}'}
+        # ---- 整日事务替换 ----
+        with self.db.get_connection() as conn:
+            try:
+                self.db.replace_lhb_events_tx(conn, events, trade_date)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return {'events': len(events), 'sse_main': sse_main, 'sse_fund': sse_fund,
+                'sse_kcb': kcb_n, 'szse_main': szse_n, 'recon': recon}
+
     def _write_report(self, result: Dict[str, Any]) -> Optional[str]:
         stats = result['stats']
         lines = [
@@ -464,6 +665,68 @@ def _to_float(value: Any) -> Optional[float]:
         return float(value) if value not in (None, '') else None
     except (TypeError, ValueError):
         return None
+
+
+def _compact_date(value: Any) -> Optional[str]:
+    """任意日期输入 -> yyyyMMdd；空返回 None"""
+    s = str(value or '').strip().replace('-', '')
+    return s[:8] if len(s) == 8 and s.isdigit() else None
+
+
+def _packed_seats(buy_names: List[str], buy_amts: List[Optional[float]],
+                  sell_names: List[str], sell_amts: List[Optional[float]],
+                  scale: float, source: str) -> List[Dict[str, Any]]:
+    """官网打包席位 -> 席位行（§5.2 (event_id,side,rank)；名称不足或金额缺失
+    保留已匹配位置——原始席位数组数量与排名不一致时不 zip 截断、不压缩空位）"""
+    seats: List[Dict[str, Any]] = []
+    for rank, name in enumerate(buy_names, start=1):
+        if not name:
+            continue
+        amt = buy_amts[rank - 1] if rank - 1 < len(buy_amts) else None
+        seats.append({'event_id': None, 'side': 'B', 'seat_rank': rank,
+                      'seat_name': name,
+                      'buy_amount': (round(amt * scale, 2) if amt is not None else None),
+                      'sell_amount': None, 'amount_unit': 'yuan', 'source': source})
+    for rank, name in enumerate(sell_names, start=1):
+        if not name:
+            continue
+        amt = sell_amts[rank - 1] if rank - 1 < len(sell_amts) else None
+        seats.append({'event_id': None, 'side': 'S', 'seat_rank': rank,
+                      'seat_name': name,
+                      'buy_amount': None,
+                      'sell_amount': (round(amt * scale, 2) if amt is not None else None),
+                      'amount_unit': 'yuan', 'source': source})
+    return seats
+
+
+def _cninfo_seats(ev: Dict[str, Any], source: str) -> List[Dict[str, Any]]:
+    """巨潮事件 detail -> 席位行（每位置买方/卖方成对展开，元，千分位清洗）"""
+    from decimal import Decimal
+
+    def _d(v: Any) -> Optional[Decimal]:
+        if v is None:
+            return None
+        s = str(v).replace(',', '').strip()
+        try:
+            return Decimal(s)
+        except Exception:
+            return None
+
+    seats: List[Dict[str, Any]] = []
+    for rank, pos in enumerate(ev.get('detail') or [], start=1):
+        bname = str(pos.get('buyOrgName') or '').strip()
+        sname = str(pos.get('sellOrgName') or '').strip()
+        if bname:
+            seats.append({'event_id': None, 'side': 'B', 'seat_rank': rank,
+                          'seat_name': bname, 'buy_amount': _d(pos.get('buyOrgBuyTotal')),
+                          'sell_amount': _d(pos.get('buyOrgSellTotal')),
+                          'amount_unit': 'yuan', 'source': source})
+        if sname:
+            seats.append({'event_id': None, 'side': 'S', 'seat_rank': rank,
+                          'seat_name': sname, 'buy_amount': _d(pos.get('sellOrgBuyTotal')),
+                          'sell_amount': _d(pos.get('sellOrgSellTotal')),
+                          'amount_unit': 'yuan', 'source': source})
+    return seats
 
 
 def _split_packed_names(value: Any) -> List[str]:
